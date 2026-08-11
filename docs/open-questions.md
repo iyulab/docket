@@ -61,12 +61,11 @@
 42. 인증 방식과 워커별 토큰 발급/갱신 주기
 43. 전송 구간 보안(사설망 전제 vs 인증 필수)
 44. 토픽 접근 제어(아무 워커나 아무 토픽을 담당한다고 신고 가능한지)
-45. 구현 언어와 런타임(로컬 데몬 vs 서버, 요구가 다르므로 같은 언어일 필요는 없음)
-46. 배포 채널(crates.io / npm / NuGet / 단일 실행 파일)
-47. 서버 배포 형태(도커 이미지 제공 여부)
-48. 크로스 플랫폼 범위(Windows 지원 여부는 파일명·경로 규칙에 직접 영향)
-49. 연결정보 표시 형태
-50. M3/M4의 마일스톤별 완료 기준 세부화 — M1/M2는 [roadmap.md](roadmap.md)·[quality-ramp.md](quality-ramp.md)로 구체화됐으나 M3(콘솔)·M4(안전장치)는 아직 추상적
+45. 배포 채널(crates.io / npm / 단일 실행 파일)
+46. 서버 배포 형태(도커 이미지 제공 여부)
+47. 크로스 플랫폼 범위(Windows 지원 여부는 파일명·경로 규칙에 직접 영향)
+48. 연결정보 표시 형태
+49. M3/M4의 마일스톤별 완료 기준 세부화 — M1/M2는 [roadmap.md](roadmap.md)·[quality-ramp.md](quality-ramp.md)로 구체화됐으나 M3(콘솔)·M4(안전장치)는 아직 추상적
 
 ## 해소된 항목 (참고용, 더 이상 미결 아님)
 
@@ -74,3 +73,4 @@
 - ~~공개 범위~~ → [ADR-0005](decisions/ADR-0005-public-scope.md)
 - ~~복수 워커 협업 클레임 허용 여부~~ → 미허용으로 확정, [architecture.md](architecture.md)
 - ~~저장소 엔진~~ → [ADR-0004](decisions/ADR-0004-sqlite-storage.md)
+- ~~구현 언어와 런타임~~ → core+cc는 확정, mcp는 잠정, [ADR-0007](decisions/ADR-0007-language-runtime.md)

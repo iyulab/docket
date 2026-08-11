@@ -32,6 +32,13 @@
 - 영향: L0 게이트([quality-ramp.md](quality-ramp.md))
 - 선행: 없음
 
+### [B-10] SPIKE Rust MCP SDK(`rmcp` 등) 성숙도 확인
+- 질문: 공식/커뮤니티 Rust MCP SDK가 실사용 가능한 수준인가? TS SDK 대비 기능 격차는?
+- 타임박스: 1시간
+- 산출: [ADR-0007](decisions/ADR-0007-language-runtime.md) mcp 언어를 잠정→확정으로 갱신
+- 영향: ADR-0007, mcp 계층 툴체인 통일 여부
+- 선행: 없음
+
 ## 다음
 
 ### [B-07] ENABLER M2 — mcp+cc 구현

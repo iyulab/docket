@@ -7,13 +7,14 @@
 ## M1 — 코어 (첫 슬라이스)
 
 **범위**
+- 언어: Rust
 - 코어 API 최소셋: 워커 등록, 아이템 생성(file), 클레임, submit(→resolved), 요청자 승인(→closed, resolution=done)
 - 저장소: SQLite
 - 인터페이스: HTTP API만. mcp/cc/console 없음. 사람이 curl로 워커를 흉내낸다.
 
 **완료 판정**: 터미널 두 개에서 서로 다른 "워커"인 척 curl로 조작한다. 워커A가 토픽 X 앞으로 아이템 생성 → 워커B가 X를 담당 등록 후 `list`로 발견 → claim → submit → 워커A가 승인(close). SQLite에 상태 전이가 정확히 기록된다. 동시에 두 워커가 같은 아이템을 claim 시도하면 하나만 성공한다(클레임 배타성 검증).
 
-근거: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [quality-ramp.md](quality-ramp.md) L0.
+근거: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisions/ADR-0007-language-runtime.md), [quality-ramp.md](quality-ramp.md) L0.
 
 ## M2 — 존재 증명
 
@@ -27,7 +28,7 @@
 
 ## M4 — 안전장치와 다중 머신
 
-예산 전체([open-questions.md](open-questions.md) #33~#39), 인증(#41~#43), 머신 간 라우팅, 배포 채널(#50~#54).
+예산 전체([open-questions.md](open-questions.md) #33~#39), 인증(#41~#43), 머신 간 라우팅, 배포 채널(#45~#48).
 
 ## 로드맵 밖
 
