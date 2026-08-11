@@ -29,7 +29,7 @@ Completion rate has no way to be measured before M3. Until then, "is this still 
 
 | Metric | What it measures | How it's measured | Current | Target | By when |
 |---|---|---|---|---|---|
-| Adoption rate | Share of S1~S6 ([vision.md](vision.md)) coordination cases that go through docket | Numerator = docket items created/claimed, denominator = manually-handled cases (measurement method TBD, [B-02](backlog.md)) | 0 (not implemented) | ≥50% | 4 weeks after M3 ships |
+| Adoption rate | Share of S1~S6 ([vision.md](vision.md)) coordination cases that go through docket | Numerator = docket items created/claimed, denominator = manually-handled cases logged by hand (procedure settled, [B-02](backlog.md)) | 0 (not implemented) | ≥50% | 4 weeks after M3 ships |
 | Issue burndown | Trend in the count of open items | Weekly `(items closed) - (items created)` | 0 | ≥0 in at least 3 of 4 weeks | 4 weeks after M3 ships |
 
 **Stop-loss criteria**: at the 4-week observation point after M3 ships, if **coordination cases themselves fall below 1 per week**, or **burndown is negative for all 4 weeks**, the project is shelved.

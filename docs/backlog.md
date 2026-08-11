@@ -13,19 +13,11 @@ Items with no connection (not tied to any decision, assumption, or metric) don't
 - Impact: [open-questions.md](open-questions.md) #19 (stall threshold), [goals.md](goals.md) A-2
 - Prerequisite: none, can start right now
 
-### [B-01] SPIKE Survey similar products/frameworks
-- Question: do existing tools already handle multi-agent/headless-worker coordination? How does their status-tracking and claiming approach differ from docket's?
-- Timebox: 1 hour
-- Output: updated table in [landscape.md](landscape.md)
-- Impact: re-validates the differentiation hypothesis in [landscape.md](landscape.md)
-- Prerequisite: none
+### ~~[B-01] SPIKE Survey similar products/frameworks~~ — done
+Found Swarm Protocol, Hermes Kanban, Code Conductor, Vibe Kanban — see [landscape.md](landscape.md). Differentiation hypothesis holds, no re-validation forced.
 
-### [B-02] EVAL Design a measurement method for the adoption-rate denominator
-- Question: how do we record manually-coordinated cases that didn't go through docket?
-- Timebox: 30 minutes
-- Output: one settled measurement procedure
-- Impact: whether the adoption-rate metric in [goals.md](goals.md) is actually measurable
-- Prerequisite: none
+### ~~[B-02] EVAL Design a measurement method for the adoption-rate denominator~~ — done
+**Procedure**: an append-only log the operator keeps by hand — one line per manually-coordinated case that could have gone through docket but didn't: `YYYY-MM-DD | one-line description | topic it would have belonged to`. Weekly denominator = line count added that week. Deliberately the simplest thing that could work (matches the top-priority quality attribute, [principles.md](principles.md)); no new tooling. This only produces numbers once the operator actually keeps the log — same nature as [B-04](backlog.md)'s self-observation, so it's the operator's habit to run, not something implementation settles further. See [goals.md](goals.md)'s Adoption rate row.
 
 ### ~~[B-06] ENABLER M1 core implementation~~ — done
 `docket-core`'s domain/store/HTTP layers exist; the M1 completion criteria ([roadmap.md](roadmap.md#m1--core-first-slice)) pass both via `cargo test` and a live two-worker `curl` walkthrough (see README "Running it").
