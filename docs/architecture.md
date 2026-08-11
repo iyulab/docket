@@ -32,7 +32,7 @@ Since each layer has exactly one consumer, we don't split it across repos. Inste
 The core knows exactly four concepts.
 
 - **worker** — an entity that can process work. The core doesn't know whether it's a human, an AI session, or a script. It reports which topics it can own, and has an online/offline status.
-- **topic** — the target of work. To the core it's an opaque hierarchical path. The core knows exactly two things about it: (1) it's a path split by a separator, (2) prefix matching is possible (a worker that owns `iyulab/*` becomes a candidate for an item in front of `iyulab/ironhive`). The meaning of each segment is defined by the application — the core doesn't know the word "repo."
+- **topic** — the target of work. To the core it's an opaque hierarchical path. The core knows exactly two things about it: (1) it's a path split by a separator — `/`, settled during M1 implementation — (2) prefix matching is possible (a worker that owns `iyulab` becomes a candidate for an item in front of `iyulab/ironhive`, but not `iyulab2/x`; segment boundaries matter). The meaning of each segment is defined by the application — the core doesn't know the word "repo."
 - **item** — a single unit of work waiting to be processed. Created in front of a topic; it's fine for it to have no owner at creation time.
 - **claim** — a worker picking up an item to become its owner. **Exclusive** — concurrent claims by multiple workers aren't allowed (single-claim only, settled — [ADR-0002](decisions/ADR-0002-four-layer-architecture.md)).
 

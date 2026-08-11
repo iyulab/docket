@@ -9,7 +9,7 @@ The timing tags are a default inferred from the roadmap structure, since no expl
 ## M1 (core) timing — item, lifecycle, and safeguard values
 
 1. Monorepo tooling — the package manager/workspace question has narrowed to Cargo workspace ([ADR-0007](decisions/ADR-0007-language-runtime.md)), **only the dependency-direction-checking tool is still undecided**
-2. Topic separator and its valid character set
+2. Topic segment valid character set — separator settled as `/` ([architecture.md](architecture.md)) once `docket-core`'s prefix matching needed a concrete implementation; no character-set validation exists yet
 3. Whether to support tag/wildcard mid-path matching beyond prefix matching
 4. Max length for `title`
 5. Max size for `body` and how overflow is handled
