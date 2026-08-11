@@ -36,5 +36,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Build binaries
+        # docket-mcp's tests spawn the real docket-core binary; `cargo test`
+        # alone only builds test-harness executables, not plain `cargo run`
+        # binaries, so it won't produce docket-core.exe on its own.
+        run: cargo build --workspace --bins
+
       - name: Test
         run: cargo test --workspace
