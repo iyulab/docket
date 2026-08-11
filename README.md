@@ -17,7 +17,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 ## Current status
 
-**M1 in progress** ([roadmap.md](docs/roadmap.md)) — `docket-core`'s domain model, SQLite-backed store, and HTTP API exist and are covered by tests. No `docket-mcp`/`docket-cc`/`docket-console` yet; the only way to act as a worker right now is `curl`.
+**M1 done, M2 in progress** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API) and `docket-mcp` (exposes the same operations as MCP tools) exist and are covered by tests. No `docket-cc`/`docket-console` yet — without `docket-cc`'s hooks, an AI worker has to be told to call the MCP tools explicitly rather than being notified automatically.
 
 ## Running it
 
@@ -45,6 +45,24 @@ curl -X POST localhost:8420/items/<id>/approve
 ```
 
 If two workers race to claim the same item, exactly one gets `200`; the other gets `409`.
+
+### As an MCP server
+
+`docket-mcp` exposes `register_worker`/`create_item`/`list_items`/`claim_item`/`submit_item`/`approve_item` as MCP tools, talking to `docket-core` over the same HTTP API (`DOCKET_CORE_URL`, default `http://127.0.0.1:8420` — it never links `docket-core` as a library, see [architecture.md](docs/architecture.md)). Add it to an MCP client's config as a stdio server:
+
+```json
+{
+  "mcpServers": {
+    "docket": {
+      "command": "cargo",
+      "args": ["run", "-p", "docket-mcp"],
+      "env": { "DOCKET_CORE_URL": "http://127.0.0.1:8420" }
+    }
+  }
+}
+```
+
+`docket-core` must already be running (see above). This is the manual-MCP-calls loop M2's completion criteria describes ([roadmap.md](docs/roadmap.md#m2--proof-of-existence)) — no hooks or automatic notifications yet, so a session has to be told to call these tools.
 
 ## Backlog
 

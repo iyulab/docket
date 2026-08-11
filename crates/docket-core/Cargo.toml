@@ -1,7 +1,8 @@
 [package]
 name = "docket-core"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 axum = "0.8.9"

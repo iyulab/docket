@@ -45,8 +45,8 @@ The timing tags are a default inferred from the roadmap structure, since no expl
 32. Notification message format
 33. Whether to notify about unclaimed items too, or only claimed ones
 34. How strongly worded the injected instruction should be on an extension
-35. Cap on the number of MCP tools
-36. Wording for each MCP tool's description
+35. Cap on the number of MCP tools — currently 6, one per `docket-core` operation (register/create/list/claim/submit/approve); no cap policy decided, this is just where it happens to sit today
+36. Wording for each MCP tool's description — `docket-mcp`'s current tool descriptions are a first pass (forced by shipping the tools at all, same as the topic separator in #2), not a settled style guide
 37. Whether `decline` (refusing a request) is a separate tool, or a reason passed to `release`
 38. Real-time stream protocol (WebSocket / SSE / long polling)
 

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/docket-core"]
+members = ["crates/docket-core", "crates/docket-mcp"]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"

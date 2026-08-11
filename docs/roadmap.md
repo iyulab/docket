@@ -24,6 +24,8 @@ Rationale: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisi
 
 Hook-driven active notifications (see [open-questions.md](open-questions.md) #31~34) aren't required at this stage — it must be possible to complete the loop using only manual MCP calls ([backlog.md](backlog.md), overlaps with the A-1 validation).
 
+**Status**: `docket-mcp` done (register/create/list/claim/submit/approve as MCP tools, an HTTP client of `docket-core` — see README "As an MCP server"). `docket-cc` not started, see [backlog.md](backlog.md) [B-07].
+
 ## M3 — Console
 
 The board, stall detection, the full set of admin operations. Especially "refine" (see [vision.md](vision.md) S5) — this is the console's reason for existing. This is also where adoption-rate/burndown measurement actually starts ([goals.md](goals.md)).
