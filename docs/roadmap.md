@@ -14,6 +14,8 @@ The further-out milestones are more abstract; the nearer ones are more concrete.
 
 **Completion criteria**: from two terminals, act as two different "workers" using curl. Worker A creates an item in front of topic X → Worker B registers as owning X and discovers it via `list` → claims it → submits it → Worker A approves it (closes it). SQLite records the state transitions exactly. If two workers try to claim the same item at the same time, only one succeeds (verifies claim exclusivity).
 
+**Status**: met — see `docket-core`'s test suite and the README "Running it" walkthrough.
+
 Rationale: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisions/ADR-0007-language-runtime.md), [quality-ramp.md](quality-ramp.md) L0.
 
 ## M2 — Proof of existence

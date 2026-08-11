@@ -72,7 +72,7 @@ The timing tags are a default inferred from the roadmap structure, since no expl
 Items 1~49 above came out of the v0 interview session. The two below were newly discovered later, in a `/iyu:backlog-discover` run (premortem). Numbering continues (so existing cross-references don't shift), tagged separately by timing.
 
 50. **[M4 timing]** Core server uptime location and failure recovery — which machine hosts the core server on an ongoing basis? How does coordination recover if that machine goes down or reboots? This is where the single-instance SQLite premise ([ADR-0004](decisions/ADR-0004-sqlite-storage.md)) meets the "multiple machines participate in coordination" premise ([vision.md](vision.md)). Decide together with the distribution channel/form (#45~46). → [B-11](backlog.md)
-51. **[M1 timing, provisional until M4]** Default HTTP API binding during the pre-auth window — until auth (#42~43) is in place, should the core HTTP API default to localhost/private-network only, and what should the default be? The rationale for excluding prompt-injection defense from v1 ([coverage.md](coverage.md)) rests on a "closed environment" assumption, so from the moment M1 actually stands up that API, the code arguably needs to minimally reinforce that assumption. → [B-12](backlog.md)
+51. ~~Default HTTP API binding during the pre-auth window~~ — resolved for now: `docket-core` defaults to `127.0.0.1` (`DOCKET_BIND` env override). Still provisional until M4 auth lands, see [B-12](backlog.md).
 
 ## Resolved items (for reference, no longer open)
 

@@ -15,7 +15,34 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 ## Current status
 
-**v0 alignment complete, pre-implementation.** The domain model, layer boundaries, success metrics, and stop-loss criteria are all aligned; there's no code yet. The first slice is M1 in [roadmap.md](docs/roadmap.md).
+**M1 in progress** ([roadmap.md](docs/roadmap.md)) — `docket-core`'s domain model, SQLite-backed store, and HTTP API exist and are covered by tests. No `docket-mcp`/`docket-cc`/`docket-console` yet; the only way to act as a worker right now is `curl`.
+
+## Running it
+
+```
+cargo run -p docket-core
+```
+
+Binds to `127.0.0.1:8420` by default — no auth exists yet, so this keeps the API off the network until M4 adds it ([open-questions.md](docs/open-questions.md) #51). Override with `DOCKET_BIND` / `DOCKET_PORT`. Opens/creates a SQLite file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Then, acting as two workers from two terminals:
+
+```
+JSON='-H Content-Type:application/json'
+
+# create an item in front of a topic
+curl -X POST localhost:8420/items $JSON \
+  -d '{"topic":"iyulab/docket","title":"fix the thing"}'
+
+# register as owning that topic, then discover the item via list
+curl -X POST localhost:8420/workers $JSON -d '{"id":"w1","topics":["iyulab"]}'
+curl "localhost:8420/items?owned_by=w1&state=open"
+
+# claim it, submit it, and have the requester approve it
+curl -X POST localhost:8420/items/<id>/claim  $JSON -d '{"worker_id":"w1"}'
+curl -X POST localhost:8420/items/<id>/submit $JSON -d '{"worker_id":"w1"}'
+curl -X POST localhost:8420/items/<id>/approve
+```
+
+If two workers race to claim the same item, exactly one gets `200`; the other gets `409`.
 
 ## Backlog
 

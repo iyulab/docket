@@ -109,6 +109,24 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
+    pub fn get_worker(&self, id: &str) -> Result<Worker> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT id, topics, online FROM workers WHERE id = ?1",
+            params![id],
+            |row| {
+                let topics_json: String = row.get(1)?;
+                Ok(Worker {
+                    id: row.get(0)?,
+                    topics: serde_json::from_str(&topics_json).unwrap_or_default(),
+                    online: row.get::<_, i64>(2)? != 0,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::NotFound)
+    }
+
     /// Lists items, most recently updated first, optionally filtered by
     /// topic (exact match — prefix matching is a worker-side concern, see
     /// [`crate::domain::topic_matches`]) and/or state.

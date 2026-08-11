@@ -27,10 +27,8 @@ Items with no connection (not tied to any decision, assumption, or metric) don't
 - Impact: whether the adoption-rate metric in [goals.md](goals.md) is actually measurable
 - Prerequisite: none
 
-### [B-06] ENABLER M1 core implementation
-- Output: completion of the first slice in [roadmap.md](roadmap.md)
-- Impact: the L0 gate ([quality-ramp.md](quality-ramp.md))
-- Prerequisite: none
+### ~~[B-06] ENABLER M1 core implementation~~ — done
+`docket-core`'s domain/store/HTTP layers exist; the M1 completion criteria ([roadmap.md](roadmap.md#m1--core-first-slice)) pass both via `cargo test` and a live two-worker `curl` walkthrough (see README "Running it").
 
 ### ~~[B-10] SPIKE Check maturity of Rust MCP SDKs (`rmcp`, etc.)~~ — done
 Confirmed the official SDK (`rmcp`) exists and is mature enough. mcp is also settled on Rust. → [ADR-0007](decisions/ADR-0007-language-runtime.md)
@@ -68,12 +66,8 @@ Confirmed the official SDK (`rmcp`) exists and is mature enough. mcp is also set
 - Impact: the premise behind [vision.md](vision.md) S4 (cross-machine handoff) itself, the M4 deployment decision ([open-questions.md](open-questions.md) #45~48)
 - Prerequisite: none (can start design discussion now, independent of M1)
 
-### [B-12] ENABLER Restrict M1's HTTP API's default binding during the pre-auth window
-- Question: until auth (#42~43) is in place, should the core HTTP API default to localhost/private-network only — and what should that default be?
-- Timebox: alongside M1 scaffolding (a lightweight decision)
-- Output: resolves [open-questions.md](open-questions.md) #51, the default reflected in the M1 implementation + a note in README/AGENTS.md
-- Impact: minimally hardens the "closed environment" assumption in [coverage.md](coverage.md) at the code level, consistency with the public-scope decision in [ADR-0005](decisions/ADR-0005-public-scope.md)
-- Prerequisite: [B-06](backlog.md) M1 core implementation (the default binding can't be set before the server exists)
+### ~~[B-12] ENABLER Restrict M1's HTTP API's default binding during the pre-auth window~~ — done
+Defaults to `127.0.0.1`, overridable via `DOCKET_BIND`. Resolves [open-questions.md](open-questions.md) #51 (provisional until M4 auth); documented in README "Running it".
 
 ## Later
 
