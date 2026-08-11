@@ -61,6 +61,20 @@
 - 영향: 손절선 판정 가능 여부
 - 선행: B-02, B-07
 
+### [B-11] EVAL 서버 상시가동 전략 설계
+- 질문: 어느 머신이 코어 서버를 상시 호스팅하는가? 그 머신이 꺼지거나 재부팅되면 조정은 어떻게 복구되는가?
+- 타임박스: 미정(M4 배포 설계와 함께 다룰 규모)
+- 산출: [open-questions.md](open-questions.md) #50 해소, 상시가동 전략 1개 확정
+- 영향: [vision.md](vision.md) S4(머신 간 핸드오프) 시나리오의 전제 자체, M4 배포 결정([open-questions.md](open-questions.md) #45~48)
+- 선행: 없음(M1과 무관하게 지금 설계 논의 시작 가능)
+
+### [B-12] ENABLER M1 HTTP API 기본 바인딩을 인증 공백 기간 동안 제한
+- 질문: 인증(#42~43)이 갖춰지기 전까지 코어 HTTP API의 기본 바인딩을 무엇으로 할 것인가(예: localhost/사설망 제한)?
+- 타임박스: M1 스캐폴딩과 동시(경량 결정)
+- 산출: [open-questions.md](open-questions.md) #51 해소, M1 구현에 기본값 반영 + README/AGENTS.md에 안내 문구
+- 영향: [coverage.md](coverage.md)의 "폐쇄 환경" 가정을 코드 수준에서 최소 보강, [ADR-0005](decisions/ADR-0005-public-scope.md) 공개 스코프와의 정합
+- 선행: B-06(M1 코어 구현 — 서버가 있어야 바인딩 기본값을 정할 수 있음)
+
 ## 나중
 
 ### [B-08] GATE L1 통과 판정
