@@ -27,7 +27,7 @@ Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 | Item | Condition | Related doc |
 |---|---|---|
-| Multi-user (team-scale) | Revisit once the §12.1 auth approach is settled | [ADR-0006](decisions/ADR-0006-single-owner-later.md) |
+| Multi-user (team-scale) | Revisit once the auth approach is settled ([open-questions.md](open-questions.md) #42~44) | [ADR-0006](decisions/ADR-0006-single-owner-later.md) |
 | Other agent runtimes (e.g. `aims`) | The structure already supports adding just layer 3. Once real demand shows up | [architecture.md](architecture.md) extension points |
 | Human workers (a person picking up items from a phone) | Possible with layer-4-only extension, no core changes. Once demand shows up | [architecture.md](architecture.md) |
 | Standardizing non-repo topic namespaces | Once topics that aren't repos (org knowledge, machines, environments) actually start being used | [open-questions.md](open-questions.md) #8 |

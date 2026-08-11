@@ -4,9 +4,9 @@ Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 ## North star
 
-**The share of items completed without human intervention.** This is the lagging indicator that most directly inverts the original trigger from §1.1 ("a human is the bottleneck").
+**The share of items completed without human intervention.** This is the lagging indicator that most directly inverts the bottleneck problem this project starts from (see [vision.md](vision.md)'s "Why now").
 
-**Operational definition (relaxed)**: on the `open → claimed → resolved → closed(resolution=done)` path, an admin's "refine" (§11.4) counts as normal operation. Only signals that the workflow itself failed — like "force-assign" or "force-close" — count as "intervention occurred."
+**Operational definition (relaxed)**: on the `open → claimed → resolved → closed(resolution=done)` path, an admin's "refine" (see [vision.md](vision.md) S5) counts as normal operation. Only signals that the workflow itself failed — like "force-assign" or "force-close" — count as "intervention occurred."
 
 Measuring this requires per-item admin-intervention history to accumulate in the core, so it becomes the primary metric only after M3 (console) ([ADR-0002](decisions/ADR-0002-four-layer-architecture.md), [B-09](backlog.md)).
 
@@ -19,7 +19,7 @@ North star: share of items completed without human intervention ↑
       └─ Deliverables (backlog leaves):
          ├─ M1 core (worker/item/claim state machine) — B-06
          ├─ M2 mcp+cc (two sessions hand an item back and forth to completion) — B-07
-         ├─ M3 the console's "refine" feature (§11.4, the single most important feature)
+         ├─ M3 the console's "refine" feature (see [vision.md](vision.md) S5 — the single most important feature)
          └─ D-11 measurement pipeline — B-09
 ```
 
@@ -42,4 +42,4 @@ Completion rate (quality) is not a stop-loss criterion — being used but produc
 |---|---|---|---|
 | A-1 | Async coordination is good enough | Ends up "too slow to use," like the email model — hits the stop-loss criteria immediately | [B-03](backlog.md) — observed during real M2 use |
 | A-2 | Sessions spin up often enough that abandoned items eventually get picked up | Only items that never get picked up pile up on the board | [B-04](backlog.md) — 1-week self-observation |
-| A-3 | Budget/extension mechanisms actually stop runaway loops | Tokens quietly get exhausted (§17 risk) | [B-05](backlog.md) — M1~M2 integration test |
+| A-3 | Budget/extension mechanisms actually stop runaway loops | Tokens quietly get exhausted | [B-05](backlog.md) — M1~M2 integration test |

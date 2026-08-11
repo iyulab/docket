@@ -12,7 +12,7 @@ The initial design used an `open → claimed → review → done → dropped` st
 - **Rename only (`review→resolved`, `done→closed`), keep `dropped`**: less ambiguous, but "why did it close" (normal completion/duplicate/declined/invalid) still stays mixed into the state value, so the state count keeps growing over time.
 - **Split `state`/`resolution` + rename (adopted)**: Bugzilla/Jira convention. State expresses only the workflow stage; the reason it closed is pulled out into a separate field. Each admin operation (remove/merge/force-close/approve) gets exactly one clear `resolution` value.
 
-The rename itself is adopted, but the external review's proposed `resolution` mapping (remove→`wontfix`, force-close→`invalid`) didn't match §11.4's definitions of those operations, so it was corrected — "remove" is a request that was invalid from the start (`invalid`), while "force-close" was once valid but is no longer relevant (`wontfix`).
+The rename itself is adopted, but the external review's proposed `resolution` mapping (remove→`wontfix`, force-close→`invalid`) didn't match this project's own definitions of those admin operations (see [architecture.md](../architecture.md)'s admin-operation mapping table), so it was corrected — "remove" is a request that was invalid from the start (`invalid`), while "force-close" was once valid but is no longer relevant (`wontfix`).
 
 `expired` isn't included in this schema — automatic claim expiry and automatic stall-closing policy are both still undecided, and adding the field now would let the schema implicitly settle a decision that hasn't actually been made.
 

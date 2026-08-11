@@ -4,7 +4,7 @@ Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 Things to decide during implementation. Future sessions must not casually settle an item on this list on their own ([AGENTS.md](../AGENTS.md)). Once an item is resolved, it's removed from here and moves to [architecture.md](architecture.md) / [decisions/](decisions/).
 
-The timing tags are a default inferred from the roadmap structure, since the original planning document didn't specify explicit triggers — adjust as needed once work actually starts.
+The timing tags are a default inferred from the roadmap structure, since no explicit triggers were specified up front — adjust as needed once work actually starts.
 
 ## M1 (core) timing — item, lifecycle, and safeguard values
 
@@ -53,7 +53,7 @@ The timing tags are a default inferred from the roadmap structure, since the ori
 ## M3 (console) timing
 
 39. Default board column layout (by state vs. by topic)
-40. Concurrency handling when an admin edits an in-progress item — the original planning document proposed "push a change notification to the owning worker" as a recommended approach, but this hasn't been confirmed. Rationale: since admin intervention already implies something went wrong, halting the in-progress work is arguably the right outcome anyway
+40. Concurrency handling when an admin edits an in-progress item — one candidate raised during initial design discussion: push a change notification to the owning worker. Not yet confirmed. Rationale for leaning that way: since admin intervention already implies something went wrong, halting the in-progress work is arguably the right outcome anyway
 
 ## M4 (safeguards/deployment) timing
 

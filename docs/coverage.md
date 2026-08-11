@@ -10,11 +10,11 @@ A capability × case-type matrix. Only the cells required for v1 are marked; eve
 | Claiming | **v1** | **v1** (concurrent-claim exclusivity) | Not started (reclaiming after a dead worker → L2) | Not started |
 | State transition (resolved/closed) | **v1** | Not started | Not started | — |
 | Topic matching (prefix) | **v1** | Not started (empty topic, casing, etc.) | — | — |
-| Admin intervention — refine | **v1** (§11.4, "the single most important feature") | Not started | — | — |
+| Admin intervention — refine | **v1** (see [vision.md](vision.md) S5 — "the single most important feature") | Not started | — | — |
 | Admin intervention — everything else (force-assign/force-close/merge/pause) | Not started (L2~L3) | — | — | — |
 | Stall detection | Not started (L3, needs the console) | — | — | — |
 | Question (`ask`) | **v1** (S3 scenario) | Not started (multiple owners) | — | — |
-| Prompt-injection defense | — | — | — | Not started (deferred to L2~L3, still tracked as §17 risk) |
+| Prompt-injection defense | — | — | — | Not started (deferred to L2~L3, still tracked as a risk) |
 
 **v1-required (6 cells)**: item creation/typical, claiming/typical+boundary, state transition/typical, topic matching/typical, refine/typical, question/typical. These six line up exactly with the completion criteria for [roadmap.md](roadmap.md) M2.
 

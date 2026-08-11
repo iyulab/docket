@@ -17,7 +17,7 @@ Start with a single-instance SQLite.
 
 ## Consequences
 
-**Gained**: installation simplicity (§15's target experience — spin up one server and you're done). Matches the top-priority quality attribute.
+**Gained**: installation simplicity (the target install experience — spin up one server and you're done, see [ADR-0007](ADR-0007-language-runtime.md)). Matches the top-priority quality attribute.
 
 **Given up**: multiple servers / horizontal scaling isn't possible right away with this decision. If multi-user ([ADR-0006](ADR-0006-single-owner-later.md)) becomes real, this decision needs revisiting alongside it.
 

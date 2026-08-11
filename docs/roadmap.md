@@ -20,11 +20,11 @@ Rationale: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisi
 
 `docket-mcp` + `docket-cc`. Two sessions actually hand items back and forth to manually complete [vision.md](vision.md) S1~S6. Once this works, the product exists.
 
-Hook-driven active notifications (§10) aren't required at this stage — it must be possible to complete the loop using only manual MCP calls ([backlog.md](backlog.md), overlaps with the A-1 validation).
+Hook-driven active notifications (see [open-questions.md](open-questions.md) #31~34) aren't required at this stage — it must be possible to complete the loop using only manual MCP calls ([backlog.md](backlog.md), overlaps with the A-1 validation).
 
 ## M3 — Console
 
-The board, stall detection, the full set of admin operations. Especially "refine" (§11.4) — this is the console's reason for existing. This is also where adoption-rate/burndown measurement actually starts ([goals.md](goals.md)).
+The board, stall detection, the full set of admin operations. Especially "refine" (see [vision.md](vision.md) S5) — this is the console's reason for existing. This is also where adoption-rate/burndown measurement actually starts ([goals.md](goals.md)).
 
 ## M4 — Safeguards and multiple machines
 

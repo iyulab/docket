@@ -4,7 +4,7 @@ Status: v0 alignment snapshot | 2026-08-11 | settled (reflects the B-10 SPIKE re
 
 ## Context
 
-Implementation language and runtime were originally classified as an M4 (deployment) decision ([open-questions.md](../open-questions.md)), but once it became clear that actually starting to write `docket-core` (M1) requires settling the language first, the timing was moved up. The original planning document's §15 already stated: "the local daemon needs low installation friction, and the server needs to be good at running continuously. The requirements differ, so they don't need to be the same language."
+Implementation language and runtime were originally classified as an M4 (deployment) decision ([open-questions.md](../open-questions.md)), but once it became clear that actually starting to write `docket-core` (M1) requires settling the language first, the timing was moved up. The initial design discussion had already noted the target install experience: the local daemon needs low installation friction, and the server needs to be good at running continuously — since the requirements differ, they don't need to be the same language.
 
 ## Options considered and trade-offs
 
@@ -20,7 +20,7 @@ Implementation language and runtime were originally classified as an M4 (deploym
 
 ## Consequences
 
-**Gained**: all three layers (core/cc/mcp) ship as pure native binaries, matching §15's target experience ("a single install command"). The toolchain unifies on one (Cargo), which effectively narrows [open-questions.md](../open-questions.md) #1 (monorepo tooling) down to a Cargo workspace — though the "dependency-checking tool" itself (§3.3, layer-enforcement mechanism 1) still needs to be chosen.
+**Gained**: all three layers (core/cc/mcp) ship as pure native binaries, matching the installation-friction goal noted above ("a single install command"). The toolchain unifies on one (Cargo), which effectively narrows [open-questions.md](../open-questions.md) #1 (monorepo tooling) down to a Cargo workspace — though the "dependency-checking tool" itself (see [architecture.md](../architecture.md)'s "Single repo, enforced by mechanism," item 1) still needs to be chosen.
 
 **Given up**: the MCP ecosystem's reference material and examples still skew TS-centric, so when something's blocking, there may be less to reference than the TS SDK offers. If SSE transport turns out to be needed (e.g. a specific client that doesn't support streamable HTTP), that's the point to revisit this.
 
