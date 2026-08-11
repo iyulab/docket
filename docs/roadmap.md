@@ -24,7 +24,7 @@ Rationale: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisi
 
 Hook-driven active notifications (see [open-questions.md](open-questions.md) #31~34) aren't required at this stage — it must be possible to complete the loop using only manual MCP calls ([backlog.md](backlog.md), overlaps with the A-1 validation).
 
-**Status**: `docket-mcp` done (register/create/list/claim/submit/approve as MCP tools, an HTTP client of `docket-core` — see README "As an MCP server"). `docket-cc` not started, see [backlog.md](backlog.md) [B-07].
+**Status**: `docket-mcp` done (register/create/list/claim/submit/approve as MCP tools, an HTTP client of `docket-core` — see README "As an MCP server"). `docket-cc` not started — file representation location settled ([ADR-0008](decisions/ADR-0008-file-representation-location.md)), so scaffolding can begin, see [backlog.md](backlog.md) [B-07].
 
 ## M3 — Console
 

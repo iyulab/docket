@@ -31,7 +31,7 @@ Confirmed the official SDK (`rmcp`) exists and is mature enough. mcp is also set
 - Output: an item completed end to end between two sessions
 - Impact: the L0/L1 gate, the starting point for measuring the north star / stop-loss criteria ([goals.md](goals.md))
 - Prerequisite: B-06
-- **Progress**: `docket-mcp` done — an rmcp stdio server exposing register/create/list/claim/submit/approve as MCP tools, HTTP client of `docket-core` (never links it as a library). Verified with a real MCP client handshake + `tools/call`, not just Rust-level calls. `docket-cc` not started — blocked on deciding file representation location first ([open-questions.md](open-questions.md) #27), since that's expensive to reverse once files exist on disk.
+- **Progress**: `docket-mcp` done — an rmcp stdio server exposing register/create/list/claim/submit/approve as MCP tools, HTTP client of `docket-core` (never links it as a library). Verified with a real MCP client handshake + `tools/call`, not just Rust-level calls. `docket-cc` not started — file representation location is now settled ([ADR-0008](decisions/ADR-0008-file-representation-location.md)), so scaffolding can begin; remaining `docket-cc` open questions (#28~30, #22~23) are lower-stakes and can be decided the same way M1's separator/mcp's tool wording were — as implementation forces them.
 
 ### [B-03] ASSUMPTION Sufficiency of async coordination
 - Question: in M2, are items consumed usefully without delay, or does "too late to matter anymore" happen often?

@@ -37,7 +37,6 @@ The timing tags are a default inferred from the roadmap structure, since no expl
 24. Whether `question` lives in the core or only at layer 3
 25. Max wait time for a question's answer
 26. How to pick which owner a question goes to when there are multiple
-27. Where the file representation's root lives (inside vs. outside the repo)
 28. How far to push things down into `open/`
 29. How to prevent a partial read while a file is being written
 30. Whether to allow editing a file to change state — this is in tension with P-2 (files are not the source of truth); leaning toward allowing it would require revisiting the principle
@@ -81,3 +80,4 @@ Items 1~49 above came out of the v0 interview session. The two below were newly 
 - ~~Whether multi-worker collaborative claims are allowed~~ → settled as not allowed, [architecture.md](architecture.md)
 - ~~Storage engine~~ → [ADR-0004](decisions/ADR-0004-sqlite-storage.md)
 - ~~Implementation language and runtime~~ → core+cc settled, mcp was tentative, [ADR-0007](decisions/ADR-0007-language-runtime.md)
+- ~~Where the file representation's root lives~~ → outside the repo, in a user data directory, [ADR-0008](decisions/ADR-0008-file-representation-location.md)
