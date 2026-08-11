@@ -1,5 +1,7 @@
 # docket
 
+[![CI](https://github.com/iyulab/docket/actions/workflows/ci.yml/badge.svg)](https://github.com/iyulab/docket/actions/workflows/ci.yml)
+
 A work-queue service for headless workers. A Claude Code session is just one kind of worker.
 
 ## Who it's for
