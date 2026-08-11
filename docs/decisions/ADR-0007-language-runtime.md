@@ -1,4 +1,4 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | core+cc는 확정, mcp는 잠정 — 재검토: B-10(rmcp 성숙도 SPIKE) 결과
+상태: v0 정렬 스냅샷 | 2026-08-11 | 확정 (B-10 SPIKE 결과 반영)
 
 # ADR-0007: 구현 언어와 런타임
 
@@ -10,20 +10,20 @@
 
 - **Go**: 단일 바이너리 배포, 크로스플랫폼(Windows 포함), 배우기 쉽고 반복 속도가 빠르다. 품질속성 1순위(단순함)에 유리하지만, 개발자 본인이 Rust에 이미 익숙하다면 이 이점이 사라진다.
 - **Rust**: 단일 바이너리 배포(런타임 설치 불필요 — 로컬 데몬의 "설치 마찰 최소화" 요구에 Go보다 더 잘 맞음), 메모리 안전성이 신뢰성(2순위)과 직결. 다만 본인이 익숙하지 않다면 학습곡선·컴파일 속도가 단순함(1순위)과 충돌한다. **개발자 본인이 이미 Rust에 능숙하므로 이 트레이드오프가 사라진다.**
-- **TypeScript(Node)**: MCP 공식 SDK가 TS 중심이라 `docket-mcp`에는 안전한 기본값. 다만 `docket-core`/`docket-cc`에 쓰면 Node 런타임 설치가 필요해 로컬 데몬의 설치 마찰 최소화 요구와 어긋난다.
+- **TypeScript(Node)**: MCP 공식 SDK가 TS 중심이라 처음엔 `docket-mcp`의 안전한 기본값으로 잠정 채택했으나, 공식 Rust SDK 존재 여부를 확인하지 않은 상태였다.
+
+**B-10 SPIKE 결과** (조사일 2026-08-11): 공식 Rust MCP SDK `rmcp`(`modelcontextprotocol/rust-sdk`)가 존재하며 활발히 유지된다 — MCP 조직이 직접 관리, GitHub 3.8k stars, 최신 MCP 스펙(2026-07-28) 구현, 공식 conformance test 100% 통과. 서버·클라이언트 양쪽 역할, stdio + streamable HTTP 트랜스포트, resources/prompts/sampling/OAuth/elicitation 등 기능을 갖춘다. SSE 트랜스포트는 명시적으로 없으나 최신 스펙 자체가 streamable HTTP로 이행 중이라 결격 사유로 보지 않는다. 이로써 TS를 잠정 채택했던 유일한 근거(SDK 성숙도 미확인)가 해소됐다.
 
 ## 결정
 
-- **`docket-core`, `docket-cc` = Rust (확정).** 개발자의 기존 Rust 숙련도로 "작성 단순함" 페널티가 사라지고, 신뢰성(2순위)과 배포 마찰 최소화를 동시에 얻는다. 같은 언어로 통일해 툴체인 분기를 줄인다.
-- **`docket-mcp` = TypeScript (잠정).** MCP 생태계가 TS SDK 중심이라는 게 근거이나, Rust MCP SDK(`rmcp` 등)의 성숙도를 확인하지 않은 상태다.
-- **`docket-console` = 웹(TS/JS, 프레임워크 미정).** 브라우저 UI라는 성격상 언어 선택의 여지가 크지 않다.
+**`docket-core`, `docket-cc`, `docket-mcp` 전부 Rust (확정).** `docket-console`만 웹(TS/JS, 프레임워크 미정) — 브라우저 UI라는 성격상 언어 선택 여지가 크지 않다.
 
 ## 결과
 
-**얻은 것**: core+cc가 순수 네이티브 바이너리로 배포되어 §15 목표 경험("설치 명령 한 번")에 부합한다. core와 cc가 같은 언어라 타입/직렬화 코드를 공유할 여지가 생긴다.
+**얻은 것**: 세 계층(core/cc/mcp) 전부 순수 네이티브 바이너리로 배포되어 §15 목표 경험("설치 명령 한 번")에 부합한다. 툴체인이 하나(Cargo)로 통일되어 [open-questions.md](../open-questions.md) #1(모노리포 도구)이 사실상 Cargo workspace로 좁혀진다 — 다만 "의존 검사 도구"(§3.3 계층 강제장치 1) 자체는 여전히 선택해야 한다.
 
-**포기한 것**: mcp만 다른 툴체인(Node)을 쓰게 되어 모노리포 도구([open-questions.md](../open-questions.md) #1) 선택에 제약이 생긴다 — 순수 Cargo workspace로는 mcp를 못 묶는다.
+**포기한 것**: MCP 생태계의 레퍼런스·예제가 여전히 TS 중심이라, 막히는 지점에서 참고할 자료가 TS SDK보다 적을 수 있다. SSE 트랜스포트가 필요해지면(예: 특정 클라이언트가 streamable HTTP를 지원하지 않으면) 그때 재검토한다.
 
 ## 재검토 트리거
 
-[B-10](../backlog.md) SPIKE(Rust MCP SDK 성숙도 확인) 결과에 따라 mcp도 Rust로 통일할지 결정한다.
+SSE 트랜스포트가 실제로 필요해지는 시점, 또는 `rmcp`의 기능 격차가 구현 중 실제로 발견되는 시점.

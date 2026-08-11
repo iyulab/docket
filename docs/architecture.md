@@ -17,7 +17,7 @@ Type-1(되돌리기 어려운) 결정만 다룬다. 구현 세부는 [open-quest
 
 **경계의 근거**: 1·4는 소비자가 인간인지 AI인지 알 필요가 없다. AI가 없었어도 존재했을 물건이다. 2·3만 AI 전용이다. 2와 3을 가르는 선은 pull과 push의 경계와 정확히 겹친다 — MCP 툴은 모델이 부르기로 결심해야 실행되는 순수 pull, 훅으로 턴 경계에 밀어넣는 건 push다. 자세한 논거는 [ADR-0002](decisions/ADR-0002-four-layer-architecture.md).
 
-**구현 언어**: `docket-core`·`docket-cc` = Rust(확정), `docket-mcp` = TypeScript(잠정), `docket-console` = 웹. 계층이 서로 다른 언어를 쓰는 것은 P-1(코어는 소비자를 모른다)과 모순되지 않는다 — 언어 선택은 계층 간 통신(HTTP)을 거치므로 경계를 넘지 않는다. 근거: [ADR-0007](decisions/ADR-0007-language-runtime.md).
+**구현 언어**: `docket-core`·`docket-cc`·`docket-mcp` = Rust(확정), `docket-console`만 웹. 세 계층을 한 언어로 통일해도 P-1(코어는 소비자를 모른다)과 모순되지 않는다 — 계층 간 통신은 여전히 HTTP를 거치므로 경계는 언어가 아니라 프로토콜이 긋는다. 근거: [ADR-0007](decisions/ADR-0007-language-runtime.md).
 
 ## 단일 리포와 강제 장치
 
