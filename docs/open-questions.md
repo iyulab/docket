@@ -1,83 +1,83 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Open Questions
 
-구현 중 결정할 것들. 이후 세션은 이 목록의 항목을 임의로 확정하지 않는다([AGENTS.md](../AGENTS.md)). 해소된 항목은 여기서 빠지고 [architecture.md](architecture.md)/[decisions/](decisions/)로 옮겨간다.
+Things to decide during implementation. Future sessions must not casually settle an item on this list on their own ([AGENTS.md](../AGENTS.md)). Once an item is resolved, it's removed from here and moves to [architecture.md](architecture.md) / [decisions/](decisions/).
 
-시점 태그는 원 기획서에 명시된 트리거가 없어 로드맵 구조로부터 추론한 기본값이다 — 실제 착수 시 조정 가능.
+The timing tags are a default inferred from the roadmap structure, since the original planning document didn't specify explicit triggers — adjust as needed once work actually starts.
 
-## M1(코어) 시점 — 아이템·생명주기·안전장치 값
+## M1 (core) timing — item, lifecycle, and safeguard values
 
-1. 모노리포 도구 — 패키지 매니저/워크스페이스는 Cargo workspace로 좁혀짐([ADR-0007](decisions/ADR-0007-language-runtime.md)), **의존 검사 도구만 미정**
-2. 토픽 구분자와 유효 문자 집합
-3. 접두 매칭 외 태그·와일드카드 중위 매칭 지원 여부
-4. `title` 길이 상한
-5. `body` 크기 상한과 초과 처리
-6. `refs` 스키마 확장 범위
-7. 커스텀 필드 확장 규칙
-8. 코멘트를 별도 엔티티로 둘지, 본문 추가분으로 둘지
-9. `resolved`에서 요청자가 응답하지 않을 때의 처리 (요청자 세션이 이미 죽었을 수 있음)
-10. `closed` 보존 기간과 정리 정책
-11. 클레임 만료 시간
-12. 워커당 동시 클레임 상한(WIP 한도)
-13. 죽은 워커의 재클레임 가능 시점
-14. 정체 감지 임계 시간(담당 없음 / 갱신 없음), 토픽별 설정 가능 여부 — [B-04](backlog.md) 관찰 결과와 연동
-15. 아이템 depth 상한
-16. 아이템당 코멘트 상한
-17. 세션당 연속 연장 상한 — [B-05](backlog.md) 검증과 연동
-18. 워커당 시간당 생성 상한
-19. 토픽당 열린 아이템 상한
-20. 안전장치 상한 초과 시 동작(조용히 거부 / 알림 / 관리자 큐 에스컬레이션)
-21. API 버저닝 정책
+1. Monorepo tooling — the package manager/workspace question has narrowed to Cargo workspace ([ADR-0007](decisions/ADR-0007-language-runtime.md)), **only the dependency-direction-checking tool is still undecided**
+2. Topic separator and its valid character set
+3. Whether to support tag/wildcard mid-path matching beyond prefix matching
+4. Max length for `title`
+5. Max size for `body` and how overflow is handled
+6. How far the `refs` schema extends
+7. Rules for custom-field extension
+8. Whether comments are a separate entity or appended to the body
+9. What happens when the requester doesn't respond while an item is `resolved` (the requester's session may already be dead)
+10. Retention period and cleanup policy for `closed` items
+11. Claim expiry time
+12. Concurrent-claim cap per worker (WIP limit)
+13. When a dead worker's claim becomes reclaimable
+14. Stall-detection threshold ("no owner" vs. "no update"), and whether it's configurable per topic — ties into the observations from [B-04](backlog.md)
+15. Max item depth
+16. Max comments per item
+17. Max consecutive extensions per session — ties into the validation in [B-05](backlog.md)
+18. Max item-creation rate per worker per hour
+19. Max open items per topic
+20. What happens when a safeguard cap is exceeded (silently reject / notify / escalate to an admin queue)
+21. API versioning policy
 
-## M2(mcp/cc) 시점 — 파일 표현·트리거·MCP 표면
+## M2 (mcp/cc) timing — file representation, triggers, MCP surface
 
-22. 리포 외 토픽의 표준 네임스페이스(`org/`, `env/`, `host/` 등)
-23. 저장소 리네임 시 토픽 이관 방법
-24. 질의(`question`)를 코어에 둘지, 3번 층에만 둘지
-25. 질의 응답 대기 시간 상한
-26. 담당자가 여럿일 때 질의 대상 선택
-27. 파일 표현의 루트 위치(저장소 내부 vs 외부)
-28. `open/`에 무엇까지 내릴지
-29. 파일 쓰기 중 부분 읽힘 방지 방식
-30. 파일 편집으로 상태를 바꾸는 것을 허용할지 — P-2(파일은 정본이 아니다)와 긴장 관계, 허용 쪽으로 가면 원칙 재검토 필요
-31. 알림 최대 노출 건수
-32. 알림 문구 형식
-33. 클레임하지 않은 아이템까지 알릴지, 클레임한 것만 알릴지
-34. 작업 연장 시 주입할 지시 강도
-35. MCP 툴 개수 상한
-36. 각 MCP 툴 설명문의 문구
-37. `decline`(요청 거절)을 별도 툴로 둘지, `release`의 사유로 처리할지
-38. 실시간 스트림 프로토콜(WebSocket / SSE / 롱폴링)
+22. Standard namespace for non-repo topics (`org/`, `env/`, `host/`, etc.)
+23. How topics get migrated when a repo is renamed
+24. Whether `question` lives in the core or only at layer 3
+25. Max wait time for a question's answer
+26. How to pick which owner a question goes to when there are multiple
+27. Where the file representation's root lives (inside vs. outside the repo)
+28. How far to push things down into `open/`
+29. How to prevent a partial read while a file is being written
+30. Whether to allow editing a file to change state — this is in tension with P-2 (files are not the source of truth); leaning toward allowing it would require revisiting the principle
+31. Max number of items surfaced in a notification
+32. Notification message format
+33. Whether to notify about unclaimed items too, or only claimed ones
+34. How strongly worded the injected instruction should be on an extension
+35. Cap on the number of MCP tools
+36. Wording for each MCP tool's description
+37. Whether `decline` (refusing a request) is a separate tool, or a reason passed to `release`
+38. Real-time stream protocol (WebSocket / SSE / long polling)
 
-## M3(콘솔) 시점
+## M3 (console) timing
 
-39. 보드의 기본 열 구성(상태별 vs 토픽별)
-40. 진행 중 아이템을 관리자가 수정할 때의 동시성 처리 — 원 기획서는 "담당 워커에게 변경 통지를 밀어넣는다"를 권장안으로 제시했으나 미확인. 근거: 관리자가 개입한다는 것은 이미 무언가 잘못됐다는 뜻이므로 진행 중단이 오히려 맞는 결과라는 논리
+39. Default board column layout (by state vs. by topic)
+40. Concurrency handling when an admin edits an in-progress item — the original planning document proposed "push a change notification to the owning worker" as a recommended approach, but this hasn't been confirmed. Rationale: since admin intervention already implies something went wrong, halting the in-progress work is arguably the right outcome anyway
 
-## M4(안전장치·배포) 시점
+## M4 (safeguards/deployment) timing
 
-41. 본문을 데이터로 취급하도록 강제하는 방식(구분자, 시스템 수준 안내문 등) — [coverage.md](coverage.md)에서 v1 제외는 확정, 방식 자체는 미정
-42. 인증 방식과 워커별 토큰 발급/갱신 주기
-43. 전송 구간 보안(사설망 전제 vs 인증 필수)
-44. 토픽 접근 제어(아무 워커나 아무 토픽을 담당한다고 신고 가능한지)
-45. 배포 채널(crates.io / npm / 단일 실행 파일)
-46. 서버 배포 형태(도커 이미지 제공 여부)
-47. 크로스 플랫폼 범위(Windows 지원 여부는 파일명·경로 규칙에 직접 영향)
-48. 연결정보 표시 형태
-49. M3/M4의 마일스톤별 완료 기준 세부화 — M1/M2는 [roadmap.md](roadmap.md)·[quality-ramp.md](quality-ramp.md)로 구체화됐으나 M3(콘솔)·M4(안전장치)는 아직 추상적
+41. How to enforce treating the body as data (delimiters, system-level instructions, etc.) — [coverage.md](coverage.md) has already settled that this is excluded from v1; the mechanism itself is still undecided
+42. Auth approach and per-worker token issuance/renewal cadence
+43. Transport-layer security (private-network assumption vs. mandatory auth)
+44. Topic access control (can any worker self-report ownership of any topic?)
+45. Distribution channel (crates.io / npm / a single executable)
+46. Server deployment form (whether to provide a Docker image)
+47. Cross-platform scope (Windows support directly affects filename/path rules)
+48. How connection info is displayed
+49. Detailing completion criteria per M3/M4 milestone — M1/M2 are already concretely specified via [roadmap.md](roadmap.md)/[quality-ramp.md](quality-ramp.md), but M3 (console) and M4 (safeguards) are still abstract
 
-## 추가 항목 — 2026-08-11 backlog-discover 도출
+## Items added — 2026-08-11, from backlog-discover
 
-기존 1~49번은 v0 인터뷰 세션에서 나왔다. 아래 두 항목은 이후 `/iyu:backlog-discover` 실행(premortem)에서 새로 발견되어 추가됐다 — 번호는 계속 이어가되(기존 참조 번호가 밀리지 않도록) 시점 태그를 별도로 붙인다.
+Items 1~49 above came out of the v0 interview session. The two below were newly discovered later, in a `/iyu:backlog-discover` run (premortem). Numbering continues (so existing cross-references don't shift), tagged separately by timing.
 
-50. **[M4 시점]** 코어 서버 상시가동 위치와 장애 복구 — 어느 머신이 코어 서버를 상시 호스팅하는가? 그 머신이 꺼지거나 재부팅되면 조정은 어떻게 복구되는가? 단일 인스턴스 SQLite 전제([ADR-0004](decisions/ADR-0004-sqlite-storage.md))와 "여러 대의 머신"이 조정에 참여한다는 전제([vision.md](vision.md))가 이 질문에서 만난다. 배포 채널·형태(#45~46)와 함께 결정. → [B-11](backlog.md)
-51. **[M1 시점, M4까지는 잠정]** 인증 공백 기간의 HTTP API 기본 바인딩 — 인증(#42~43)이 갖춰지기 전까지 코어 HTTP API를 기본적으로 localhost/사설망으로 제한할지, 기본값을 무엇으로 할지. 프롬프트 인젝션 방어를 v1에서 뺀 근거([coverage.md](coverage.md))가 "폐쇄 환경" 가정에 의존하므로, M1이 그 API를 실제로 띄우는 시점부터는 코드가 그 가정을 최소한도로 보강해야 하는지 여부. → [B-12](backlog.md)
+50. **[M4 timing]** Core server uptime location and failure recovery — which machine hosts the core server on an ongoing basis? How does coordination recover if that machine goes down or reboots? This is where the single-instance SQLite premise ([ADR-0004](decisions/ADR-0004-sqlite-storage.md)) meets the "multiple machines participate in coordination" premise ([vision.md](vision.md)). Decide together with the distribution channel/form (#45~46). → [B-11](backlog.md)
+51. **[M1 timing, provisional until M4]** Default HTTP API binding during the pre-auth window — until auth (#42~43) is in place, should the core HTTP API default to localhost/private-network only, and what should the default be? The rationale for excluding prompt-injection defense from v1 ([coverage.md](coverage.md)) rests on a "closed environment" assumption, so from the moment M1 actually stands up that API, the code arguably needs to minimally reinforce that assumption. → [B-12](backlog.md)
 
-## 해소된 항목 (참고용, 더 이상 미결 아님)
+## Resolved items (for reference, no longer open)
 
-- ~~성공 판단 지표~~ → [goals.md](goals.md)
-- ~~공개 범위~~ → [ADR-0005](decisions/ADR-0005-public-scope.md)
-- ~~복수 워커 협업 클레임 허용 여부~~ → 미허용으로 확정, [architecture.md](architecture.md)
-- ~~저장소 엔진~~ → [ADR-0004](decisions/ADR-0004-sqlite-storage.md)
-- ~~구현 언어와 런타임~~ → core+cc는 확정, mcp는 잠정, [ADR-0007](decisions/ADR-0007-language-runtime.md)
+- ~~Success criteria~~ → [goals.md](goals.md)
+- ~~Public scope~~ → [ADR-0005](decisions/ADR-0005-public-scope.md)
+- ~~Whether multi-worker collaborative claims are allowed~~ → settled as not allowed, [architecture.md](architecture.md)
+- ~~Storage engine~~ → [ADR-0004](decisions/ADR-0004-sqlite-storage.md)
+- ~~Implementation language and runtime~~ → core+cc settled, mcp was tentative, [ADR-0007](decisions/ADR-0007-language-runtime.md)

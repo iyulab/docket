@@ -1,46 +1,46 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Principles
 
-## 철학
+## Philosophy
 
-Claude Code 세션은 워커의 한 종류일 뿐이다. 이 문장이 설계 전체를 지배한다. AI가 없었어도 존재했을 물건 — 헤드리스 작업자를 위한 큐와 보드 — 을 코어와 콘솔이 담당하고, AI 전용 표면(MCP·Claude Code 어댑터)은 그 위에 얇게 올라간다.
+A Claude Code session is just one kind of worker. This sentence governs the whole design. Something that would have existed even without AI — a queue and a board for headless workers — is what core and console own; the AI-only surfaces (MCP, the Claude Code adapter) sit thinly on top of that.
 
-## 원칙
+## Principles
 
-각 원칙 옆에 그 원칙이 비싸지는 순간을 병기한다. 대가 없는 원칙은 원칙이 아니다.
+Next to each principle is the moment it starts costing something. A principle with no cost isn't a principle.
 
-### P-1. 코어는 소비자를 모른다 (비타협)
+### P-1. Core doesn't know its consumers (non-negotiable)
 
-worker·topic·item·claim·body·stream·budget 외의 개념이 코어에 들어가지 않는다. [glossary.md](glossary.md)의 어휘 대응표가 이를 기계적으로 강제한다.
+No concept other than worker, topic, item, claim, body, stream, budget enters the core. The vocabulary mapping in [glossary.md](glossary.md) enforces this mechanically.
 
-**비싸지는 순간**: Claude Code 고유 기능(세션 재개, CLAUDE.md 인식 등)을 코어에 바로 넣고 싶은 유혹이 들 때마다, 그 개념을 응용 계층으로 밀어내고 번역하는 비용을 계속 지불해야 한다.
+**When it gets expensive**: every time there's a temptation to drop a Claude-Code-specific feature (session resume, CLAUDE.md awareness) straight into the core, you have to keep paying the cost of pushing that concept up to the application layer and translating it instead.
 
-### P-2. 파일은 정본이 아니다
+### P-2. Files are not the source of truth
 
-코어 DB만 정본이고, 로컬 파일(`docket-cc`의 디렉터리 표현)은 표현일 뿐이다.
+Only the core DB is authoritative; local files (`docket-cc`'s directory representation) are just a projection of it.
 
-**비싸지는 순간**: 사용자가 파일을 직접 수정해 상태를 바꾸고 싶어할 때 — 이 원칙을 지키면 매번 API를 경유해야 해서 직관적인 조작 하나를 포기하게 된다([open-questions.md](open-questions.md) #26).
+**When it gets expensive**: whenever a user wants to edit a file directly to change state — honoring this principle means every change has to go through the API, giving up one intuitive shortcut ([open-questions.md](open-questions.md) #26).
 
-### P-3. 오케스트레이터가 아니다, pull만
+### P-3. Not an orchestrator, pull only
 
-중앙이 워커에게 작업을 자동 배분하지 않는다. 사람의 수동 개입(콘솔의 "강제 배정")은 이 제약의 대상이 아니다.
+The center never auto-distributes work to workers. A human's manual intervention (the console's "force-assign") is not subject to this constraint.
 
-**비싸지는 순간**: 담당자 없는 아이템이 쌓여도 자동 배분을 못 하고, 사람이 세션을 띄우길 기다려야 한다.
+**When it gets expensive**: unassigned items can pile up with no automatic distribution, and someone has to wait for a session to spin up and notice them.
 
-## 품질속성 우선순위
+## Quality-attribute priority
 
-**단순함 > 신뢰성 > 확장성.**
+**Simplicity > reliability > scalability.**
 
-- 확장성이 가장 낮은 순위인 이유: P-1이 이미 구조적으로(계층 분리 + 어휘 강제) 확장성을 확보하고 있어, 별도로 챙기지 않아도 상당 부분 따라온다.
-- 신뢰성이 단순함보다 낮은 순위이되 최하위는 아닌 이유: 클레임 배타성처럼 도메인 모델의 정의 자체([architecture.md](architecture.md) `claim`)에 해당하는 최소 신뢰성은 "단순함"을 이유로도 포기하지 않는다([quality-ramp.md](quality-ramp.md) L0/L1 참조).
-- 하드 제약(규제·성능·팀·기한): 없음. 1인 dogfooding 도구이고 규모가 작아 성능 목표를 별도로 세우지 않는다. 기한은 [goals.md](goals.md)의 손절선이 대신한다.
+- Scalability ranks lowest because P-1 already buys most of it structurally (layer separation + enforced vocabulary), without having to chase it separately.
+- Reliability ranks below simplicity but not last: something like claim exclusivity is part of the domain model's own definition ([architecture.md](architecture.md) `claim`), not an implementation detail of reliability — so it's never sacrificed in the name of "keep it simple" ([quality-ramp.md](quality-ramp.md) L0/L1).
+- Hard constraints (regulatory, performance, team, deadline): none. This is a single-person dogfooding tool at small scale, so no separate performance target is set. The deadline is handled by the stop-loss criteria in [goals.md](goals.md) instead.
 
-## 비목표
+## Non-goals
 
-전체 In/Out/Later는 [scope.md](scope.md) 참조. 여기서는 각 비목표가 왜 비목표인지만 남긴다.
+Full In/Out/Later breakdown is in [scope.md](scope.md). Here we only record *why* each non-goal is a non-goal.
 
-- **파일 동기화 서비스가 아니다** — 코드와 산출물은 git이 이미 잘 해결한다. 재구현할 이유가 없다.
-- **오케스트레이터가 아니다** — P-3과 동일한 근거.
-- **실시간 채팅이 아니다** — [goals.md](goals.md) 차별화 가설에서 실시간성을 "지고도 괜찮은 축"으로 명시적으로 포기했다.
-- **다중 사용자 협업 도구가 아니다** — 1차 목표는 1인 소유 다중 머신. 다만 이건 Later다([ADR-0006](decisions/ADR-0006-single-owner-later.md)).
+- **Not a file-sync service** — git already solves this well for code and artifacts. No reason to reinvent it.
+- **Not an orchestrator** — same rationale as P-3.
+- **Not real-time chat** — the differentiation hypothesis in [goals.md](goals.md) explicitly gives up real-time-ness as an axis it's fine to lose on.
+- **Not a multi-user collaboration tool** — the primary target is one person owning multiple machines. This one is Later, though ([ADR-0006](decisions/ADR-0006-single-owner-later.md)).

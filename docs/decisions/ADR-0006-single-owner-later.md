@@ -1,26 +1,26 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 잠정 — 재검토: §12.1 인증 방식 확정 시
+Status: v0 alignment snapshot | 2026-08-11 | tentative — re-open when: the §12.1 auth approach is settled
 
-# ADR-0006: 다중 사용자는 Later, 지금은 단일 소유자 전제
+# ADR-0006: Multi-user is Later, single-owner is the current premise
 
-## 맥락
+## Context
 
-§1.5 비목표는 "다중 사용자 협업 도구가 아니다 — 1차 목표는 한 사람이 소유한 여러 머신"이라고 명시한다. 이것이 다중 사용자를 **영구히 구조적으로 배제**하는 것인지, 아니면 **지금은 아니고 나중에**인지가 불명확했다.
+§1.5's non-goals state "not a multi-user collaboration tool — the primary target is one person owning multiple machines." It was unclear whether this **permanently and structurally excludes** multi-user, or means **not now, but later**.
 
-## 검토한 선택지와 트레이드오프
+## Options considered and trade-offs
 
-- **영구 배제**: 인증·권한·다중 테넌시를 이 프로젝트 범위 밖으로 완전히 잠근다. 팀 단위 요구가 나와도 구조적으로 못 받는다.
-- **Later(채택)**: 지금은 1인 다중머신에 최적화하지만, 인증·토큰([open-questions.md](../open-questions.md) #42)이 이미 결정 필요 항목으로 열려 있으므로 구조적으로 다중 사용자를 막지는 않는다.
+- **Permanent exclusion**: lock auth, permissions, and multi-tenancy entirely outside this project's scope. Even if team-scale demand shows up, it structurally can't be accepted.
+- **Later (adopted)**: optimize for single-owner-multiple-machines for now, but since auth/tokens ([open-questions.md](../open-questions.md) #42) are already an open item that needs deciding, this doesn't structurally block multi-user either.
 
-## 결정
+## Decision
 
-Later로 확정한다. 코어 도메인 모델(워커/토픽/아이템)에 지금 "소유자" 개념을 넣지는 않는다.
+Settle on Later. Don't add an "owner" concept to the core domain model (worker/topic/item) right now.
 
-## 결과
+## Consequences
 
-**얻은 것**: 지금 인증 설계를 "어차피 나만 쓰니까"로 과하게 단순화하지 않는다 — 나중에 다중 사용자가 필요해져도 코어 모델을 다시 짤 필요는 없을 가능성이 높다.
+**Gained**: doesn't over-simplify auth design today with "it's just me, so who cares" — there's a good chance the core model won't need to be redesigned even if multi-user becomes necessary later.
 
-**포기한 것**: §12.1(신뢰 경계)의 단순화 여지 하나를 미리 접는다 — "1인 전용이라 인증 안 해도 된다"는 선택지를 못 쓴다.
+**Given up**: closes off one simplification available at §12.1 (trust boundary) ahead of time — the option "single-user only, so no auth needed" is off the table.
 
-## 재검토 트리거
+## Re-open trigger
 
-[open-questions.md](../open-questions.md) #42(인증 방식과 토큰 정책)를 확정하는 시점에 이 ADR을 다시 연다.
+Re-open this ADR once [open-questions.md](../open-questions.md) #42 (auth approach and token policy) is settled.

@@ -1,46 +1,46 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Vision
 
-## 한 문장 정의
+## One-line definition
 
-docket은 헤드리스 워커를 위한 작업큐 서비스다. Claude Code 세션은 그 워커의 한 종류일 뿐이다.
+docket is a work-queue service for headless workers. A Claude Code session is just one kind of worker.
 
-## 왜 지금인가
+## Why now
 
-한 사람이 여러 대의 컴퓨터에서 여러 개의 Claude Code 세션을 동시에 열어두고 작업한다. 각 세션은 서로 다른 저장소를 다루며 사실상 독립적인 작업자처럼 움직이지만, 서로를 모른다. 조정은 전부 사람의 머릿속과 복사-붙여넣기를 통과하고, 세션 수가 늘수록 사람이 병목이 된다.
+One person runs multiple Claude Code sessions across multiple machines at once. Each session works on a different repository and moves almost like an independent worker, but the sessions don't know about each other. All coordination goes through a human's head and copy-paste, and the more sessions there are, the more that person becomes the bottleneck.
 
-실사용 동기는 이 병목을 겪는 본인의 문제다. 다만 코어 자체는 처음부터 특정 도구에 종속되지 않는 범용 작업 관리 엔진으로 설계한다 — 핵심 엔진을 타 프로젝트에서도 활용할 수 있게 하기 위함이다. 이 이중성이 [architecture.md](architecture.md)의 4계층 분리로 이어진다.
+The real-world motivation is this bottleneck, experienced firsthand. Even so, the core itself is designed from the start as a general-purpose work-management engine that isn't tied to any one tool — so the core engine can be useful to other projects too. That duality is what leads to the four-layer separation in [architecture.md](architecture.md).
 
-## 사용자
+## Users
 
-여러 대의 머신에서 다수의 Claude Code 세션을 상시 운영하며, 세션들이 서로 다른 저장소나 서로 의존하는 컴포넌트를 다루는 개발자. 1인 소유 다중 머신을 1차 전제로 한다([scope.md](scope.md) 참조).
+Developers who keep multiple Claude Code sessions running across several machines, where the sessions work on different repositories or on components that depend on each other. Single-owner, multiple-machines is the primary premise ([scope.md](scope.md)).
 
-## 현재 대안과 실패 지점
+## Current alternative and its failure points
 
-현재 쓰고 있는 방법: **파일로 이슈 초안을 남기고, 다른 리포의 Claude Code 세션이 그 파일을 읽는 방식.** 머신을 넘나들 때는 commit·push 하거나 파일을 복사-이동해야 한다.
+Current approach: **leave draft issue files behind, and let a Claude Code session in another repo read that file.** Crossing machines means a commit/push, or copying/moving the file by hand.
 
-이 대안에서 실제로 겪은 문제 세 가지 — 우선순위는 상태 추적 > 알림 없음 = 머신 간 지연 (동순위, [goals.md](goals.md) D-06/D-07 참조):
+Three problems actually experienced with this alternative — ranked by priority: status tracking > no notifications = cross-machine delay (the latter two tied; see [goals.md](goals.md) D-06/D-07):
 
-- **상태 추적 없음** — 처리됐는지 완료됐는지 알 방법이 없어 결국 사람이 다시 확인하고 다닌다.
-- **알림 없음** — 파일을 만들어도 상대 세션이 열려있지 않거나 그 디렉터리를 볼 이유가 없으면 영원히 안 읽힌다.
-- **머신 간 지연** — commit/push 사이클을 거쳐야 다른 머신이 인지한다.
+- **No status tracking** — there's no way to tell whether something was picked up or finished, so a human ends up checking back manually.
+- **No notifications** — even when a file is created, if the other session isn't open, or has no reason to look at that directory, it may never get read.
+- **Cross-machine delay** — another machine only finds out after a commit/push cycle.
 
-## 왜 작업큐인가 — 기각된 대안
+## Why a work queue — rejected alternatives
 
-**이메일 모델 (기각).** 발신 시점에 수신자가 확정되어야 한다. 그러나 실제 요청은 "A 라이브러리의 결함을 고쳐달라"이지 "1번컴퓨터/A에게 보낸다"가 아니다. 주소가 아니라 주제로 보내야 한다.
+**Email model (rejected).** The recipient has to be resolved at send time. But the real request is "fix the defect in library A," not "send this to computer 1 / session A." It should be addressed by subject, not by address.
 
-**메신저 모델 (기각).** 전제가 presence다. 세션은 수시로 죽고 살아나므로, presence 위에 조정을 얹으면 세션이 꺼질 때마다 조정이 증발한다. 더 결정적으로 완료 의미론이 없다.
+**Messenger model (rejected).** Its premise is presence. Sessions die and come back constantly, so building coordination on top of presence means coordination evaporates every time a session goes offline. More decisively, it has no completion semantics.
 
-**작업큐/칸반 (채택).** pull 모델이 "누가 할지 모름" 문제의 답이다. 아이템은 아무도 없어도 살아남아 나중에 누군가 줍는다. 보드 자체가 "지금 공이 누구 코트에 있는가"의 표현이다.
+**Work queue / kanban (adopted).** Pull is the answer to "we don't know who will do it." An item survives even when nobody is around, and gets picked up later by whoever shows up. The board itself is a live representation of "whose court the ball is in right now."
 
-## 시나리오
+## Scenarios
 
-- **S1. 계약 변경에 따른 후속 작업** — 세션 A가 공유 라이브러리의 인터페이스를 바꾸고, 소비 저장소 앞으로 아이템을 올린다. 담당 세션이 나중에 집어간다.
-- **S2. 작업 위임** — 세션 A가 자기 컨텍스트 밖의 작업을 발견해 해당 토픽 앞으로 아이템을 올린다.
-- **S3. 즉시 질의** — 세션 B가 다른 저장소의 구현 세부를 물어본다. 담당 세션이 없으면 즉시 실패한다(아이템으로 남기지 않음, [glossary.md](glossary.md) `question` 참조).
-- **S4. 머신 간 핸드오프** — 데스크톱에서 하던 작업의 요약과 다음 단계를 아이템으로 올려두고, 노트북에서 세션을 열면 집어간다.
-- **S5. 사람의 개입** — 관리자가 콘솔에서 정체된 아이템을 발견하고 요구를 다듬어(보완) 다시 흘려보낸다.
-- **S6. 다른 런타임 (확장 검증용)** — `aims`의 장애 이벤트가 아이템이 되고, iyulab 자체 에이전트가 집어가 조사·해결한다.
+- **S1. Follow-up work from a contract change** — Session A changes a shared library's interface and posts an item to the consuming repository's topic. Whichever session owns that repo picks it up later.
+- **S2. Delegating work** — Session A discovers work outside its own context and posts an item to the relevant topic.
+- **S3. Immediate query** — Session B asks about implementation details in another repository. If no one owns that topic, it fails immediately (this does not persist as an item — see `question` in [glossary.md](glossary.md)).
+- **S4. Cross-machine handoff** — A summary of work in progress on a desktop, plus next steps, gets posted as an item; opening a session on a laptop picks it up.
+- **S5. Human intervention** — An admin notices a stalled item on the console, refines the ambiguous request, and sends it back into flow.
+- **S6. A different runtime (extension validation)** — an incident event from `aims` becomes an item, and iyulab's own agent picks it up to investigate and resolve.
 
-성공의 정의는 [goals.md](goals.md)에서 다룬다.
+The definition of success is covered in [goals.md](goals.md).

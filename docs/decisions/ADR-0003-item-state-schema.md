@@ -1,35 +1,35 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 확정
+Status: v0 alignment snapshot | 2026-08-11 | settled
 
-# ADR-0003: 아이템 상태·종결사유 스키마
+# ADR-0003: Item state / resolution schema
 
-## 맥락
+## Context
 
-초기 설계는 `open → claimed → review → done → dropped` 상태 기계를 썼다. 외부 검토에서 두 가지 문제가 지적됐다: (1) `review`가 개발 문맥에서 코드 리뷰로 오독될 위험이 있고, (2) `dropped`가 "닫힌 이유"라는 별개 축을 상태 하나에 욱여넣고 있다.
+The initial design used an `open → claimed → review → done → dropped` state machine. External review flagged two problems: (1) `review` risks being misread as code review in a development context, and (2) `dropped` crams a separate axis — "why it closed" — into a single state.
 
-## 검토한 선택지와 트레이드오프
+## Options considered and trade-offs
 
-- **원안 유지(`review`/`done`/`dropped`)**: 변경 비용은 없지만, `review`의 모호성이 실제 사용 중 계속 혼란을 유발할 가능성이 있다.
-- **이름만 교체(`review→resolved`, `done→closed`), `dropped`는 유지**: 모호성은 줄지만, "왜 닫혔는가"(정상 완료/중복/거절/무효)가 여전히 상태값에 섞여 있어 상태 수가 계속 늘어나는 구조.
-- **`state`/`resolution` 분리 + 이름 교체(채택)**: Bugzilla/Jira 관행. 상태는 워크플로 단계만 표현하고, 닫힌 이유는 별도 필드로 뺀다. 관리자 조작(제거/병합/강제종결/승인) 각각이 `resolution` 값 하나씩을 명확히 얻는다.
+- **Keep the original (`review`/`done`/`dropped`)**: no cost to change, but `review`'s ambiguity is likely to keep causing confusion in real use.
+- **Rename only (`review→resolved`, `done→closed`), keep `dropped`**: less ambiguous, but "why did it close" (normal completion/duplicate/declined/invalid) still stays mixed into the state value, so the state count keeps growing over time.
+- **Split `state`/`resolution` + rename (adopted)**: Bugzilla/Jira convention. State expresses only the workflow stage; the reason it closed is pulled out into a separate field. Each admin operation (remove/merge/force-close/approve) gets exactly one clear `resolution` value.
 
-이름 교체 제안 자체는 채택하되, 외부 검토가 제시한 `resolution` 매핑(제거→`wontfix`, 강제종결→`invalid`)은 §11.4의 조작 정의와 맞지 않아 정정했다 — "제거"는 애초에 무효했던 요청(`invalid`), "강제종결"은 한때 유효했으나 더 이상 관련 없어진 것(`wontfix`)이다.
+The rename itself is adopted, but the external review's proposed `resolution` mapping (remove→`wontfix`, force-close→`invalid`) didn't match §11.4's definitions of those operations, so it was corrected — "remove" is a request that was invalid from the start (`invalid`), while "force-close" was once valid but is no longer relevant (`wontfix`).
 
-`expired`는 이번 스키마에 포함하지 않았다 — 클레임 자동 만료·정체 자동 종결 정책이 아직 미결이라, 지금 필드를 만들면 아직 안 한 결정을 스키마가 암묵적으로 확정하게 된다.
+`expired` isn't included in this schema — automatic claim expiry and automatic stall-closing policy are both still undecided, and adding the field now would let the schema implicitly settle a decision that hasn't actually been made.
 
-## 결정
+## Decision
 
 ```
 state: open | claimed | resolved | closed
-resolution: null | done | duplicate | wontfix | invalid   # closed일 때만
+resolution: null | done | duplicate | wontfix | invalid   # only when closed
 ```
-매핑: 제거→`invalid`, 병합→`duplicate`, 강제종결→`wontfix`, 요청자 승인→`done`.
+Mapping: remove→`invalid`, merge→`duplicate`, force-close→`wontfix`, requester approval→`done`.
 
-## 결과
+## Consequences
 
-**얻은 것**: 상태 수가 5개에서 4개로 줄면서 관리자 조작 넷 모두에 명확한 의미가 생겼다. 상태 이름이 Bugzilla 생명주기와 사실상 동일해져 처음 보는 사람도 설명 없이 읽힌다.
+**Gained**: the state count drops from 5 to 4, and all four admin operations get a clear meaning. The state names are effectively identical to Bugzilla's lifecycle, so even a first-time reader understands them without explanation.
 
-**포기한 것**: 자동 만료로 인한 종결을 지금은 표현할 수 없다 — 정체된 아이템은 여전히 사람이 수동으로 강제종결(`wontfix`) 처리해야 한다.
+**Given up**: closure due to automatic expiry can't currently be expressed — a stalled item still has to be force-closed (`wontfix`) manually by a human.
 
-## 재검토 트리거
+## Re-open trigger
 
-[open-questions.md](../open-questions.md) #14/#16/#19(클레임 만료, 정체 자동 종결)가 결정되는 시점에 `resolution`에 `expired`를 추가한다.
+Add `expired` to `resolution` once [open-questions.md](../open-questions.md) #14/#16/#19 (claim expiry, automatic stall-closing) are decided.

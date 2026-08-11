@@ -1,45 +1,45 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Goals
 
-## 북극성
+## North star
 
-**사람 개입 없이 완결된 아이템의 비율.** §1.1의 원래 트리거("사람이 병목")를 가장 직접적으로 뒤집는 후행지표다.
+**The share of items completed without human intervention.** This is the lagging indicator that most directly inverts the original trigger from §1.1 ("a human is the bottleneck").
 
-**조작적 정의(완화)**: `open → claimed → resolved → closed(resolution=done)` 경로에서, 관리자의 "보완"(§11.4)은 정상 운영으로 카운트한다. "강제 배정"·"강제 종결"처럼 워크플로 자체가 실패했다는 신호만 "개입 있음"으로 카운트한다.
+**Operational definition (relaxed)**: on the `open → claimed → resolved → closed(resolution=done)` path, an admin's "refine" (§11.4) counts as normal operation. Only signals that the workflow itself failed — like "force-assign" or "force-close" — count as "intervention occurred."
 
-이 지표는 아이템별 관리자 개입 이력이 코어에 쌓여야 계측 가능하므로, M3(콘솔) 이후 본지표로 전환한다([ADR-0002](decisions/ADR-0002-four-layer-architecture.md), [B-09](backlog.md)).
+Measuring this requires per-item admin-intervention history to accumulate in the core, so it becomes the primary metric only after M3 (console) ([ADR-0002](decisions/ADR-0002-four-layer-architecture.md), [B-09](backlog.md)).
 
-## 목표 트리 (Impact Map)
+## Goal tree (impact map)
 
 ```
-북극성: 사람 개입 없이 완결된 아이템 비율 ↑
-└─ 누구의 행동이 바뀌어야 하나: 1인 다중세션 운영자(본인)
-   └─ 어떤 변화: 사람의 기억·복붙 대신 docket 보드/알림에 의존해 조정
-      └─ 산출물(백로그 잎사귀):
-         ├─ M1 코어 (워커/아이템/클레임 상태기계) — B-06
-         ├─ M2 mcp+cc (두 세션이 아이템을 주고받아 완주) — B-07
-         ├─ M3 콘솔의 "보완" 기능 (§11.4, 가장 중요한 기능)
-         └─ D-11 계측 파이프라인 — B-09
+North star: share of items completed without human intervention ↑
+└─ Whose behavior needs to change: the single-owner, multi-session operator (the developer)
+   └─ What changes: relying on the docket board/notifications instead of memory and copy-paste
+      └─ Deliverables (backlog leaves):
+         ├─ M1 core (worker/item/claim state machine) — B-06
+         ├─ M2 mcp+cc (two sessions hand an item back and forth to completion) — B-07
+         ├─ M3 the console's "refine" feature (§11.4, the single most important feature)
+         └─ D-11 measurement pipeline — B-09
 ```
 
-## 선행지표 + 손절선 (GQM)
+## Leading indicators + stop-loss criteria (GQM)
 
-완결률은 M3 이전엔 계측 수단이 없다. 그 전까지는 아래 두 선행지표로 "계속할 가치가 있는가"를 판단한다.
+Completion rate has no way to be measured before M3. Until then, "is this still worth continuing?" is judged by the two leading indicators below.
 
-| 지표 | 무엇을 재는가 | 어떻게 재는가 | 현재값 | 목표값 | 언제까지 |
+| Metric | What it measures | How it's measured | Current | Target | By when |
 |---|---|---|---|---|---|
-| 사용률 | S1~S6([vision.md](vision.md)) 조정 사례 중 docket 경유 비율 | 분자=docket 아이템 생성/클레임 수, 분모=수동 처리 사례 수(계측 방법 미정, [B-02](backlog.md)) | 0 (미구현) | 50%↑ | M3 배포 후 4주 |
-| 이슈 번다운 | 열린 아이템 수의 추세 | 주간 `(닫힌 아이템 수) - (생성된 아이템 수)` | 0 | 4주 중 3주 이상 ≥ 0 | M3 배포 후 4주 |
+| Adoption rate | Share of S1~S6 ([vision.md](vision.md)) coordination cases that go through docket | Numerator = docket items created/claimed, denominator = manually-handled cases (measurement method TBD, [B-02](backlog.md)) | 0 (not implemented) | ≥50% | 4 weeks after M3 ships |
+| Issue burndown | Trend in the count of open items | Weekly `(items closed) - (items created)` | 0 | ≥0 in at least 3 of 4 weeks | 4 weeks after M3 ships |
 
-**손절선**: M3 배포 후 4주 관찰 시점에, **조정 사례 자체가 주 1건 미만**이거나 **번다운이 4주 내내 음수**면 접는다.
+**Stop-loss criteria**: at the 4-week observation point after M3 ships, if **coordination cases themselves fall below 1 per week**, or **burndown is negative for all 4 weeks**, the project is shelved.
 
-완결률(품질)은 이 손절선에 걸리지 않는다 — 사용되고는 있으나 결과물이 부실한 경우는 손절 판단이 아니라 후속 개선 대상이다.
+Completion rate (quality) is not a stop-loss criterion — being used but producing weak output is a follow-up improvement item, not a stop-loss judgment.
 
-## 미검증 가정 (치명 가정 3개)
+## Unvalidated assumptions (3 critical ones)
 
-| ID | 가정 | 틀리면 | 검증 |
+| ID | Assumption | If wrong | Validation |
 |---|---|---|---|
-| A-1 | 비동기 조정으로 충분하다 | 이메일 모델처럼 "너무 느려서 안 씀"이 되어 손절선에 바로 걸림 | [B-03](backlog.md) — M2 실사용 관찰 |
-| A-2 | 세션 기동이 충분히 잦아 방치된 아이템이 결국 집힌다 | 보드에 영원히 안 집히는 아이템만 쌓임 | [B-04](backlog.md) — 1주 자기관찰 |
-| A-3 | 예산/연장 장치가 폭주를 실제로 막는다 | 토큰이 조용히 소진됨(§17 위험) | [B-05](backlog.md) — M1~M2 통합테스트 |
+| A-1 | Async coordination is good enough | Ends up "too slow to use," like the email model — hits the stop-loss criteria immediately | [B-03](backlog.md) — observed during real M2 use |
+| A-2 | Sessions spin up often enough that abandoned items eventually get picked up | Only items that never get picked up pile up on the board | [B-04](backlog.md) — 1-week self-observation |
+| A-3 | Budget/extension mechanisms actually stop runaway loops | Tokens quietly get exhausted (§17 risk) | [B-05](backlog.md) — M1~M2 integration test |

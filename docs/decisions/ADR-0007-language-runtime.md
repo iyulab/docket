@@ -1,29 +1,29 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 확정 (B-10 SPIKE 결과 반영)
+Status: v0 alignment snapshot | 2026-08-11 | settled (reflects the B-10 SPIKE result)
 
-# ADR-0007: 구현 언어와 런타임
+# ADR-0007: Implementation language and runtime
 
-## 맥락
+## Context
 
-구현 언어와 런타임은 원래 M4(배포) 시점 결정으로 분류했으나([open-questions.md](../open-questions.md)), `docket-core`를 실제로 짜기 시작하려면(M1) 언어를 먼저 정해야 한다는 게 드러나 시점을 앞당겼다. 원 기획서 §15는 "로컬 데몬은 설치 마찰이 낮아야 하고, 서버는 상시 구동에 적합해야 한다. 요구가 서로 다르므로 같은 언어일 필요는 없다"고 이미 명시했다.
+Implementation language and runtime were originally classified as an M4 (deployment) decision ([open-questions.md](../open-questions.md)), but once it became clear that actually starting to write `docket-core` (M1) requires settling the language first, the timing was moved up. The original planning document's §15 already stated: "the local daemon needs low installation friction, and the server needs to be good at running continuously. The requirements differ, so they don't need to be the same language."
 
-## 검토한 선택지와 트레이드오프
+## Options considered and trade-offs
 
-- **Go**: 단일 바이너리 배포, 크로스플랫폼(Windows 포함), 배우기 쉽고 반복 속도가 빠르다. 품질속성 1순위(단순함)에 유리하지만, 개발자 본인이 Rust에 이미 익숙하다면 이 이점이 사라진다.
-- **Rust**: 단일 바이너리 배포(런타임 설치 불필요 — 로컬 데몬의 "설치 마찰 최소화" 요구에 Go보다 더 잘 맞음), 메모리 안전성이 신뢰성(2순위)과 직결. 다만 본인이 익숙하지 않다면 학습곡선·컴파일 속도가 단순함(1순위)과 충돌한다. **개발자 본인이 이미 Rust에 능숙하므로 이 트레이드오프가 사라진다.**
-- **TypeScript(Node)**: MCP 공식 SDK가 TS 중심이라 처음엔 `docket-mcp`의 안전한 기본값으로 잠정 채택했으나, 공식 Rust SDK 존재 여부를 확인하지 않은 상태였다.
+- **Go**: single-binary distribution, cross-platform (including Windows), easy to learn, fast iteration. Favors the top-priority quality attribute (simplicity), but that advantage disappears if the developer is already fluent in Rust.
+- **Rust**: single-binary distribution (no runtime to install — fits the local daemon's "minimize installation friction" requirement even better than Go), and memory safety maps directly onto reliability (the second-priority attribute). But if the developer isn't already fluent, the learning curve and compile times work against simplicity (the top priority). **Since the developer is already proficient in Rust, this trade-off disappears.**
+- **TypeScript (Node)**: since the official MCP SDK is TS-centric, it was tentatively adopted as `docket-mcp`'s safe default early on — but without having confirmed whether an official Rust SDK existed.
 
-**B-10 SPIKE 결과** (조사일 2026-08-11): 공식 Rust MCP SDK `rmcp`(`modelcontextprotocol/rust-sdk`)가 존재하며 활발히 유지된다 — MCP 조직이 직접 관리, GitHub 3.8k stars, 최신 MCP 스펙(2026-07-28) 구현, 공식 conformance test 100% 통과. 서버·클라이언트 양쪽 역할, stdio + streamable HTTP 트랜스포트, resources/prompts/sampling/OAuth/elicitation 등 기능을 갖춘다. SSE 트랜스포트는 명시적으로 없으나 최신 스펙 자체가 streamable HTTP로 이행 중이라 결격 사유로 보지 않는다. 이로써 TS를 잠정 채택했던 유일한 근거(SDK 성숙도 미확인)가 해소됐다.
+**B-10 SPIKE result** (investigated 2026-08-11): an official Rust MCP SDK, `rmcp` (`modelcontextprotocol/rust-sdk`), exists and is actively maintained — maintained directly by the MCP organization, 3.8k GitHub stars, implements the latest MCP spec (2026-07-28), passes the official conformance test suite 100%. It supports both server and client roles, stdio + streamable HTTP transports, and features like resources/prompts/sampling/OAuth/elicitation. It explicitly lacks SSE transport, but since the latest spec itself is moving toward streamable HTTP, this isn't treated as disqualifying. This resolves the one reason TS had been tentatively adopted (unconfirmed SDK maturity).
 
-## 결정
+## Decision
 
-**`docket-core`, `docket-cc`, `docket-mcp` 전부 Rust (확정).** `docket-console`만 웹(TS/JS, 프레임워크 미정) — 브라우저 UI라는 성격상 언어 선택 여지가 크지 않다.
+**`docket-core`, `docket-cc`, and `docket-mcp` are all Rust (settled).** `docket-console` alone is web (TS/JS, framework TBD) — as a browser UI, there isn't much room for language choice there anyway.
 
-## 결과
+## Consequences
 
-**얻은 것**: 세 계층(core/cc/mcp) 전부 순수 네이티브 바이너리로 배포되어 §15 목표 경험("설치 명령 한 번")에 부합한다. 툴체인이 하나(Cargo)로 통일되어 [open-questions.md](../open-questions.md) #1(모노리포 도구)이 사실상 Cargo workspace로 좁혀진다 — 다만 "의존 검사 도구"(§3.3 계층 강제장치 1) 자체는 여전히 선택해야 한다.
+**Gained**: all three layers (core/cc/mcp) ship as pure native binaries, matching §15's target experience ("a single install command"). The toolchain unifies on one (Cargo), which effectively narrows [open-questions.md](../open-questions.md) #1 (monorepo tooling) down to a Cargo workspace — though the "dependency-checking tool" itself (§3.3, layer-enforcement mechanism 1) still needs to be chosen.
 
-**포기한 것**: MCP 생태계의 레퍼런스·예제가 여전히 TS 중심이라, 막히는 지점에서 참고할 자료가 TS SDK보다 적을 수 있다. SSE 트랜스포트가 필요해지면(예: 특정 클라이언트가 streamable HTTP를 지원하지 않으면) 그때 재검토한다.
+**Given up**: the MCP ecosystem's reference material and examples still skew TS-centric, so when something's blocking, there may be less to reference than the TS SDK offers. If SSE transport turns out to be needed (e.g. a specific client that doesn't support streamable HTTP), that's the point to revisit this.
 
-## 재검토 트리거
+## Re-open trigger
 
-SSE 트랜스포트가 실제로 필요해지는 시점, 또는 `rmcp`의 기능 격차가 구현 중 실제로 발견되는 시점.
+Once SSE transport is actually needed, or a feature gap in `rmcp` is actually discovered during implementation.

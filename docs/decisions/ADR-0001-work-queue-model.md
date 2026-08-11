@@ -1,27 +1,27 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 확정
+Status: v0 alignment snapshot | 2026-08-11 | settled
 
-# ADR-0001: 작업큐/칸반 모델 채택
+# ADR-0001: Adopt the work-queue/kanban model
 
-## 맥락
+## Context
 
-여러 머신에서 상시 운영되는 다수의 Claude Code 세션 간 조정을 어떻게 모델링할지 정해야 한다. 조정 방식의 은유(이메일 / 메신저 / 작업큐)는 아이템의 생명, 실패 모드, 완료 의미론을 전부 결정하는 되돌리기 어려운 선택이다.
+We need to settle how coordination is modeled among the many Claude Code sessions running across multiple machines at once. The metaphor for coordination (email / messenger / work queue) is a hard-to-reverse choice that determines an item's lifecycle, its failure modes, and its completion semantics all at once.
 
-## 검토한 선택지와 트레이드오프
+## Options considered and trade-offs
 
-- **이메일 모델**: 발신 시점에 수신자(주소)가 확정되어야 한다. 그러나 실제 요청은 "이 문제를 고쳐달라"이지 "특정 머신의 특정 세션에게 보낸다"가 아니다. 반송·부재중 자동응답·사서함 생명주기 문제가 함께 따라온다.
-- **메신저 모델**: 전제가 presence다. 세션은 수시로 죽고 살아나므로 조정이 presence가 꺼질 때마다 증발한다. 완료 의미론이 없다 — 답 없이 죽는 스레드가 남는다.
-- **작업큐/칸반**: pull 모델이 "누가 할지 모름" 문제의 답이다. 아이템은 아무도 없어도 살아남는다. 보드가 "공이 누구 코트에 있는가"를 그대로 표현한다. WIP 한도가 안전장치와 자연히 겹친다.
+- **Email model**: the recipient (address) has to be resolved at send time. But the real request is "fix this problem," not "send it to a specific session on a specific machine." Bounce-back, out-of-office, and mailbox-lifecycle problems all come along with it.
+- **Messenger model**: its premise is presence. Sessions die and come back constantly, so coordination evaporates every time presence drops. There's no completion semantics — threads are left dangling with no answer.
+- **Work queue / kanban**: pull is the answer to "we don't know who will do it." An item survives even with no one around. The board is a direct representation of "whose court the ball is in." WIP limits naturally overlap with safeguards.
 
-## 결정
+## Decision
 
-작업큐/칸반 모델을 채택한다. 아이템은 토픽 앞으로 생성되고, 담당자 없이도 살아남으며, 워커가 pull로 집는다(`claim`).
+Adopt the work-queue/kanban model. Items are created in front of a topic, survive without an owner, and get picked up by a worker via pull (`claim`).
 
-## 결과
+## Consequences
 
-**얻은 것**: 주소가 아니라 주제로 요청할 수 있다. 세션이 죽어도 조정이 증발하지 않는다. 상태 기계로 완료 의미론이 명시적이다.
+**Gained**: requests can be addressed by subject instead of address. Coordination doesn't evaporate when a session dies. Completion semantics are explicit via the state machine.
 
-**포기한 것**: 실시간성([principles.md](../principles.md) — 지고도 괜찮은 축으로 명시적으로 포기). 발신 즉시 확인받는 대화형 상호작용은 이 모델로 못 한다(그건 `question`, [glossary.md](../glossary.md)로 분리).
+**Given up**: real-time-ness ([principles.md](../principles.md) — explicitly given up as an axis it's fine to lose on). Conversational interaction with an immediate ack on send isn't possible in this model (that's split out as `question`, see [glossary.md](../glossary.md)).
 
-## 재검토 트리거
+## Re-open trigger
 
-M2(존재 증명) 단계에서 A-1 가정("비동기 조정으로 충분하다", [goals.md](../goals.md))이 반증되면 — 즉 지연 때문에 아이템이 도착했을 때 이미 무의미해지는 사례가 빈번하면 재검토한다.
+Re-open if assumption A-1 ("async coordination is good enough," [goals.md](../goals.md)) gets disproven during M2 (proof of existence) — i.e., if items frequently arrive already moot due to delay.

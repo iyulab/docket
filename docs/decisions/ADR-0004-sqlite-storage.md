@@ -1,26 +1,26 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 확정
+Status: v0 alignment snapshot | 2026-08-11 | settled
 
-# ADR-0004: 저장소 엔진 — 단일 인스턴스 SQLite
+# ADR-0004: Storage engine — single-instance SQLite
 
-## 맥락
+## Context
 
-코어의 저장소 엔진은 정본 데이터를 보관하는 되돌리기 어려운 선택이다([principles.md](../principles.md) P-2 — 파일은 정본이 아니다, DB가 정본이다).
+The core's storage engine is a hard-to-reverse choice about where the source-of-truth data lives ([principles.md](../principles.md) P-2 — files aren't the source of truth, the DB is).
 
-## 검토한 선택지와 트레이드오프
+## Options considered and trade-offs
 
-- **분산 DB / 클라이언트-서버 RDBMS**: 다중 머신·다중 사용자 규모에 대비할 수 있지만, 지금 확정된 하드 제약(없음, [principles.md](../principles.md))과 품질속성 우선순위(단순함 1위)에 비해 과설계다.
-- **단일 인스턴스 SQLite**: 설치 마찰이 낮고, 1인 다중머신이라는 1차 사용자 규모([scope.md](../scope.md))에 정확히 맞는다.
+- **Distributed DB / client-server RDBMS**: prepares for multi-machine, multi-user scale, but is over-engineered relative to the currently settled hard constraints (none, [principles.md](../principles.md)) and the top-priority quality attribute (simplicity).
+- **Single-instance SQLite**: low installation friction, and matches the primary target scale — single owner, multiple machines ([scope.md](../scope.md)) — exactly.
 
-## 결정
+## Decision
 
-단일 인스턴스 SQLite로 시작한다.
+Start with a single-instance SQLite.
 
-## 결과
+## Consequences
 
-**얻은 것**: 설치 단순함(§15 목표 경험 — 서버 하나 띄우면 끝). 품질속성 1순위와 일치.
+**Gained**: installation simplicity (§15's target experience — spin up one server and you're done). Matches the top-priority quality attribute.
 
-**포기한 것**: 다중 서버·수평 확장은 이 결정으로 당장 불가능하다. 다중 사용자([ADR-0006](ADR-0006-single-owner-later.md))가 현실화되면 이 결정도 함께 재검토해야 한다.
+**Given up**: multiple servers / horizontal scaling isn't possible right away with this decision. If multi-user ([ADR-0006](ADR-0006-single-owner-later.md)) becomes real, this decision needs revisiting alongside it.
 
-## 재검토 트리거
+## Re-open trigger
 
-하드 제약에 성능이 추가되거나(현재는 없음), 다중 사용자·다중 서버 요구가 현실화되는 시점.
+Once a performance hard constraint gets added (currently none), or multi-user/multi-server demand becomes real.

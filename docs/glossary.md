@@ -1,26 +1,26 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Glossary
 
-## 코어 어휘 대응표
+## Core vocabulary mapping
 
-계층 누수를 막는 규율이다. 코어 코드에 오른쪽 열의 단어가 등장하면 리뷰에서 거부한다.
+This is the discipline that keeps layer boundaries from leaking. If a term from the right-hand column shows up in core code, reject it in review.
 
-| 코어 어휘 | 응용 어휘 (3번 층 등) |
+| Core vocabulary | Application vocabulary (layer 3, etc.) |
 |---|---|
-| worker | session, Claude Code 세션 |
-| topic | repo, repository, 저장소 |
+| worker | session, Claude Code session |
+| topic | repo, repository |
 | item | card, ticket, message, mail |
-| claim | assign, 배정 |
-| body | markdown, .md 파일 |
-| stream | hook, 훅 |
-| budget | token budget, 토큰 예산 |
+| claim | assign, assignment |
+| body | markdown, .md file |
+| stream | hook |
+| budget | token budget |
 
-오른쪽 열의 개념은 3번 층에서 왼쪽 열로 번역되어 코어에 전달된다. 번역이 일어나는 지점이 곧 계층 경계다.
+Concepts in the right-hand column get translated into the left-hand column at layer 3 before reaching the core. Wherever that translation happens is the layer boundary.
 
-## 용어 각주
+## Term notes
 
-- **`topic`**: JMS 계열의 topic(pub-sub, 구독자 전원이 같은 메시지를 받는 fan-out)이 아니다. Kafka의 topic + consumer group(경쟁 소비자, 한 명만 받음) 의미다. docket의 아이템은 한 워커만 집으므로 후자에 대응한다.
-- **`claim` vs `assign`**: `claim`은 워커가 스스로 집는 것(pull), `assign`(응용 계층 용어, §11.4 "강제 배정")은 관리자가 대신 트리거하는 것(push). 코어 프리미티브는 `claim` 하나이고, `assign`은 그 `claim`을 관리자 권한으로 트리거하는 응용 계층의 진입점이다.
-- **`state` vs `resolution`**: `state`는 워크플로 단계(`open/claimed/resolved/closed`), `resolution`은 닫힌 이유(`done/duplicate/wontfix/invalid`). 둘을 분리하는 것은 Bugzilla/Jira의 관행 — 상태가 하나 줄고, 관리자 조작 각각에 의미가 붙는다.
-- **`task` vs `question`**: `task`는 상태 기계를 가진 아이템(보드에 남음). `question`은 즉시 실패하는 질의(보드에 안 남음). [vision.md](vision.md) S3.
+- **`topic`**: not a JMS-style topic (pub-sub, fan-out to every subscriber). It means Kafka's topic + consumer group (competing consumers, only one gets the message). docket's items are picked up by exactly one worker, which matches the latter.
+- **`claim` vs `assign`**: `claim` is a worker picking up work on its own (pull). `assign` (application-layer term, "force-assign" in §11.4) is an admin triggering that on someone's behalf (push). The core primitive is `claim` alone — `assign` is the application layer's entry point for triggering that same `claim` under admin authority.
+- **`state` vs `resolution`**: `state` is the workflow stage (`open/claimed/resolved/closed`); `resolution` is why it closed (`done/duplicate/wontfix/invalid`). Splitting the two follows Bugzilla/Jira practice — one fewer state, and each admin action gets its own clear meaning.
+- **`task` vs `question`**: `task` is an item with a state machine (stays on the board). `question` fails immediately with no state machine (does not stay on the board). See [vision.md](vision.md) S3.

@@ -1,35 +1,35 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Roadmap
 
-먼 마일스톤일수록 추상적이고, 가까울수록 구체적이다.
+The further-out milestones are more abstract; the nearer ones are more concrete.
 
-## M1 — 코어 (첫 슬라이스)
+## M1 — Core (first slice)
 
-**범위**
-- 언어: Rust
-- 코어 API 최소셋: 워커 등록, 아이템 생성(file), 클레임, submit(→resolved), 요청자 승인(→closed, resolution=done)
-- 저장소: SQLite
-- 인터페이스: HTTP API만. mcp/cc/console 없음. 사람이 curl로 워커를 흉내낸다.
+**Scope**
+- Language: Rust
+- Minimal core API set: register worker, create item (file), claim, submit (→resolved), requester approval (→closed, resolution=done)
+- Storage: SQLite
+- Interface: HTTP API only. No mcp/cc/console. A human pretends to be a worker via curl.
 
-**완료 판정**: 터미널 두 개에서 서로 다른 "워커"인 척 curl로 조작한다. 워커A가 토픽 X 앞으로 아이템 생성 → 워커B가 X를 담당 등록 후 `list`로 발견 → claim → submit → 워커A가 승인(close). SQLite에 상태 전이가 정확히 기록된다. 동시에 두 워커가 같은 아이템을 claim 시도하면 하나만 성공한다(클레임 배타성 검증).
+**Completion criteria**: from two terminals, act as two different "workers" using curl. Worker A creates an item in front of topic X → Worker B registers as owning X and discovers it via `list` → claims it → submits it → Worker A approves it (closes it). SQLite records the state transitions exactly. If two workers try to claim the same item at the same time, only one succeeds (verifies claim exclusivity).
 
-근거: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisions/ADR-0007-language-runtime.md), [quality-ramp.md](quality-ramp.md) L0.
+Rationale: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisions/ADR-0007-language-runtime.md), [quality-ramp.md](quality-ramp.md) L0.
 
-## M2 — 존재 증명
+## M2 — Proof of existence
 
-`docket-mcp` + `docket-cc`. 두 세션이 실제로 아이템을 주고받아 [vision.md](vision.md) S1~S6을 수동으로 완주한다. 이것이 되면 제품이 성립한다.
+`docket-mcp` + `docket-cc`. Two sessions actually hand items back and forth to manually complete [vision.md](vision.md) S1~S6. Once this works, the product exists.
 
-훅 기반 능동 알림(§10)은 이 단계에서 필수가 아니다 — MCP 수동 호출만으로 완주 가능해야 한다([backlog.md](backlog.md) A-1 검증과 겹친다).
+Hook-driven active notifications (§10) aren't required at this stage — it must be possible to complete the loop using only manual MCP calls ([backlog.md](backlog.md), overlaps with the A-1 validation).
 
-## M3 — 콘솔
+## M3 — Console
 
-보드, 정체 감지, 관리자 조작 전체. 특히 "보완"(§11.4) — 이것이 콘솔의 존재 이유다. 사용률/번다운 계측이 실제로 시작되는 지점([goals.md](goals.md)).
+The board, stall detection, the full set of admin operations. Especially "refine" (§11.4) — this is the console's reason for existing. This is also where adoption-rate/burndown measurement actually starts ([goals.md](goals.md)).
 
-## M4 — 안전장치와 다중 머신
+## M4 — Safeguards and multiple machines
 
-예산 전체([open-questions.md](open-questions.md) #33~#39), 인증(#41~#43), 머신 간 라우팅, 배포 채널(#45~#48).
+The full budget mechanism ([open-questions.md](open-questions.md) #33~#39), auth (#41~#43), cross-machine routing, distribution channels (#45~#48).
 
-## 로드맵 밖
+## Off the roadmap
 
-다중 사용자 협업은 이 로드맵의 어느 마일스톤에도 없다 — Later([ADR-0006](decisions/ADR-0006-single-owner-later.md)).
+Multi-user collaboration doesn't appear in any milestone of this roadmap — it's Later ([ADR-0006](decisions/ADR-0006-single-owner-later.md)).

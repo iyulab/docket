@@ -1,16 +1,16 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Quality Ramp
 
-**현재 목표 레벨: L1.**
+**Current target level: L1.**
 
-| 레벨 | 정의 | 통과 기준 | 로드맵 매핑 |
+| Level | Definition | Pass criteria | Roadmap mapping |
 |---|---|---|---|
-| L0 골격 | 끝에서 끝까지 흐르나 (품질 무관) | 아이템 하나가 `open→claimed→resolved→closed`까지 두 세션 간에 실제로 완주. **클레임 배타성은 여기 이미 포함**(§4.4 도메인 정의 자체) | M2 |
-| L1 사용 가능 | 전형 사례에서 동작 | [vision.md](vision.md) S1~S6 시나리오가 전부 수동으로라도 동작 | M2 |
-| L2 신뢰 가능 | 경계·예외 처리, 실패 시 회복 | 죽은 워커 재클레임([open-questions.md](open-questions.md) #18), 파일 부분쓰기 방지(#25), 폭주 방지 테스트 통과(B-05) | L2 진입은 손절선(goals.md) 통과 후 |
-| L3 운영 가능 | 관측·성능·보안·문서 | 콘솔(M3) · 인증(§12.1) · 사용률/번다운 계측(D-11, B-09) 갖춤 | M3~M4 |
+| L0 skeleton | Does it flow end to end (quality aside) | A single item actually completes `open→claimed→resolved→closed` between two sessions. **Claim exclusivity is already included here** (part of the domain definition itself, §4.4) | M2 |
+| L1 usable | Works for the typical case | Scenarios S1~S6 ([vision.md](vision.md)) all work, even if only run manually | M2 |
+| L2 dependable | Boundary/exception handling, recovery from failure | Reclaiming after a dead worker ([open-questions.md](open-questions.md) #18), preventing partial file writes (#25), runaway-prevention test passes (B-05) | Entering L2 comes after passing the stop-loss criteria (goals.md) |
+| L3 operable | Observability, performance, security, docs | Console (M3) · auth (§12.1) · adoption/burndown measurement (D-11, B-09) all in place | M3~M4 |
 
-**L1에서 L2를 대충 넘어가지 않는 지점 하나**: 클레임 배타성은 품질속성 우선순위가 단순함 1위임에도 불구하고 L0/L1에 포함된다 — 이건 신뢰성 상세구현이 아니라 클레임(`claim`)의 정의 자체이기 때문이다([architecture.md](architecture.md)). L1의 나머지(재클레임, 부분쓰기 방지, 폭주방지)는 L2로 정당하게 미룬다.
+**One place where L1 doesn't casually skip past L2**: claim exclusivity is included in L0/L1 even though simplicity is the top-ranked quality attribute — because it's not an implementation detail of reliability, it's part of the very definition of `claim` ([architecture.md](architecture.md)). The rest of L1 (reclaiming, partial-write prevention, runaway prevention) is legitimately deferred to L2.
 
-**목표 레벨을 L1에 고정한 이유**: 품질속성 1순위가 단순함이고, [goals.md](goals.md)의 손절선이 "계속할 가치가 있는가"를 먼저 판정한다. L2(신뢰성 강화)에 투자하는 건 그 판정 이후다.
+**Why the target level is pinned at L1**: the top-priority quality attribute is simplicity, and the stop-loss criteria in [goals.md](goals.md) decide "is this still worth continuing?" first. Investing in L2 (hardening reliability) comes after that judgment.

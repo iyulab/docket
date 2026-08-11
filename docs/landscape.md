@@ -1,24 +1,24 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Landscape
 
-조사되지 않은 항목은 채워 넣지 않는다. 확인된 것만 적고, 나머지는 SPIKE로 넘긴다.
+Items that haven't been investigated aren't filled in here. Only confirmed facts go in; everything else is pushed to a SPIKE.
 
-## 현재 대안 (확인됨)
+## Current alternatives (confirmed)
 
-| 대안 | 방식 | 실패 지점 |
+| Alternative | Approach | Failure point |
 |---|---|---|
-| 파일 기반 이슈 초안 | 다른 리포 Claude Code 세션이 파일을 직접 읽음. 머신 간에는 git commit/push 또는 파일 복사-이동 | 상태 추적 없음, 알림 없음, 머신 간 지연 |
+| File-based draft issues | Another repo's Claude Code session reads the file directly. Crossing machines needs a git commit/push or copying/moving the file | No status tracking, no notifications, cross-machine delay |
 
-## 유사 제품 / 프레임워크
+## Similar products / frameworks
 
-**미조사.** 멀티에이전트·헤드리스 워커 조정을 다루는 기존 도구가 있는지 확인하지 않았다.
+**Not yet investigated.** Haven't confirmed whether existing tools already handle multi-agent/headless-worker coordination.
 
-> `[SPIKE B-01]` 조사 질문: 이런 도구가 있다면, 상태추적 모델·클레임 방식이 docket과 어떻게 다른가? 타임박스 1시간. 영향: 아래 차별화 가설의 재검증 여부.
+> `[SPIKE B-01]` Research question: if such tools exist, how does their status-tracking model and claiming approach differ from docket's? Timebox: 1 hour. Impact: whether the differentiation hypothesis below needs re-validating.
 
-## 잠정 차별점 가설
+## Tentative differentiation hypothesis
 
-- **이기는 축**: 상태 추적/정본 표현 — 칸반 상태가 어디에도 없던 것을 코어가 소유한다.
-- **지고도 괜찮은 축**: 실시간성(턴 경계에 몰아서 알림 와도 됨) + 복수 워커 협업(단일 클레임으로 충분).
+- **Axis we win on**: status tracking / a single source of truth for state — the core owns something a kanban state had nowhere to live before.
+- **Axis we're fine losing on**: real-time-ness (batching notifications at turn boundaries is fine) + multi-worker collaboration (single-claim is sufficient).
 
-이 가설은 SPIKE B-01 결과로 재검증될 수 있다.
+This hypothesis may need re-validating once SPIKE B-01 produces results.

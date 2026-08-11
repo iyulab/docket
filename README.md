@@ -1,44 +1,44 @@
 # docket
 
-헤드리스 워커를 위한 작업큐 서비스. Claude Code 세션은 그 워커의 한 종류일 뿐이다.
+A work-queue service for headless workers. A Claude Code session is just one kind of worker.
 
-## 누구를 위한 것인가
+## Who it's for
 
-여러 대의 머신에서 다수의 Claude Code(혹은 유사 헤드리스) 세션을 상시 운영하며, 세션들이 서로 다른 저장소나 서로 의존하는 컴포넌트를 다루는 1인 개발자. 코어 엔진은 Claude Code에 종속되지 않으므로, 타 프로젝트가 헤드리스 워커 조정에 재사용할 수 있다.
+Developers who keep multiple Claude Code (or similar headless) sessions running across several machines at once, where the sessions work on different repositories or on components that depend on each other. The core engine isn't tied to Claude Code, so other projects can reuse it for headless-worker coordination.
 
-## 무엇이 아닌가
+## What it isn't
 
-- 파일 동기화 서비스가 아니다 — 산출물 공유는 git이 한다.
-- 오케스트레이터가 아니다 — 중앙이 워커에게 작업을 자동 배분하지 않는다. 워커가 스스로 집는 pull 모델이다(사람의 수동 개입은 예외).
-- 실시간 채팅이 아니다.
-- 다중 사용자 협업 도구가 아니다 — 1차 목표는 한 사람이 소유한 여러 머신이다(다중 사용자는 Later, [ADR-0006](docs/decisions/ADR-0006-single-owner-later.md) 참조).
+- Not a file-sync service — artifact sharing is already git's job.
+- Not an orchestrator — the center never auto-distributes work to workers. It's a pull model where workers pick up their own work (a human's manual intervention is the exception).
+- Not real-time chat.
+- Not a multi-user collaboration tool — the primary target is one person owning multiple machines (multi-user is Later, see [ADR-0006](docs/decisions/ADR-0006-single-owner-later.md)).
 
-## 현재 상태
+## Current status
 
-**v0 정렬 완료, 구현 전.** 도메인 모델·계층 경계·성공 지표·손절선까지 정렬됐고, 코드는 아직 없다. 첫 슬라이스는 [roadmap.md](docs/roadmap.md)의 M1이다.
+**v0 alignment complete, pre-implementation.** The domain model, layer boundaries, success metrics, and stop-loss criteria are all aligned; there's no code yet. The first slice is M1 in [roadmap.md](docs/roadmap.md).
 
-## 다음 백로그
+## Backlog
 
-지금 무엇이 진행 중인지는 [backlog.md](docs/backlog.md)의 "지금" 구간이 정본이다 — 여기서 개별 항목을 다시 나열하지 않는다(중복 목록은 갱신을 놓치면 바로 어긋난다).
+What's currently in progress is tracked in the "Now" section of [backlog.md](docs/backlog.md) — items aren't re-listed here (a duplicated list drifts out of sync the moment it's not updated).
 
-## 문서
+## Docs
 
-| 문서 | 내용 |
+| Doc | Contents |
 |---|---|
-| [vision.md](docs/vision.md) | 문제 · 사용자 · 시나리오 |
-| [principles.md](docs/principles.md) | 철학 · 원칙 · 비목표 |
+| [vision.md](docs/vision.md) | Problem · users · scenarios |
+| [principles.md](docs/principles.md) | Philosophy · principles · non-goals |
 | [scope.md](docs/scope.md) | In / Out / Later |
-| [goals.md](docs/goals.md) | 북극성 · 목표 트리 · 지표 · 손절선 |
-| [landscape.md](docs/landscape.md) | 대안 지형 (대부분 미조사) |
-| [architecture.md](docs/architecture.md) | 시스템 경계 · 도메인 모델 · Type-1 결정 |
-| [coverage.md](docs/coverage.md) | 역량 × 사례 커버리지 행렬 |
-| [quality-ramp.md](docs/quality-ramp.md) | L0~L3 품질 레벨과 통과 기준 |
-| [backlog.md](docs/backlog.md) | 지금 / 다음 / 나중 |
-| [roadmap.md](docs/roadmap.md) | 마일스톤과 첫 슬라이스 |
-| [glossary.md](docs/glossary.md) | 코어 어휘 대응표 |
-| [open-questions.md](docs/open-questions.md) | 구현 중 결정할 것들 |
-| [decisions/](docs/decisions/) | ADR — Type-1 결정 1건당 1파일 |
+| [goals.md](docs/goals.md) | North star · goal tree · metrics · stop-loss criteria |
+| [landscape.md](docs/landscape.md) | Landscape of alternatives (mostly unsurveyed) |
+| [architecture.md](docs/architecture.md) | System boundaries · domain model · Type-1 decisions |
+| [coverage.md](docs/coverage.md) | Capability × case-type coverage matrix |
+| [quality-ramp.md](docs/quality-ramp.md) | L0~L3 quality levels and pass criteria |
+| [backlog.md](docs/backlog.md) | Now / Next / Later |
+| [roadmap.md](docs/roadmap.md) | Milestones and the first slice |
+| [glossary.md](docs/glossary.md) | Core vocabulary mapping |
+| [open-questions.md](docs/open-questions.md) | Things to decide during implementation |
+| [decisions/](docs/decisions/) | ADRs — one file per Type-1 decision |
 
-데이터 전략(`data-strategy.md`)은 이 프로젝트의 핵심이 아니므로 생략한다 — docket은 학습 데이터가 아니라 운영 상태(워커·아이템·클레임)를 다룬다.
+A data strategy doc isn't included since it isn't core to this project — docket deals with operational state (workers/items/claims), not training data.
 
-이후 세션이 지킬 규칙은 [AGENTS.md](AGENTS.md)에 있다.
+Rules future sessions follow are in [AGENTS.md](AGENTS.md).

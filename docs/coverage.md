@@ -1,21 +1,21 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Coverage
 
-역량 × 사례 유형 행렬. v1 필수 칸만 표시하고, 나머지는 백로그로 미룬다.
+A capability × case-type matrix. Only the cells required for v1 are marked; everything else is deferred to the backlog.
 
-| 능력 | 전형 | 경계 | 예외·이상 | 악의적·오용 |
+| Capability | Typical | Boundary | Exception/anomaly | Malicious/abuse |
 |---|---|---|---|---|
-| 아이템 생성 | **v1** | 미착수 | 미착수 | 미착수 |
-| 클레임 | **v1** | **v1**(동시 클레임 배타성) | 미착수(죽은 워커 재클레임 → L2) | 미착수 |
-| 상태 전이(resolved/closed) | **v1** | 미착수 | 미착수 | — |
-| 토픽 매칭(접두) | **v1** | 미착수(빈 토픽, 대소문자 등) | — | — |
-| 관리자 개입 — 보완 | **v1**(§11.4 "가장 중요한 기능") | 미착수 | — | — |
-| 관리자 개입 — 나머지(강제배정/종결/병합/일시정지) | 미착수(L2~L3) | — | — | — |
-| 정체 감지 | 미착수(L3, 콘솔 필요) | — | — | — |
-| 질의(ask) | **v1**(S3 시나리오) | 미착수(담당자 복수 시) | — | — |
-| 프롬프트 인젝션 방어 | — | — | — | 미착수(L2~L3로 유예, §17 위험으로는 계속 추적) |
+| Item creation | **v1** | Not started | Not started | Not started |
+| Claiming | **v1** | **v1** (concurrent-claim exclusivity) | Not started (reclaiming after a dead worker → L2) | Not started |
+| State transition (resolved/closed) | **v1** | Not started | Not started | — |
+| Topic matching (prefix) | **v1** | Not started (empty topic, casing, etc.) | — | — |
+| Admin intervention — refine | **v1** (§11.4, "the single most important feature") | Not started | — | — |
+| Admin intervention — everything else (force-assign/force-close/merge/pause) | Not started (L2~L3) | — | — | — |
+| Stall detection | Not started (L3, needs the console) | — | — | — |
+| Question (`ask`) | **v1** (S3 scenario) | Not started (multiple owners) | — | — |
+| Prompt-injection defense | — | — | — | Not started (deferred to L2~L3, still tracked as §17 risk) |
 
-**v1 필수(6칸)**: 아이템 생성/전형, 클레임/전형+경계, 상태전이/전형, 토픽매칭/전형, 보완/전형, 질의/전형. 이 6개가 [roadmap.md](roadmap.md) M2의 완료 판정 범위와 일치한다.
+**v1-required (6 cells)**: item creation/typical, claiming/typical+boundary, state transition/typical, topic matching/typical, refine/typical, question/typical. These six line up exactly with the completion criteria for [roadmap.md](roadmap.md) M2.
 
-**인젝션 방어를 v1에서 뺀 이유**: 공개 범위는 전체 공개로 확정했지만([architecture.md](architecture.md)), M2~M3 단계는 실질적으로 본인 세션들끼리만 도는 폐쇄 환경이다. 토픽 접근 제어([open-questions.md](open-questions.md) #43)가 결정되지 않은 상태에서 외부 워커가 붙는 시나리오 자체가 아직 없다.
+**Why injection defense was left out of v1**: public scope is settled as fully public ([architecture.md](architecture.md)), but M2~M3 is, in practice, a closed environment where only the developer's own sessions are running. With topic access control ([open-questions.md](open-questions.md) #43) still undecided, there's no scenario yet where an external worker even attaches.

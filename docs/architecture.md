@@ -1,80 +1,80 @@
-상태: v0 정렬 스냅샷 | 2026-08-11 | 이 문서는 구현 중 갱신된다
+Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Architecture
 
-Type-1(되돌리기 어려운) 결정만 다룬다. 구현 세부는 [open-questions.md](open-questions.md)에 있다.
+Covers only Type-1 (hard-to-reverse) decisions. Implementation detail lives in [open-questions.md](open-questions.md).
 
-## 네 계층
+## Four layers
 
-| # | 이름 | 책임 | 소비자를 아는가 |
+| # | Name | Responsibility | Knows its consumer? |
 |---|---|---|---|
-| 1 | `docket-core` | 헤드리스 작업큐. 워커·토픽·아이템·클레임·정체·예산. HTTP API + 실시간 스트림 | 모름 |
-| 2 | `docket-mcp` | 코어를 MCP로 노출. 능동(pull) 표면 | AI 일반 |
-| 3 | `docket-cc` | Claude Code 어댑터. 로컬 데몬, 훅 엔드포인트, 파일 표현, 식별자 매핑. 수동(push) 표면 | Claude Code |
-| 4 | `docket-console` | 관리 UI. 코어 API의 순수 클라이언트 | 인간 |
+| 1 | `docket-core` | Headless work queue. Worker/topic/item/claim/stall/budget. HTTP API + real-time stream | No |
+| 2 | `docket-mcp` | Exposes the core over MCP. Active (pull) surface | AI in general |
+| 3 | `docket-cc` | Claude Code adapter. Local daemon, hook endpoints, file representation, identifier mapping. Passive (push) surface | Claude Code |
+| 4 | `docket-console` | Admin UI. A pure client of the core API | Human |
 
-의존 방향은 단선이다: `console → core`, `mcp → core`, `cc → mcp → core`. 역방향은 없다.
+Dependencies flow one way: `console → core`, `mcp → core`, `cc → mcp → core`. Never the reverse.
 
-**경계의 근거**: 1·4는 소비자가 인간인지 AI인지 알 필요가 없다. AI가 없었어도 존재했을 물건이다. 2·3만 AI 전용이다. 2와 3을 가르는 선은 pull과 push의 경계와 정확히 겹친다 — MCP 툴은 모델이 부르기로 결심해야 실행되는 순수 pull, 훅으로 턴 경계에 밀어넣는 건 push다. 자세한 논거는 [ADR-0002](decisions/ADR-0002-four-layer-architecture.md).
+**Why the boundary is drawn here**: layers 1 and 4 don't need to know whether their consumer is human or AI — they're things that would exist even without AI. Only 2 and 3 are AI-only. The line between 2 and 3 lands exactly on the pull/push boundary — an MCP tool is purely pull (the model has to decide to call it), while a hook pushed in at a turn boundary is push. Full reasoning: [ADR-0002](decisions/ADR-0002-four-layer-architecture.md).
 
-**구현 언어**: `docket-core`·`docket-cc`·`docket-mcp` = Rust(확정), `docket-console`만 웹. 세 계층을 한 언어로 통일해도 P-1(코어는 소비자를 모른다)과 모순되지 않는다 — 계층 간 통신은 여전히 HTTP를 거치므로 경계는 언어가 아니라 프로토콜이 긋는다. 근거: [ADR-0007](decisions/ADR-0007-language-runtime.md).
+**Implementation language**: `docket-core` · `docket-cc` · `docket-mcp` = Rust (settled), `docket-console` alone is web. Unifying the three layers on one language doesn't conflict with P-1 (core doesn't know its consumers) — layers still communicate over HTTP, so the boundary is drawn by protocol, not language. Rationale: [ADR-0007](decisions/ADR-0007-language-runtime.md).
 
-## 단일 리포와 강제 장치
+## Single repo, enforced by mechanism
 
-계층별 소비자가 하나뿐이므로 리포를 나누지 않는다. 대신 다음 세 장치로 계층 누수를 막는다.
+Since each layer has exactly one consumer, we don't split it across repos. Instead, three mechanisms prevent leakage between layers:
 
-1. **의존 방향 검사** — 코어 패키지가 상위 계층을 참조하면 빌드 실패.
-2. **코어 테스트에 Claude Code가 등장하지 않는다** — 세션·훅·CLAUDE.md가 코어 테스트에 나오면 개념이 샌 것.
-3. **코어의 어휘 고정** — [glossary.md](glossary.md) 대응표를 위반하는 식별자는 리뷰에서 거부.
+1. **Dependency-direction checking** — the build fails if a core package references a higher layer.
+2. **No Claude Code in core tests** — if a session, a hook, or CLAUDE.md shows up in a core test, a concept has leaked.
+3. **Locked core vocabulary** — an identifier that violates the [glossary.md](glossary.md) mapping table gets rejected in review.
 
-## 도메인 모델
+## Domain model
 
-코어가 아는 개념은 넷뿐이다.
+The core knows exactly four concepts.
 
-- **worker** — 작업을 처리할 수 있는 주체. 사람인지 AI 세션인지 스크립트인지 코어는 모른다. 담당 가능한 토픽 목록을 신고하고, 온라인/오프라인 상태를 가진다.
-- **topic** — 작업의 대상. 코어에게는 불투명한 계층 경로다. 코어는 두 가지만 안다: (1) 구분자로 나뉜 계층 경로다, (2) 접두 매칭이 가능하다(`iyulab/*`를 담당하는 워커는 `iyulab/ironhive` 앞 아이템의 후보가 된다). 각 마디의 의미는 응용이 정한다 — 코어는 "리포"라는 단어를 모른다.
-- **item** — 처리를 기다리는 하나의 작업 단위. 토픽 앞으로 생성되며, 생성 시점에 담당자가 없어도 된다.
-- **claim** — 워커가 아이템을 집어 담당이 되는 행위. **배타적**이다 — 복수 워커의 동시 클레임은 허용하지 않는다(단일 클레임으로 확정, [ADR-0002](decisions/ADR-0002-four-layer-architecture.md)).
+- **worker** — an entity that can process work. The core doesn't know whether it's a human, an AI session, or a script. It reports which topics it can own, and has an online/offline status.
+- **topic** — the target of work. To the core it's an opaque hierarchical path. The core knows exactly two things about it: (1) it's a path split by a separator, (2) prefix matching is possible (a worker that owns `iyulab/*` becomes a candidate for an item in front of `iyulab/ironhive`). The meaning of each segment is defined by the application — the core doesn't know the word "repo."
+- **item** — a single unit of work waiting to be processed. Created in front of a topic; it's fine for it to have no owner at creation time.
+- **claim** — a worker picking up an item to become its owner. **Exclusive** — concurrent claims by multiple workers aren't allowed (single-claim only, settled — [ADR-0002](decisions/ADR-0002-four-layer-architecture.md)).
 
-`claim`은 워커가 스스로 집는 pull이다. 관리자의 "강제 배정"은 이 `claim`을 관리자가 대신 트리거하는 응용/권한 계층의 진입점일 뿐, 코어에 별도의 `assign` 개념이 필요한 건 아니다.
+A `claim` is a pull a worker performs on its own. An admin's "force-assign" is just an entry point at the application/permission layer where the admin triggers that same `claim` on the worker's behalf — the core doesn't need a separate `assign` concept.
 
-## 아이템 상태 스키마
+## Item state schema
 
 ```
 state: open | claimed | resolved | closed
-resolution: null | done | duplicate | wontfix | invalid   # closed일 때만 값 존재
+resolution: null | done | duplicate | wontfix | invalid   # only has a value when closed
 ```
 
-`resolved`는 "공이 요청자에게 돌아온 지점"을 명시한다 — 워커가 처리를 보고했고, 요청자가 확인해서 닫는다(Bugzilla/Jira의 RESOLVED와 동일한 의미). `resolution`은 상태(`state`)와 분리된 별도 필드로, 관리자 조작을 다음과 같이 매핑한다:
+`resolved` marks the point where "the ball is back in the requester's court" — the worker has reported that it handled the item, and the requester confirms and closes it (same meaning as RESOLVED in Bugzilla/Jira). `resolution` is a separate field from `state`, and admin operations map onto it as follows:
 
-| 관리자 조작 | resolution |
+| Admin operation | resolution |
 |---|---|
-| 제거(잘못 생성된 아이템 정리) | `invalid` |
-| 병합(중복 아이템 통합) | `duplicate` |
-| 강제 종결(의미 없어진 아이템 닫기) | `wontfix` |
-| 요청자 승인(정상 완료) | `done` |
+| Remove (clean up an item created by mistake) | `invalid` |
+| Merge (consolidate a duplicate item) | `duplicate` |
+| Force-close (close an item that's become irrelevant) | `wontfix` |
+| Requester approval (normal completion) | `done` |
 
-`expired`는 여기 없다 — 클레임 자동 만료·정체 자동 종결 정책이 아직 결정되지 않았다([open-questions.md](open-questions.md) #14, #16, #19). 그 정책이 확정될 때 추가한다.
+There's no `expired` here — the policy for automatic claim expiry / automatic stall-closing hasn't been decided yet ([open-questions.md](open-questions.md) #14, #16, #19). It gets added once that policy is settled.
 
-전체 결정 근거: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
+Full decision rationale: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
 
-## 질의(question)
+## Question
 
-아이템(`task`)과 별개로, 상태 기계 없이 즉시 실패하는 요청 유형이 있다 — 담당자가 없으면 그 자리에서 실패하고 보드에 남지 않는다. `[vision.md](vision.md)` S3 참조. 코어에 둘지 3번 층에만 둘지는 미결이다([open-questions.md](open-questions.md) #20).
+Separately from items (`task`), there's a request type with no state machine that fails immediately — if there's no owner, it fails on the spot and never lands on the board. See [vision.md](vision.md) S3. Whether it lives in the core or only at layer 3 is still undecided ([open-questions.md](open-questions.md) #20).
 
-## 저장소 엔진
+## Storage engine
 
-**단일 인스턴스 SQLite로 시작한다**([ADR-0004](decisions/ADR-0004-sqlite-storage.md)). 하드 제약에 성능이 없고([principles.md](principles.md)), 규모가 1인 다중머신 전제라 이 이상이 당장 필요 없다.
+**Starting with a single-instance SQLite** ([ADR-0004](decisions/ADR-0004-sqlite-storage.md)). There's no hard performance constraint ([principles.md](principles.md)), and the assumed scale (single owner, multiple machines) doesn't need more than this right now.
 
-## 공개 범위와 라이선스
+## Public scope and license
 
-**전체 공개, 단일 모노레포.** 라이선스는 Apache-2.0. 네 계층 전부 하나의 공개 리포에서 개발한다(별도 리포 분리 계획 없음). 이 결정 시점부터 커밋·문서·코드 전체에 내부 맥락 스크럽 규율이 적용된다. 근거: [ADR-0005](decisions/ADR-0005-public-scope.md).
+**Fully public, single monorepo.** License is Apache-2.0. All four layers are developed in one public repo (no plan to split into separate repos). From this decision onward, internal-context scrubbing discipline applies to every commit, doc, and line of code. Rationale: [ADR-0005](decisions/ADR-0005-public-scope.md).
 
-## 확장 지점
+## Extension points
 
-계층 분할이 실제로 여는 것들이다.
+What the layer split actually opens up.
 
-- **다른 에이전트 런타임** → 3번 층만 추가(2번은 이미 범용)
-- **사람 워커**(모바일에서 사람이 아이템을 집어감) → 4번 확장, 코어 무변경
-- **다른 토픽 관행**(리포가 아닌 체계) → 응용 관행만 추가
-- **`aims`** → 장애 이벤트가 아이템, 자체 에이전트가 워커. 코어 그대로
+- **Other agent runtimes** → add layer 3 only (layer 2 is already general-purpose)
+- **Human workers** (someone picking up items from a phone) → extend layer 4, core unchanged
+- **Other topic conventions** (systems that aren't repos) → add only an application convention
+- **`aims`** → an incident event becomes an item, its own agent becomes the worker. Core stays as-is
