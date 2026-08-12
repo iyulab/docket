@@ -1,5 +1,5 @@
 //! Verifies a downloaded release asset against the `checksums.txt` the
-//! release also publishes (Task 8 generates it with `sha256sum * > checksums.txt`,
+//! release build also publishes (generated with `sha256sum * > checksums.txt`,
 //! so the format here must match `sha256sum`'s own output: `<hex>  <name>`).
 
 use sha2::{Digest, Sha256};

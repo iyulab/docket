@@ -67,8 +67,8 @@ mod tests {
 
     #[test]
     fn current_platform_resolves_to_something() {
-        // This test suite only ever runs on platforms release.yml actually
-        // builds for (Task 8), so this must always be Some(_).
+        // This test suite only ever runs on platforms the release build
+        // actually targets, so this must always be Some(_).
         assert!(current_asset_name("docket-mcp").is_some());
     }
 }
