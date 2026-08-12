@@ -79,5 +79,3 @@ If two workers race to claim the same item, exactly one gets `200`; the other ge
 | [decisions/](docs/decisions/) | ADRs — one file per Type-1 decision |
 
 A data strategy doc isn't included since it isn't core to this project — docket deals with operational state (workers/items/claims), not training data.
-
-Rules future sessions follow are in [AGENTS.md](AGENTS.md).
