@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/docket-core", "crates/docket-mcp", "crates/docket-cc"]
+members = ["crates/docket-core", "crates/docket-mcp", "crates/docket-cc", "crates/docket-mcp-launcher"]
 
 [workspace.package]
 edition = "2024"
