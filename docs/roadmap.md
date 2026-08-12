@@ -16,15 +16,15 @@ The further-out milestones are more abstract; the nearer ones are more concrete.
 
 **Status**: met — see `docket-core`'s test suite and the README "Running it" walkthrough.
 
-Rationale: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisions/ADR-0007-language-runtime.md), [quality-ramp.md](quality-ramp.md) L0.
+Rationale: [ADR-0001](decisions/ADR-0001-work-queue-model.md), [ADR-0007](decisions/ADR-0007-language-runtime.md).
 
 ## M2 — Proof of existence
 
 `docket-mcp` + `docket-cc`. Two sessions actually hand items back and forth to manually complete [vision.md](vision.md) S1~S6. Once this works, the product exists.
 
-Hook-driven active notifications (see [open-questions.md](open-questions.md) #31~34) aren't required at this stage — it must be possible to complete the loop using only manual MCP calls ([backlog.md](backlog.md), overlaps with the A-1 validation).
+Hook-driven active notifications aren't required at this stage — it must be possible to complete the loop using only manual MCP calls (overlaps with the A-1 validation in [goals.md](goals.md)).
 
-**Status**: `docket-mcp` done (register/create/list/claim/submit/approve as MCP tools, an HTTP client of `docket-core` — see README "As an MCP server"). `docket-cc` not started — file representation location settled ([ADR-0008](decisions/ADR-0008-file-representation-location.md)), so scaffolding can begin, see [backlog.md](backlog.md) [B-07].
+**Status**: `docket-mcp` done (register/create/list/claim/submit/approve as MCP tools, an HTTP client of `docket-core` — see README "As an MCP server"). `docket-cc` not started — file representation location settled ([ADR-0008](decisions/ADR-0008-file-representation-location.md)), so scaffolding can begin.
 
 ## M3 — Console
 
@@ -32,7 +32,7 @@ The board, stall detection, the full set of admin operations. Especially "refine
 
 ## M4 — Safeguards and multiple machines
 
-The full budget mechanism ([open-questions.md](open-questions.md) #33~#39), auth (#41~#43), cross-machine routing, distribution channels (#45~#48).
+The full budget mechanism, auth, cross-machine routing, distribution channels.
 
 ## Off the roadmap
 

@@ -20,7 +20,7 @@ No concept other than worker, topic, item, claim, body, stream, budget enters th
 
 Only the core DB is authoritative; local files (`docket-cc`'s directory representation) are just a projection of it.
 
-**When it gets expensive**: whenever a user wants to edit a file directly to change state — honoring this principle means every change has to go through the API, giving up one intuitive shortcut ([open-questions.md](open-questions.md) #26).
+**When it gets expensive**: whenever a user wants to edit a file directly to change state — honoring this principle means every change has to go through the API, giving up one intuitive shortcut. Still undecided whether that trade-off is worth revisiting.
 
 ### P-3. Not an orchestrator, pull only
 
@@ -33,7 +33,7 @@ The center never auto-distributes work to workers. A human's manual intervention
 **Simplicity > reliability > scalability.**
 
 - Scalability ranks lowest because P-1 already buys most of it structurally (layer separation + enforced vocabulary), without having to chase it separately.
-- Reliability ranks below simplicity but not last: something like claim exclusivity is part of the domain model's own definition ([architecture.md](architecture.md) `claim`), not an implementation detail of reliability — so it's never sacrificed in the name of "keep it simple" ([quality-ramp.md](quality-ramp.md) L0/L1).
+- Reliability ranks below simplicity but not last: something like claim exclusivity is part of the domain model's own definition ([architecture.md](architecture.md) `claim`), not an implementation detail of reliability — so it's never sacrificed in the name of "keep it simple."
 - Hard constraints (regulatory, performance, team, deadline): none. This is a single-person dogfooding tool at small scale, so no separate performance target is set. The deadline is handled by the stop-loss criteria in [goals.md](goals.md) instead.
 
 ## Non-goals

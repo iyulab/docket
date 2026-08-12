@@ -20,14 +20,14 @@ Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 | Automatic work distribution (orchestration) | P-3; a human's manual assignment is the exception |
 | Real-time chat | Explicitly given up in the differentiation hypothesis (an axis it's fine to lose on) |
 | Multi-worker collaborative claims | Settled as single-claim only — exclusive claiming is part of the domain model's definition |
-| Prompt-injection defense (in full) | Excluded from v1 coverage — deferred to L2~L3 ([coverage.md](coverage.md)) |
+| Prompt-injection defense (in full) | Excluded from v1 coverage — deferred to L2~L3 |
 | Regulatory compliance, performance tuning | Settled as no hard constraints ([principles.md](principles.md)) |
 
 ## Later
 
 | Item | Condition | Related doc |
 |---|---|---|
-| Multi-user (team-scale) | Revisit once the auth approach is settled ([open-questions.md](open-questions.md) #42~44) | [ADR-0006](decisions/ADR-0006-single-owner-later.md) |
+| Multi-user (team-scale) | Revisit once the auth approach is settled | [ADR-0006](decisions/ADR-0006-single-owner-later.md) |
 | Other agent runtimes (e.g. `aims`) | The structure already supports adding just layer 3. Once real demand shows up | [architecture.md](architecture.md) extension points |
 | Human workers (a person picking up items from a phone) | Possible with layer-4-only extension, no core changes. Once demand shows up | [architecture.md](architecture.md) |
-| Standardizing non-repo topic namespaces | Once topics that aren't repos (org knowledge, machines, environments) actually start being used | [open-questions.md](open-questions.md) #8 |
+| Standardizing non-repo topic namespaces | Once topics that aren't repos (org knowledge, machines, environments) actually start being used | still undecided |

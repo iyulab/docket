@@ -2,7 +2,7 @@ Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 # Architecture
 
-Covers only Type-1 (hard-to-reverse) decisions. Implementation detail lives in [open-questions.md](open-questions.md).
+Covers only Type-1 (hard-to-reverse) decisions. Everything else is deliberately left open until implementation forces a choice.
 
 ## Four layers
 
@@ -54,13 +54,13 @@ resolution: null | done | duplicate | wontfix | invalid   # only has a value whe
 | Force-close (close an item that's become irrelevant) | `wontfix` |
 | Requester approval (normal completion) | `done` |
 
-There's no `expired` here — the policy for automatic claim expiry / automatic stall-closing hasn't been decided yet ([open-questions.md](open-questions.md) #14, #16, #19). It gets added once that policy is settled.
+There's no `expired` here — the policy for automatic claim expiry / automatic stall-closing hasn't been decided yet. It gets added once that policy is settled.
 
 Full decision rationale: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
 
 ## Question
 
-Separately from items (`task`), there's a request type with no state machine that fails immediately — if there's no owner, it fails on the spot and never lands on the board. See [vision.md](vision.md) S3. Whether it lives in the core or only at layer 3 is still undecided ([open-questions.md](open-questions.md) #20).
+Separately from items (`task`), there's a request type with no state machine that fails immediately — if there's no owner, it fails on the spot and never lands on the board. See [vision.md](vision.md) S3. Whether it lives in the core or only at layer 3 is still undecided.
 
 ## Storage engine
 

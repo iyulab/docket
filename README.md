@@ -25,7 +25,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 cargo run -p docket-core
 ```
 
-Binds to `127.0.0.1:8420` by default — no auth exists yet, so this keeps the API off the network until M4 adds it ([open-questions.md](docs/open-questions.md) #51). Override with `DOCKET_BIND` / `DOCKET_PORT`. Opens/creates a SQLite file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Then, acting as two workers from two terminals:
+Binds to `127.0.0.1:8420` by default — no auth exists yet, so this keeps the API off the network until M4 adds it. Override with `DOCKET_BIND` / `DOCKET_PORT`. Opens/creates a SQLite file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Then, acting as two workers from two terminals:
 
 ```
 JSON='-H Content-Type:application/json'
@@ -64,10 +64,6 @@ If two workers race to claim the same item, exactly one gets `200`; the other ge
 
 `docket-core` must already be running (see above). This is the manual-MCP-calls loop M2's completion criteria describes ([roadmap.md](docs/roadmap.md#m2--proof-of-existence)) — no hooks or automatic notifications yet, so a session has to be told to call these tools.
 
-## Backlog
-
-What's currently in progress is tracked in the "Now" section of [backlog.md](docs/backlog.md) — items aren't re-listed here (a duplicated list drifts out of sync the moment it's not updated).
-
 ## Docs
 
 | Doc | Contents |
@@ -78,12 +74,8 @@ What's currently in progress is tracked in the "Now" section of [backlog.md](doc
 | [goals.md](docs/goals.md) | North star · goal tree · metrics · stop-loss criteria |
 | [landscape.md](docs/landscape.md) | Landscape of alternatives (mostly unsurveyed) |
 | [architecture.md](docs/architecture.md) | System boundaries · domain model · Type-1 decisions |
-| [coverage.md](docs/coverage.md) | Capability × case-type coverage matrix |
-| [quality-ramp.md](docs/quality-ramp.md) | L0~L3 quality levels and pass criteria |
-| [backlog.md](docs/backlog.md) | Now / Next / Later |
 | [roadmap.md](docs/roadmap.md) | Milestones and the first slice |
 | [glossary.md](docs/glossary.md) | Core vocabulary mapping |
-| [open-questions.md](docs/open-questions.md) | Things to decide during implementation |
 | [decisions/](docs/decisions/) | ADRs — one file per Type-1 decision |
 
 A data strategy doc isn't included since it isn't core to this project — docket deals with operational state (workers/items/claims), not training data.

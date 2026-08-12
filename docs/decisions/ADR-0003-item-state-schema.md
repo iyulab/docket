@@ -32,4 +32,4 @@ Mapping: remove→`invalid`, merge→`duplicate`, force-close→`wontfix`, reque
 
 ## Re-open trigger
 
-Add `expired` to `resolution` once [open-questions.md](../open-questions.md) #14/#16/#19 (claim expiry, automatic stall-closing) are decided.
+Add `expired` to `resolution` once the claim-expiry / automatic-stall-closing policy is decided.

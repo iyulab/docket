@@ -12,7 +12,7 @@ Items that haven't been investigated aren't filled in here. Only confirmed facts
 
 ## Similar products / frameworks
 
-**`[SPIKE B-01]` done (2026-08-12).** Several tools exist; none confirmed to combine docket's specific pairing of (a) a persistent store items survive in without an owner and (b) cross-repo topic-prefix ownership behind a protocol-neutral core.
+Several tools exist; none confirmed to combine docket's specific pairing of (a) a persistent store items survive in without an owner and (b) cross-repo topic-prefix ownership behind a protocol-neutral core.
 
 | Tool | Approach | Failure point (relative to docket) |
 |---|---|---|
@@ -26,4 +26,4 @@ Items that haven't been investigated aren't filled in here. Only confirmed facts
 - **Axis we win on**: status tracking / a single source of truth for state — the core owns something a kanban state had nowhere to live before. Confirmed as still differentiating against Swarm Protocol (heartbeat/message-based, no confirmed persistent store) and Code Conductor (GitHub Issues as substrate); Hermes Kanban does have a comparable SQLite-backed store but couples it to its own agent-profile system rather than a protocol-neutral core.
 - **Axis we're fine losing on**: real-time-ness (batching notifications at turn boundaries is fine) + multi-worker collaboration (single-claim is sufficient).
 
-Hypothesis holds after B-01; no re-validation forced. Re-open if a tool combining a protocol-neutral persistent core with cross-repo topic ownership turns up later.
+Hypothesis holds; no re-validation forced. Re-open if a tool combining a protocol-neutral persistent core with cross-repo topic ownership turns up later.
