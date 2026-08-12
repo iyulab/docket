@@ -17,7 +17,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 ## Current status
 
-**M1 done, M2 in progress** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API) and `docket-mcp` (exposes the same operations as MCP tools) exist and are covered by tests. No `docket-cc`/`docket-console` yet — without `docket-cc`'s hooks, an AI worker has to be told to call the MCP tools explicitly rather than being notified automatically.
+**M1 done, M2 in progress** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection + a `SessionStart` hook) exist and are covered by tests. No `docket-console` yet.
 
 ## Running it
 
@@ -63,6 +63,48 @@ If two workers race to claim the same item, exactly one gets `200`; the other ge
 ```
 
 `docket-core` must already be running (see above). This is the manual-MCP-calls loop M2's completion criteria describes ([roadmap.md](docs/roadmap.md#m2--proof-of-existence)) — no hooks or automatic notifications yet, so a session has to be told to call these tools.
+
+### As a local file projection
+
+`docket-cc` (no arguments) projects every item in a worker's owned topics onto a local `.md` file (frontmatter + the item's `body` as markdown), so a session can read its work as files instead of MCP calls. The worker must already be registered (see above):
+
+```
+DOCKET_CORE_URL=http://127.0.0.1:8420 \
+DOCKET_WORKER_ID=w1 \
+DOCKET_CC_ROOT=~/.docket \
+cargo run -p docket-cc
+```
+
+`DOCKET_CC_ROOT` defaults to a platform user-data directory ([ADR-0008](docs/decisions/ADR-0008-file-representation-location.md) — deliberately outside any repo). Layout mirrors the topic path: an item in `iyulab/docket` lands at `<root>/iyulab/docket/<item-id>.md`. This is one-shot and write-only for now — run it again to pick up changes; it doesn't yet remove a projection for an item that closed or left the worker's owned topics.
+
+### As a Claude Code hook
+
+`docket-cc hook` runs the same projection, then prints a plain-text summary of currently open items (nothing, if there are none) — meant for a `SessionStart` hook, whose stdout gets injected into the session's context automatically. Wire it into `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "docket-cc",
+            "args": ["hook"],
+            "env": {
+              "DOCKET_CORE_URL": "http://127.0.0.1:8420",
+              "DOCKET_WORKER_ID": "w1"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+A sync failure inside `hook` (core unreachable, worker not registered) is swallowed — reported to stderr, not stdout — so a broken connection reports nothing rather than injecting an error into every session's context. There's no daemon behind this yet; each invocation does its own one-shot sync, and whether a persistent daemon is actually needed is still open (see [architecture.md](docs/architecture.md) for `docket-cc`'s full intended shape).
 
 ## Docs
 
