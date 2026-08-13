@@ -64,6 +64,21 @@ If two workers race to claim the same item, exactly one gets `200`; the other ge
 
 `docket-core` must already be running (see above). This is the manual-MCP-calls loop M2's completion criteria describes ([roadmap.md](docs/roadmap.md#m2--proof-of-existence)) — no hooks or automatic notifications yet, so a session has to be told to call these tools.
 
+#### Installing docket-mcp (without building from source)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.ps1 | iex
+```
+
+This installs a small launcher as `docket-mcp` that checks GitHub Releases for updates on every
+run and caches the latest build locally — point your MCP client's `command` at it the same way as
+above, no `cargo run` needed. Set `DOCKET_INSTALL_DIR` before running the script to install
+somewhere other than the default.
+
 ### As a local file projection
 
 `docket-cc` (no arguments) projects every item in a worker's owned topics onto a local `.md` file (frontmatter + the item's `body` as markdown), so a session can read its work as files instead of MCP calls. The worker must already be registered (see above):
