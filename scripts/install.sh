@@ -23,6 +23,11 @@ case "$arch" in
   *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
 esac
 
+if [ "$os" = "Linux" ] && [ "$platform_arch" = "aarch64" ]; then
+  echo "Unsupported combination: Linux on aarch64 (no release build exists yet)" >&2
+  exit 1
+fi
+
 asset="docket-mcp-launcher-${platform_arch}-${platform}"
 url="https://github.com/${REPO}/releases/latest/download/${asset}"
 
