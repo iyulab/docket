@@ -72,9 +72,15 @@ mod tests {
         let body = r#"{"tag_name":"v0.2.0","assets":[{"name":"docket-mcp-x86_64-pc-windows-msvc.exe","browser_download_url":"http://example/dl"}]}"#;
         let base = serve_once("HTTP/1.1 200 OK", body).await;
         let client = reqwest::Client::new();
-        let release = latest_release(&client, &base, "iyulab", "docket").await.unwrap();
+        let release = latest_release(&client, &base, "iyulab", "docket")
+            .await
+            .unwrap();
         assert_eq!(release.tag_name, "v0.2.0");
-        assert!(release.asset("docket-mcp-x86_64-pc-windows-msvc.exe").is_some());
+        assert!(
+            release
+                .asset("docket-mcp-x86_64-pc-windows-msvc.exe")
+                .is_some()
+        );
         assert!(release.asset("nonexistent").is_none());
     }
 

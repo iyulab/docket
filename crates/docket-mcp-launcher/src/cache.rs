@@ -15,7 +15,9 @@ pub fn cache_root() -> anyhow::Result<PathBuf> {
 
 /// Path a cached worker binary for `version` would live at (may not exist).
 pub fn cached_binary_path(cache_root: &Path, version: &str, binary_ext: &str) -> PathBuf {
-    cache_root.join(version).join(format!("docket-mcp{binary_ext}"))
+    cache_root
+        .join(version)
+        .join(format!("docket-mcp{binary_ext}"))
 }
 
 /// Writes `bytes` (already checksum-verified by the caller) into the cache
@@ -32,7 +34,10 @@ pub fn store(
     let dir = cache_root.join(version);
     std::fs::create_dir_all(&dir)?;
     let final_path = cached_binary_path(cache_root, version, binary_ext);
-    let tmp_path = dir.join(format!(".docket-mcp{binary_ext}.tmp-{}", std::process::id()));
+    let tmp_path = dir.join(format!(
+        ".docket-mcp{binary_ext}.tmp-{}",
+        std::process::id()
+    ));
     std::fs::write(&tmp_path, bytes)?;
     #[cfg(unix)]
     {
@@ -103,8 +108,14 @@ mod tests {
         let root = temp_root();
         store(&root, "v0.1.0", "", b"old").unwrap();
         store(&root, "v0.2.0", "", b"new").unwrap();
-        assert_eq!(std::fs::read(cached_binary_path(&root, "v0.1.0", "")).unwrap(), b"old");
-        assert_eq!(std::fs::read(cached_binary_path(&root, "v0.2.0", "")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(cached_binary_path(&root, "v0.1.0", "")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            std::fs::read(cached_binary_path(&root, "v0.2.0", "")).unwrap(),
+            b"new"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
