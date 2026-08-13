@@ -2,8 +2,7 @@
 //! name `docket-mcp`. It checks GitHub Releases for the latest `docket-mcp`
 //! worker build, downloads it into a local cache if needed (verifying its
 //! checksum first), and execs the cached worker with this process's stdio
-//! inherited. Full design: `claudedocs/plans/PLAN-docket-20260812-mcp-launcher-design.md`
-//! (private, `docket-works`).
+//! inherited.
 //!
 //! Never writes to its own stdout — stdout becomes the MCP JSON-RPC stream
 //! once the worker takes over. All diagnostics here go to stderr.
