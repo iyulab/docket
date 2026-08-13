@@ -17,7 +17,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 ## Current status
 
-**M1 done, M2 in progress** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection + a `SessionStart` hook) exist and are covered by tests. No `docket-console` yet.
+**M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection + a `SessionStart` hook) exist and are covered by tests. `docket-console` exists as a read-only kanban board — see "As a console" below.
 
 ## Running it
 
@@ -120,6 +120,23 @@ cargo run -p docket-cc
 ```
 
 A sync failure inside `hook` (core unreachable, worker not registered) is swallowed — reported to stderr, not stdout — so a broken connection reports nothing rather than injecting an error into every session's context. There's no daemon behind this yet; each invocation does its own one-shot sync, and whether a persistent daemon is actually needed is still open (see [architecture.md](docs/architecture.md) for `docket-cc`'s full intended shape).
+
+### As a console
+
+`docket-console` is a read-only kanban board: every item, grouped into `open` / `claimed` /
+`resolved` / `closed` columns, polling `docket-core` every 5 seconds. It's a pure client of the
+core HTTP API — no writes, no `docket-cc` involved.
+
+```bash
+cd console
+npm install
+npm run dev
+```
+
+By default it proxies to `docket-core` at `http://127.0.0.1:8420`. Point it elsewhere by copying
+`.env.example` to `.env` and setting `VITE_DOCKET_CORE_URL`. This is the first slice of M3 — see
+[roadmap.md](docs/roadmap.md#m3--console) for what's still ahead (write operations, stall
+detection, refine).
 
 ## Docs
 
