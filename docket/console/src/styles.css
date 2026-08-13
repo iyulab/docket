@@ -1,4 +1,117 @@
 body {
   margin: 0;
   font-family: system-ui, sans-serif;
+  background: #f4f5f7;
+  color: #1a1a1a;
+}
+
+.app {
+  padding: 1.5rem;
+}
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.app-header h1 {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+.banner {
+  padding: 0.4rem 0.75rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.banner-error {
+  background: #fdecea;
+  color: #a4262c;
+  border: 1px solid #f3c7c4;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.column {
+  background: #ebecf0;
+  border-radius: 6px;
+  padding: 0.5rem;
+}
+
+.column-header {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  padding: 0.25rem 0.4rem 0.5rem;
+  color: #44546f;
+}
+
+.column-count {
+  color: #6b778c;
+}
+
+.column-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 40px;
+}
+
+.card {
+  background: white;
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  box-shadow: 0 1px 2px rgba(9, 30, 66, 0.2);
+  font-size: 0.9rem;
+}
+
+.card-title {
+  font-weight: 500;
+}
+
+.card-topic {
+  color: #6b778c;
+  font-size: 0.8rem;
+}
+
+.card-id {
+  color: #97a0af;
+  font-size: 0.75rem;
+  font-family: monospace;
+}
+
+.badge {
+  display: inline-block;
+  margin-top: 0.35rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  background: #dfe1e6;
+  color: #42526e;
+}
+
+.badge-done {
+  background: #e3fcef;
+  color: #006644;
+}
+
+.badge-duplicate,
+.badge-wontfix {
+  background: #eae6ff;
+  color: #403294;
+}
+
+.badge-invalid {
+  background: #fdecea;
+  color: #a4262c;
 }
