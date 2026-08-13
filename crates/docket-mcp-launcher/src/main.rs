@@ -147,6 +147,8 @@ fn fall_back_to_cache(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -352,12 +354,16 @@ mod tests {
         let cache_root = temp_cache_root("already-cached");
         cache::store(&cache_root, "v0.9.9", "", b"already here").unwrap();
 
-        // Only route the mock serves is releases/latest — no /asset or
-        // /checksums.txt route exists. `spawn_serving` stops accepting once
-        // it has served its one route, so a stray download attempt would
-        // hit a closed listener and fail fast with "connection refused"
-        // rather than hang — caught by the final .unwrap() below, not a
-        // silent false pass.
+        // No /asset or /checksums.txt route exists — only releases/latest is
+        // configured below. That alone isn't proof the download path was
+        // skipped: `resolve_worker_binary` now falls back to
+        // `cache::latest_cached` on *any* download failure, and that
+        // fallback would find this same already-cached v0.9.9 binary and
+        // return it successfully even if a doomed download attempt was made
+        // first. So this test can't rely on "the assertion passed" to show
+        // the cache-hit early return fired — it has to observe, directly,
+        // that no connection beyond the one releases/latest request was
+        // ever made.
         let (listener, base) = bind_mock().await;
         let release_json = format!(
             r#"{{"tag_name":"v0.9.9","assets":[{{"name":"{asset_name}","browser_download_url":"{base}/asset"}}]}}"#
@@ -367,12 +373,57 @@ mod tests {
             "/repos/iyulab/docket/releases/latest".to_string(),
             ("application/json", release_json.into_bytes()),
         );
-        spawn_serving(listener, routes);
+
+        // Counts connections accepted after the expected releases/latest
+        // request. Any non-zero count means the code attempted a download
+        // despite the version already being cached — a regression in the
+        // cache-hit early return that must fail this test, not be masked by
+        // cache-fallback silently producing the same bytes.
+        let extra_connections = Arc::new(AtomicUsize::new(0));
+        let extra_connections_counter = Arc::clone(&extra_connections);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let path = request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap();
+            let (content_type, body) = routes
+                .get(path)
+                .unwrap_or_else(|| panic!("unexpected request path: {path}"));
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+            drop(socket);
+
+            // Keep accepting so any further connection attempt is observed
+            // (and counted) instead of just failing fast against a closed
+            // listener, which would be indistinguishable from "no attempt
+            // was ever made" from outside this task.
+            while let Ok((extra_socket, _)) = listener.accept().await {
+                extra_connections_counter.fetch_add(1, Ordering::SeqCst);
+                drop(extra_socket);
+            }
+        });
 
         let path = resolve_worker_binary(&cache_root, asset_name, "", &base)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"already here");
+        assert_eq!(
+            extra_connections.load(Ordering::SeqCst),
+            0,
+            "cache-hit early return should skip the download entirely, \
+             but a connection beyond releases/latest was made"
+        );
 
         std::fs::remove_dir_all(&cache_root).unwrap();
     }

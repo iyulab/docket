@@ -3,7 +3,7 @@
 # docket-mcp-launcher release asset and places it locally as "docket-mcp" —
 # your MCP client config points at that file; the launcher itself checks
 # GitHub Releases for the actual docket-mcp worker on every run.
-set -euo pipefail
+set -eu
 
 REPO="iyulab/docket"
 INSTALL_DIR="${DOCKET_INSTALL_DIR:-$HOME/.local/bin}"
