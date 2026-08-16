@@ -6,5 +6,6 @@
 //! design §4) — this binary itself does not loop or sleep between checks.
 
 pub mod decision;
+pub mod deploy;
 pub mod download;
 pub mod status;
