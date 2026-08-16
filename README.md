@@ -64,7 +64,7 @@ If two workers race to claim the same item, exactly one gets `200`; the other ge
 
 `docket-core` must already be running (see above). This is the manual-MCP-calls loop M2's completion criteria describes ([roadmap.md](docs/roadmap.md#m2--proof-of-existence)) — no hooks or automatic notifications yet, so a session has to be told to call these tools.
 
-#### Installing docket-mcp (without building from source)
+#### Installing docket-mcp and docket-cc (without building from source)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.sh | sh
@@ -74,9 +74,10 @@ curl -fsSL https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.
 irm https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.ps1 | iex
 ```
 
-This installs a small launcher as `docket-mcp` that checks GitHub Releases for updates on every
-run and caches the latest build locally — point your MCP client's `command` at it the same way as
-above, no `cargo run` needed. Set `DOCKET_INSTALL_DIR` before running the script to install
+This installs small launchers as `docket-mcp` and `docket-cc` that check GitHub Releases for
+updates on every run and cache the latest build locally — point your MCP client's `command` at
+`docket-mcp` and your Claude Code hook's `command` at `docket-cc` the same way as the examples
+below, no `cargo run` needed. Set `DOCKET_INSTALL_DIR` before running the script to install
 somewhere other than the default.
 
 ### As a local file projection

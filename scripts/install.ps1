@@ -1,18 +1,26 @@
-# Installs the docket-mcp launcher for this machine. Downloads the latest
-# docket-mcp-launcher release asset and places it locally as "docket-mcp.exe" -
-# your MCP client config points at that file; the launcher itself checks
-# GitHub Releases for the actual docket-mcp worker on every run.
+# Installs the docket-mcp and docket-cc launchers for this machine. Downloads
+# the latest docket-mcp-launcher and docket-cc-launcher release assets and
+# places them locally as "docket-mcp.exe"/"docket-cc.exe" - your MCP client
+# config and Claude Code hook config point at these files; each launcher
+# checks GitHub Releases for its own worker on every run.
 $ErrorActionPreference = "Stop"
 
 $Repo = "iyulab/docket"
 $InstallDir = if ($env:DOCKET_INSTALL_DIR) { $env:DOCKET_INSTALL_DIR } else { "$env:LOCALAPPDATA\docket\bin" }
-$Asset = "docket-mcp-launcher-x86_64-pc-windows-msvc.exe"
-$Url = "https://github.com/$Repo/releases/latest/download/$Asset"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Write-Output "Downloading $Asset..."
-Invoke-WebRequest -Uri $Url -OutFile "$InstallDir\docket-mcp.exe"
 
-Write-Output "Installed to $InstallDir\docket-mcp.exe"
-Write-Output "Make sure $InstallDir is on your PATH, then point your MCP client's"
-Write-Output "`"command`" at `"docket-mcp.exe`" with DOCKET_CORE_URL set to your docket-core host."
+$Workers = @{
+    "docket-mcp" = "docket-mcp-launcher-x86_64-pc-windows-msvc.exe"
+    "docket-cc"  = "docket-cc-launcher-x86_64-pc-windows-msvc.exe"
+}
+foreach ($worker in $Workers.Keys) {
+    $asset = $Workers[$worker]
+    $url = "https://github.com/$Repo/releases/latest/download/$asset"
+    Write-Output "Downloading $asset..."
+    Invoke-WebRequest -Uri $url -OutFile "$InstallDir\$worker.exe"
+    Write-Output "Installed to $InstallDir\$worker.exe"
+}
+
+Write-Output "Make sure $InstallDir is on your PATH. Point your MCP client's `"command`" at"
+Write-Output "`"docket-mcp.exe`" (with DOCKET_CORE_URL set) and any Claude Code hook at `"docket-cc.exe`"."
