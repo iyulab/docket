@@ -56,10 +56,10 @@ fn api_routes() -> Router<Arc<Store>> {
         .fallback(api_not_found)
 }
 
-/// `/api/*`가 매치되지 않을 때의 fallback. 명시적으로 이걸 지정하지 않으면 axum은 nested
-/// 라우터의 fallback을 outer router(정적 서빙 SPA fallback)에서 상속받는다 — 그러면
-/// `/api/nonexistent` 같은 요청이 `index.html`을 돌려주게 된다. API 밑에서는 항상 JSON으로
-/// 404가 나야 한다.
+/// Fallback for unmatched `/api/*` paths. Without an explicit fallback here, axum
+/// inherits the nested router's fallback from the outer router (the static SPA
+/// fallback) — meaning requests like `/api/nonexistent` would wrongly return
+/// `index.html` instead of a JSON error. API routes must always return JSON 404s.
 async fn api_not_found() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -69,8 +69,9 @@ async fn api_not_found() -> impl IntoResponse {
     )
 }
 
-/// `console_dir`(빌드된 docket-console, 예: `console/dist`)가 아직 없어도 `ServeDir`/`ServeFile`은
-/// 요청 시점에 404를 내는 것뿐이라 서버 기동 자체는 실패하지 않는다.
+/// `console_dir` (the built docket-console, e.g. `console/dist`) can be missing —
+/// `ServeDir`/`ServeFile` defer file I/O to request time, so a missing directory
+/// only produces 404s per-request, not a server startup failure.
 fn build_router(store: Arc<Store>, console_dir: &std::path::Path) -> Router {
     let index_file = tower_http::services::ServeFile::new(console_dir.join("index.html"));
     let static_service = tower_http::services::ServeDir::new(console_dir).fallback(index_file);
