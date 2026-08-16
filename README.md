@@ -138,6 +138,12 @@ By default it proxies to `docket-core` at `http://127.0.0.1:8420`. Point it else
 [roadmap.md](docs/roadmap.md#m3--console) for what's still ahead (write operations, stall
 detection, refine).
 
+In production, `docket-core` itself serves the built console — no separate server needed. Run
+`npm run build` in `console/`, then point `docket-core` at the output with `DOCKET_CONSOLE_DIR`
+(defaults to `console/dist`, relative to `docket-core`'s working directory). It's served at `/`,
+with client-side routes falling back to `index.html`; the API it talks to is available at the
+same origin under `/api/*` (an alias for the same routes documented above).
+
 ## Docs
 
 | Doc | Contents |

@@ -20,7 +20,9 @@ async fn main() {
     let db_path = std::env::var("DOCKET_DB_PATH").unwrap_or_else(|_| "docket.db".to_string());
 
     let store = Store::open(&db_path).expect("failed to open store");
-    let app = build_router(Arc::new(store));
+    let console_dir =
+        std::env::var("DOCKET_CONSOLE_DIR").unwrap_or_else(|_| "console/dist".to_string());
+    let app = build_router(Arc::new(store), std::path::Path::new(&console_dir));
 
     let addr: SocketAddr = format!("{bind}:{port}")
         .parse()
@@ -43,7 +45,7 @@ async fn shutdown_signal() {
         .expect("failed to install Ctrl+C handler");
 }
 
-fn build_router(store: Arc<Store>) -> Router {
+fn api_routes() -> Router<Arc<Store>> {
     Router::new()
         .route("/workers", post(register_worker))
         .route("/items", post(create_item).get(list_items))
@@ -51,6 +53,32 @@ fn build_router(store: Arc<Store>) -> Router {
         .route("/items/{id}/claim", post(claim_item))
         .route("/items/{id}/submit", post(submit_item))
         .route("/items/{id}/approve", post(approve_item))
+        .fallback(api_not_found)
+}
+
+/// `/api/*`가 매치되지 않을 때의 fallback. 명시적으로 이걸 지정하지 않으면 axum은 nested
+/// 라우터의 fallback을 outer router(정적 서빙 SPA fallback)에서 상속받는다 — 그러면
+/// `/api/nonexistent` 같은 요청이 `index.html`을 돌려주게 된다. API 밑에서는 항상 JSON으로
+/// 404가 나야 한다.
+async fn api_not_found() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorBody {
+            error: "not found".to_string(),
+        }),
+    )
+}
+
+/// `console_dir`(빌드된 docket-console, 예: `console/dist`)가 아직 없어도 `ServeDir`/`ServeFile`은
+/// 요청 시점에 404를 내는 것뿐이라 서버 기동 자체는 실패하지 않는다.
+fn build_router(store: Arc<Store>, console_dir: &std::path::Path) -> Router {
+    let index_file = tower_http::services::ServeFile::new(console_dir.join("index.html"));
+    let static_service = tower_http::services::ServeDir::new(console_dir).fallback(index_file);
+
+    Router::new()
+        .merge(api_routes())
+        .nest("/api", api_routes())
+        .fallback_service(static_service)
         .with_state(store)
 }
 
@@ -198,12 +226,14 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use std::path::PathBuf;
     use tower::ServiceExt;
 
     fn test_app() -> Router {
-        build_router(Arc::new(
-            Store::open(":memory:").expect("in-memory store opens"),
-        ))
+        build_router(
+            Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+            std::path::Path::new("/nonexistent-console-dir-for-tests"),
+        )
     }
 
     async fn json_body(response: Response) -> serde_json::Value {
@@ -354,5 +384,145 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_alias_matches_bare_route() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/items")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let items = json_body(resp).await;
+        assert_eq!(items.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn unmatched_api_path_is_json_404() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "not found");
+    }
+
+    fn temp_console_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "docket-core-console-test-{label}-{}",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn console_index_served_at_root() {
+        let dir = temp_console_dir("index-at-root");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("index.html"),
+            "<html>docket-console-test-marker</html>",
+        )
+        .unwrap();
+
+        let app = build_router(
+            Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+            &dir,
+        );
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("docket-console-test-marker"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn spa_fallback_serves_index_for_unknown_client_route() {
+        let dir = temp_console_dir("spa-fallback");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("index.html"),
+            "<html>docket-console-test-marker</html>",
+        )
+        .unwrap();
+
+        let app = build_router(
+            Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+            &dir,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/some/client/side/route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("docket-console-test-marker"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn static_asset_is_served_as_itself_not_index_fallback() {
+        let dir = temp_console_dir("real-asset");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(
+            dir.join("index.html"),
+            "<html>docket-console-test-marker</html>",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("assets").join("app.js"),
+            "console.log('docket-console-asset-marker');",
+        )
+        .unwrap();
+
+        let app = build_router(
+            Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+            &dir,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "console.log('docket-console-asset-marker');"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
