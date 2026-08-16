@@ -36,8 +36,9 @@ jobs:
       - name: Add target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Build docket-mcp, docket-cc, and their launchers
+      - name: Build docket-core, docket-mcp, docket-cc, and their launchers
         run: |
+          cargo build --release -p docket-core --target ${{ matrix.target }}
           cargo build --release -p docket-mcp --target ${{ matrix.target }}
           cargo build --release -p docket-cc --target ${{ matrix.target }}
           cargo build --release -p docket-mcp-launcher --target ${{ matrix.target }}
@@ -47,7 +48,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          for bin in docket-mcp docket-cc docket-mcp-launcher docket-cc-launcher; do
+          for bin in docket-core docket-mcp docket-cc docket-mcp-launcher docket-cc-launcher; do
             cp "target/${{ matrix.target }}/release/${bin}${{ matrix.ext }}" \
                "dist/${bin}-${{ matrix.target }}${{ matrix.ext }}"
           done
@@ -58,8 +59,34 @@ jobs:
           path: dist/*
           retention-days: 1
 
+  build-console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build docket-console
+        run: |
+          npm --prefix console ci
+          npm --prefix console run build
+
+      - name: Zip console/dist
+        run: |
+          mkdir -p dist
+          (cd console/dist && zip -r ../../dist/console-dist.zip .)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-console
+          path: dist/*
+          retention-days: 1
+
   release:
-    needs: build
+    needs: [build, build-console]
     runs-on: ubuntu-latest
     permissions:
       contents: write
