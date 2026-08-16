@@ -142,7 +142,9 @@ In production, `docket-core` itself serves the built console — no separate ser
 `npm run build` in `console/`, then point `docket-core` at the output with `DOCKET_CONSOLE_DIR`
 (defaults to `console/dist`, relative to `docket-core`'s working directory). It's served at `/`,
 with client-side routes falling back to `index.html`; the API it talks to is available at the
-same origin under `/api/*` (an alias for the same routes documented above).
+same origin under `/api/*` (an alias for the same routes documented above). Only `/api/*` is
+guaranteed a JSON error on an unmatched path — the root namespace falls back to the SPA's
+`index.html` for anything it doesn't recognize, since that's what client-side routing needs.
 
 ## Docs
 

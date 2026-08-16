@@ -76,6 +76,8 @@ fn build_router(store: Arc<Store>, console_dir: &std::path::Path) -> Router {
     let index_file = tower_http::services::ServeFile::new(console_dir.join("index.html"));
     let static_service = tower_http::services::ServeDir::new(console_dir).fallback(index_file);
 
+    // The bare routes' api_not_found fallback (via merge) is intentionally overridden by
+    // fallback_service: bare paths fall through to the SPA, while /api/* keeps its JSON 404.
     Router::new()
         .merge(api_routes())
         .nest("/api", api_routes())
@@ -523,6 +525,45 @@ mod tests {
             String::from_utf8_lossy(&bytes),
             "console.log('docket-console-asset-marker');"
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn root_is_404_when_console_dir_is_missing() {
+        let resp = test_app()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bare_unmatched_path_falls_back_to_html_unlike_api() {
+        let dir = temp_console_dir("bare-vs-api-asymmetry");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("index.html"),
+            "<html>docket-console-test-marker</html>",
+        )
+        .unwrap();
+
+        let app = build_router(
+            Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+            &dir,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/itemz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("docket-console-test-marker"));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
