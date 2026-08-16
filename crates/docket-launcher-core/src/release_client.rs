@@ -37,7 +37,11 @@ pub async fn latest_release(
 ) -> anyhow::Result<Release> {
     let url = format!("{api_base}/repos/{owner}/{repo}/releases/latest");
     // GitHub's API rejects requests with no User-Agent header.
-    let resp = client.get(&url).header("User-Agent", USER_AGENT).send().await?;
+    let resp = client
+        .get(&url)
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         anyhow::bail!("GitHub releases API returned {}", resp.status());
     }
