@@ -365,6 +365,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "docket-launcher-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "reqwest",
+ "serde",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "docket-mcp"
 version = "0.1.0"
 dependencies = [

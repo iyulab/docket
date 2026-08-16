@@ -1,0 +1,7 @@
+//! Shared "check GitHub Releases → cache if needed → verify checksum → exec"
+//! launcher logic, reused by both `docket-mcp-launcher` and
+//! `docket-cc-launcher`.
+
+mod checksum;
+mod delegate;
+mod platform;
