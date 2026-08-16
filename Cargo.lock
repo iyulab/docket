@@ -394,10 +394,7 @@ name = "docket-mcp-launcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dirs",
- "reqwest",
- "serde",
- "sha2",
+ "docket-launcher-core",
  "tokio",
 ]
 
