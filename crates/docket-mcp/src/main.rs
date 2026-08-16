@@ -33,6 +33,10 @@ struct CreateItemParams {
     title: String,
     #[serde(default)]
     body: Option<String>,
+    /// Free-form labels. Call `list_tags` first to reuse existing
+    /// vocabulary instead of inventing a new tag string.
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -50,6 +54,23 @@ struct ListItemsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SearchItemsParams {
+    /// Full-text match against title+body.
+    #[serde(default)]
+    query: Option<String>,
+    /// Filter to items carrying any/all of these tags (see `tag_match`).
+    #[serde(default)]
+    tags: Vec<String>,
+    /// "any" (default) or "all". Ignored if `tags` is empty.
+    #[serde(default)]
+    tag_match: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ClaimOrSubmitParams {
     item_id: String,
     worker_id: String,
@@ -57,6 +78,32 @@ struct ClaimOrSubmitParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ApproveParams {
+    item_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TagsParams {
+    item_id: String,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListTagsParams {
+    /// Scope the vocabulary to items under this exact-match topic.
+    #[serde(default)]
+    topic: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AddCommentParams {
+    item_id: String,
+    #[serde(default)]
+    author: Option<String>,
+    body: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListCommentsParams {
     item_id: String,
 }
 
@@ -71,6 +118,11 @@ struct ItemDto {
     state: String,
     resolution: Option<String>,
     owner: Option<String>,
+    /// Absent from servers older than the tag feature. Without a default,
+    /// every tool response from such a server fails to deserialize, not just
+    /// the tag-related ones.
+    #[serde(default)]
+    tags: Vec<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -80,6 +132,21 @@ struct WorkerDto {
     id: String,
     topics: Vec<String>,
     online: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TagCountDto {
+    tag: String,
+    count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CommentDto {
+    id: String,
+    item_id: String,
+    author: String,
+    body: String,
+    created_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +232,39 @@ impl DocketMcp {
     }
 
     #[tool(
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists"
+    )]
+    async fn search_items(
+        &self,
+        Parameters(p): Parameters<SearchItemsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut query_pairs: Vec<(&str, &str)> = Vec::new();
+        if let Some(q) = p.query.as_deref() {
+            query_pairs.push(("q", q));
+        }
+        for tag in &p.tags {
+            query_pairs.push(("tag", tag.as_str()));
+        }
+        if let Some(m) = p.tag_match.as_deref() {
+            query_pairs.push(("tag_match", m));
+        }
+        if let Some(t) = p.topic.as_deref() {
+            query_pairs.push(("topic", t));
+        }
+        if let Some(s) = p.state.as_deref() {
+            query_pairs.push(("state", s));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/items", self.base_url))
+            .query(&query_pairs)
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<Vec<ItemDto>>(resp).await
+    }
+
+    #[tool(
         description = "Claim an open item — exclusive, only one worker can win a race for the same item"
     )]
     async fn claim_item(
@@ -212,6 +312,92 @@ impl DocketMcp {
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Add tags to an item (idempotent — adding an already-present tag is a no-op)"
+    )]
+    async fn add_tags(
+        &self,
+        Parameters(p): Parameters<TagsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .post(format!("{}/items/{}/tags", self.base_url, p.item_id))
+            .json(&serde_json::json!({ "tags": p.tags }))
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<Vec<String>>(resp).await
+    }
+
+    #[tool(
+        description = "Remove tags from an item (idempotent — removing an absent tag is a no-op)"
+    )]
+    async fn remove_tags(
+        &self,
+        Parameters(p): Parameters<TagsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .delete(format!("{}/items/{}/tags", self.base_url, p.item_id))
+            .json(&serde_json::json!({ "tags": p.tags }))
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<Vec<String>>(resp).await
+    }
+
+    #[tool(
+        description = "List existing tags and how many items carry each, most-used first — call this before drafting a new item to reuse existing vocabulary instead of a new synonym"
+    )]
+    async fn list_tags(
+        &self,
+        Parameters(p): Parameters<ListTagsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .get(format!("{}/tags", self.base_url))
+            .query(&[("topic", p.topic.as_deref())])
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<Vec<TagCountDto>>(resp).await
+    }
+
+    #[tool(
+        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices"
+    )]
+    async fn add_comment(
+        &self,
+        Parameters(p): Parameters<AddCommentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut body = serde_json::json!({ "body": p.body });
+        if let Some(author) = p.author {
+            body["author"] = serde_json::Value::String(author);
+        }
+        let resp = self
+            .http
+            .post(format!("{}/items/{}/comments", self.base_url, p.item_id))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<CommentDto>(resp).await
+    }
+
+    #[tool(description = "List an item's comment thread in chronological order")]
+    async fn list_comments(
+        &self,
+        Parameters(p): Parameters<ListCommentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .get(format!("{}/items/{}/comments", self.base_url, p.item_id))
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<Vec<CommentDto>>(resp).await
     }
 }
 
@@ -336,6 +522,7 @@ mod tests {
                 topic: "iyulab/docket".to_string(),
                 title: "fix the thing".to_string(),
                 body: None,
+                tags: vec![],
             }))
             .await
             .unwrap();
@@ -411,6 +598,7 @@ mod tests {
                 topic: "iyulab/docket".to_string(),
                 title: "race".to_string(),
                 body: None,
+                tags: vec![],
             }))
             .await
             .unwrap();
@@ -450,8 +638,147 @@ mod tests {
                 topic: "iyulab/docket".to_string(),
                 title: "t".to_string(),
                 body: None,
+                tags: vec![],
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_item_with_tags_then_add_remove_and_list_tags() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("tags.db");
+        let core = spawn_core(18422, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/node-packages".to_string(),
+                title: "t".to_string(),
+                body: None,
+                tags: vec!["severity:medium".to_string()],
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        let added = server
+            .add_tags(Parameters(TagsParams {
+                item_id: item_id.clone(),
+                tags: vec!["awaiting-release".to_string()],
+            }))
+            .await
+            .unwrap();
+        assert_ne!(added.is_error, Some(true));
+
+        let tags = server
+            .list_tags(Parameters(ListTagsParams { topic: None }))
+            .await
+            .unwrap();
+        let tags_value: serde_json::Value = serde_json::from_str(text_of(&tags)).unwrap();
+        assert!(tags_value.as_array().unwrap().len() >= 2);
+
+        let removed = server
+            .remove_tags(Parameters(TagsParams {
+                item_id: item_id.clone(),
+                tags: vec!["awaiting-release".to_string()],
+            }))
+            .await
+            .unwrap();
+        let removed_value: serde_json::Value = serde_json::from_str(text_of(&removed)).unwrap();
+        assert_eq!(removed_value, serde_json::json!(["severity:medium"]));
+    }
+
+    #[tokio::test]
+    async fn search_items_finds_by_query_and_tag() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-search-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("search.db");
+        let core = spawn_core(18423, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/node-packages".to_string(),
+                title: "form Enter bypasses preventDefault".to_string(),
+                body: None,
+                tags: vec!["severity:medium".to_string()],
+            }))
+            .await
+            .unwrap();
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/node-packages".to_string(),
+                title: "unrelated".to_string(),
+                body: None,
+                tags: vec![],
+            }))
+            .await
+            .unwrap();
+
+        let found = server
+            .search_items(Parameters(SearchItemsParams {
+                query: Some("preventDefault".to_string()),
+                tags: vec![],
+                tag_match: None,
+                topic: None,
+                state: None,
+            }))
+            .await
+            .unwrap();
+        let found_value: serde_json::Value = serde_json::from_str(text_of(&found)).unwrap();
+        assert_eq!(found_value.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_comment_then_list_comments() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-comments-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("comments.db");
+        let core = spawn_core(18424, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "t".to_string(),
+                body: None,
+                tags: vec![],
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        let added = server
+            .add_comment(Parameters(AddCommentParams {
+                item_id: item_id.clone(),
+                author: Some("maintainer".to_string()),
+                body: "root cause found".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(added.is_error, Some(true));
+
+        let listed = server
+            .list_comments(Parameters(ListCommentsParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+        let listed_value: serde_json::Value = serde_json::from_str(text_of(&listed)).unwrap();
+        assert_eq!(listed_value.as_array().unwrap().len(), 1);
+        assert_eq!(listed_value[0]["author"], "maintainer");
     }
 }

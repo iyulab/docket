@@ -82,6 +82,7 @@ pub struct Item {
     pub state: State,
     pub resolution: Option<Resolution>,
     pub owner: Option<String>,
+    pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -95,6 +96,54 @@ pub fn topic_matches(owned: &str, item_topic: &str) -> bool {
     item_topic
         .strip_prefix(owned)
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// How `search_items`'s `tags` filter combines multiple tags. See
+/// docs/architecture.md — tags are opaque to the core, this only governs
+/// set logic (does an item need ANY of the given tags, or ALL of them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagMatch {
+    Any,
+    All,
+}
+
+impl TagMatch {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TagMatch::Any => "any",
+            TagMatch::All => "all",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "any" => Some(TagMatch::Any),
+            "all" => Some(TagMatch::All),
+            _ => None,
+        }
+    }
+}
+
+/// One row of `list_tags` — a tag and how many items currently carry it,
+/// so a caller can browse existing vocabulary before inventing a new tag
+/// string (avoids synonym drift, e.g. "release-pending" vs "awaiting-release").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagCount {
+    pub tag: String,
+    pub count: i64,
+}
+
+/// A single append-only note attached to an item. No edit/delete API by
+/// design — corrections are new comments, matching the project's existing
+/// "history isn't rewritten" convention for issue drafts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Comment {
+    pub id: String,
+    pub item_id: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: i64,
 }
 
 #[cfg(test)]
@@ -113,6 +162,13 @@ mod tests {
     fn state_round_trips_through_str() {
         for s in [State::Open, State::Claimed, State::Resolved, State::Closed] {
             assert_eq!(State::parse(s.as_str()), Some(s));
+        }
+    }
+
+    #[test]
+    fn tag_match_round_trips_through_str() {
+        for m in [TagMatch::Any, TagMatch::All] {
+            assert_eq!(TagMatch::parse(m.as_str()), Some(m));
         }
     }
 }

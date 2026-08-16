@@ -12,7 +12,7 @@ Next to each principle is the moment it starts costing something. A principle wi
 
 ### P-1. Core doesn't know its consumers (non-negotiable)
 
-No concept other than worker, topic, item, claim, body, stream, budget enters the core. The vocabulary mapping in [glossary.md](glossary.md) enforces this mechanically.
+No concept other than worker, topic, item, claim, body, stream, budget, tag, comment enters the core. The vocabulary mapping in [glossary.md](glossary.md) enforces this mechanically.
 
 **When it gets expensive**: every time there's a temptation to drop a Claude-Code-specific feature (session resume, CLAUDE.md awareness) straight into the core, you have to keep paying the cost of pushing that concept up to the application layer and translating it instead.
 

@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum_extra::extract::Query as ExtraQuery;
 use docket_core::domain::State as ItemState;
 use docket_core::{Item, Store, StoreError};
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,12 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/claim", post(claim_item))
         .route("/items/{id}/submit", post(submit_item))
         .route("/items/{id}/approve", post(approve_item))
+        .route(
+            "/items/{id}/tags",
+            post(add_item_tags).delete(remove_item_tags),
+        )
+        .route("/items/{id}/comments", post(add_comment).get(list_comments))
+        .route("/tags", get(list_tags))
         .fallback(api_not_found)
 }
 
@@ -143,13 +150,15 @@ struct CreateItemRequest {
     title: String,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 async fn create_item(
     State(store): State<Arc<Store>>,
     Json(req): Json<CreateItemRequest>,
 ) -> Result<(StatusCode, Json<Item>), ApiError> {
-    let item = store.create_item(&req.topic, &req.title, req.body.as_deref())?;
+    let item = store.create_item(&req.topic, &req.title, req.body.as_deref(), &req.tags)?;
     Ok((StatusCode::CREATED, Json(item)))
 }
 
@@ -162,14 +171,35 @@ struct ListItemsQuery {
     /// that worker owns (prefix match, see [`docket_core::domain::topic_matches`]).
     /// This is the "discover it via list" step of the M1 completion criteria.
     owned_by: Option<String>,
+    /// Full-text match against title+body. Presence of `q` and/or `tag`
+    /// routes this request through `Store::search_items` instead of
+    /// `Store::list_items` — see the branch below.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    tag: Vec<String>,
+    #[serde(default)]
+    tag_match: Option<String>,
 }
 
+/// Uses `axum_extra`'s `Query` rather than `axum::extract::Query`: only the
+/// former decodes repeated keys (`?tag=a&tag=b`) into a `Vec`, which the
+/// plain extractor rejects with a 400.
 async fn list_items(
     State(store): State<Arc<Store>>,
-    Query(q): Query<ListItemsQuery>,
+    ExtraQuery(q): ExtraQuery<ListItemsQuery>,
 ) -> Result<Json<Vec<Item>>, ApiError> {
     let state = q.state.as_deref().and_then(ItemState::parse);
-    let items = store.list_items(q.topic.as_deref(), state)?;
+    let items = if q.q.is_some() || !q.tag.is_empty() {
+        let tag_match = q
+            .tag_match
+            .as_deref()
+            .and_then(docket_core::domain::TagMatch::parse)
+            .unwrap_or(docket_core::domain::TagMatch::Any);
+        store.search_items(q.topic.as_deref(), state, &q.tag, tag_match, q.q.as_deref())?
+    } else {
+        store.list_items(q.topic.as_deref(), state)?
+    };
     let items = match q.owned_by {
         Some(worker_id) => {
             let worker = store.get_worker(&worker_id)?;
@@ -221,6 +251,69 @@ async fn approve_item(
     Path(id): Path<String>,
 ) -> Result<Json<Item>, ApiError> {
     Ok(Json(store.approve_item(&id)?))
+}
+
+#[derive(Deserialize)]
+struct TagsRequest {
+    tags: Vec<String>,
+}
+
+async fn add_item_tags(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<TagsRequest>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    Ok(Json(store.add_tags(&id, &req.tags)?))
+}
+
+async fn remove_item_tags(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<TagsRequest>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    Ok(Json(store.remove_tags(&id, &req.tags)?))
+}
+
+#[derive(Deserialize)]
+struct ListTagsQuery {
+    topic: Option<String>,
+}
+
+async fn list_tags(
+    State(store): State<Arc<Store>>,
+    Query(q): Query<ListTagsQuery>,
+) -> Result<Json<Vec<docket_core::domain::TagCount>>, ApiError> {
+    Ok(Json(store.list_tags(q.topic.as_deref())?))
+}
+
+#[derive(Deserialize)]
+struct AddCommentRequest {
+    /// Defaults to `"unknown"` if omitted — every comment needs an author
+    /// for the thread to be legible, but the design doc doesn't require
+    /// the caller to be a registered worker.
+    #[serde(default = "default_comment_author")]
+    author: String,
+    body: String,
+}
+
+fn default_comment_author() -> String {
+    "unknown".to_string()
+}
+
+async fn add_comment(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<AddCommentRequest>,
+) -> Result<(StatusCode, Json<docket_core::domain::Comment>), ApiError> {
+    let comment = store.add_comment(&id, &req.author, &req.body)?;
+    Ok((StatusCode::CREATED, Json(comment)))
+}
+
+async fn list_comments(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<docket_core::domain::Comment>>, ApiError> {
+    Ok(Json(store.list_comments(&id)?))
 }
 
 #[cfg(test)]
@@ -372,6 +465,171 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_item_accepts_tags_and_search_finds_by_query() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({
+                    "topic": "iyulab/node-packages",
+                    "title": "form Enter bypasses preventDefault",
+                    "tags": ["severity:medium"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = json_body(resp).await;
+        assert_eq!(created["tags"], serde_json::json!(["severity:medium"]));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?q=preventDefault")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let found = json_body(resp).await;
+        assert_eq!(found.as_array().unwrap().len(), 1);
+    }
+
+    /// Repeated `tag=` keys are the shape `docket-mcp`'s `search_items` sends,
+    /// and the shape plain `axum::extract::Query` rejects outright. Seeds a
+    /// non-matching item too — a single-item fixture cannot tell a working
+    /// filter apart from one that silently returns everything.
+    #[tokio::test]
+    async fn repeated_tag_query_params_filter_the_list() {
+        let app = test_app();
+        for (title, tags) in [
+            ("tagged-a", serde_json::json!(["a"])),
+            ("tagged-b", serde_json::json!(["b"])),
+            ("untagged", serde_json::json!([])),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": "iyulab/docket", "title": title, "tags": tags}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?tag=a&tag=b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut titles: Vec<String> = json_body(resp)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap().to_string())
+            .collect();
+        titles.sort();
+        assert_eq!(titles, vec!["tagged-a", "tagged-b"]);
+
+        // A single repeated-key value must narrow further still.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items?tag=a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let found = json_body(resp).await;
+        assert_eq!(found.as_array().unwrap().len(), 1);
+        assert_eq!(found[0]["title"], "tagged-a");
+    }
+
+    #[tokio::test]
+    async fn add_and_remove_tags_routes() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/tags"),
+                serde_json::json!({"tags": ["awaiting-release"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(resp).await,
+            serde_json::json!(["awaiting-release"])
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/items/{id}/tags"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"tags": ["awaiting-release"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_tags_route_returns_vocabulary() {
+        let app = test_app();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "tags": ["blocked"]}),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(Request::builder().uri("/tags").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tags = json_body(resp).await;
+        assert_eq!(tags[0]["tag"], "blocked");
+        assert_eq!(tags[0]["count"], 1);
     }
 
     #[tokio::test]
@@ -566,5 +824,46 @@ mod tests {
         assert!(String::from_utf8_lossy(&bytes).contains("docket-console-test-marker"));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_and_list_comments_routes() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/comments"),
+                serde_json::json!({"author": "maintainer", "body": "looking into it"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(json_body(resp).await["author"], "maintainer");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{id}/comments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let comments = json_body(resp).await;
+        assert_eq!(comments.as_array().unwrap().len(), 1);
+        assert_eq!(comments[0]["body"], "looking into it");
     }
 }

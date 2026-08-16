@@ -15,6 +15,8 @@ This is the discipline that keeps layer boundaries from leaking. If a term from 
 | body | markdown, .md file |
 | stream | hook |
 | budget | token budget |
+| tag | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
+| comment | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
 
 Concepts in the right-hand column get translated into the left-hand column at layer 3 before reaching the core. Wherever that translation happens is the layer boundary.
 
