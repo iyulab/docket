@@ -38,10 +38,10 @@ them into two ADRs would just repeat this argument twice.
 - **Reject — encode tags as structured data on `body`**: e.g. a
   `<!-- tags: a,b -->` convention inside the markdown body. Rejected because it
   reintroduces exactly the "state buried in file text, not polled" failure mode this
-  work exists to eliminate (see the design doc's failure mode 1 — an
-  `awaiting-release` marker sitting unindexed at the bottom of a file went unread for
-  11 days). A searchable, indexed field is the point; encoding it back into `body`
-  throws that away.
+  work exists to eliminate: a status marker appended to a file's tail is invisible to
+  any reader who doesn't reopen and scroll to the bottom of that specific file, unlike
+  a queryable field a caller can search. A searchable, indexed field is the point;
+  encoding it back into `body` throws that away.
 - **Accept — add `tag` and `comment` as core vocabulary (adopted)**: `item_tags` and
   `item_comments` become sibling tables to `items`, exposed through `Store` methods
   and MCP/HTTP endpoints the same way `claim`/`submit`/`approve` already are. Tags
@@ -77,10 +77,9 @@ body text of a comment are exactly as opaque to core as an item's `body` already
 
 **Gained**: any consumer of `docket-core` — not only `docket-cc` — gets labeling and
 threaded notes as queue primitives, without reimplementing a join table and an
-append-only log per consumer. This directly replaces the file-convention failure
-modes documented in the design doc (`PLAN-docket-20260816-upstream-issue-tags-design.md`
-in the umbrella repo): an `awaiting-release` tag plus a comment is a queryable,
-single-source-of-truth substitute for a status folder plus a note buried in a file.
+append-only log per consumer. This directly replaces file-convention coordination
+patterns that rely on status folders and notes buried in file text: a tag plus a
+comment is a queryable, single-source-of-truth substitute for both.
 
 **Given up**: the closed vocabulary list grows from 7 entries to 9, which is exactly
 the cost P-1 warns about — every future proposal to add a core concept now has two
