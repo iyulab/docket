@@ -77,7 +77,7 @@ irm https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.ps1 | i
 This installs small launchers as `docket-mcp` and `docket-cc` that check GitHub Releases for
 updates on every run and cache the latest build locally — point your MCP client's `command` at
 `docket-mcp` and your Claude Code hook's `command` at `docket-cc` the same way as the examples
-below, no `cargo run` needed. Set `DOCKET_INSTALL_DIR` before running the script to install
+above and below, no `cargo run` needed. Set `DOCKET_INSTALL_DIR` before running the script to install
 somewhere other than the default.
 
 ### As a local file projection
@@ -96,6 +96,8 @@ cargo run -p docket-cc
 ### As a Claude Code hook
 
 `docket-cc hook` runs the same projection, then prints a plain-text summary of currently open items (nothing, if there are none) — meant for a `SessionStart` hook, whose stdout gets injected into the session's context automatically. Wire it into `.claude/settings.json`:
+
+See [Installing docket-mcp and docket-cc](#installing-docket-mcp-and-docket-cc-without-building-from-source) above for how to get the `docket-cc` binary this points at.
 
 ```json
 {

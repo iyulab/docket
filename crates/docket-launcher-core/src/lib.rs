@@ -127,6 +127,7 @@ async fn download_and_store(
         .header("User-Agent", release_client::USER_AGENT)
         .send()
         .await?
+        .error_for_status()?
         .bytes()
         .await?;
 
@@ -138,6 +139,7 @@ async fn download_and_store(
         .header("User-Agent", release_client::USER_AGENT)
         .send()
         .await?
+        .error_for_status()?
         .text()
         .await?;
     let expected = checksum::expected_hash(&checksums_txt, asset_name)
