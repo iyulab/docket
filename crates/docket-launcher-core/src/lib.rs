@@ -3,10 +3,10 @@
 //! `docket-cc-launcher`.
 
 mod cache;
-mod checksum;
+pub mod checksum;
 mod delegate;
-mod platform;
-mod release_client;
+pub mod platform;
+pub mod release_client;
 
 use std::path::{Path, PathBuf};
 
