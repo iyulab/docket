@@ -36,19 +36,21 @@ jobs:
       - name: Add target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Build docket-mcp and docket-mcp-launcher
+      - name: Build docket-mcp, docket-cc, and their launchers
         run: |
           cargo build --release -p docket-mcp --target ${{ matrix.target }}
+          cargo build --release -p docket-cc --target ${{ matrix.target }}
           cargo build --release -p docket-mcp-launcher --target ${{ matrix.target }}
+          cargo build --release -p docket-cc-launcher --target ${{ matrix.target }}
 
       - name: Stage release assets
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/docket-mcp${{ matrix.ext }}" \
-             "dist/docket-mcp-${{ matrix.target }}${{ matrix.ext }}"
-          cp "target/${{ matrix.target }}/release/docket-mcp-launcher${{ matrix.ext }}" \
-             "dist/docket-mcp-launcher-${{ matrix.target }}${{ matrix.ext }}"
+          for bin in docket-mcp docket-cc docket-mcp-launcher docket-cc-launcher; do
+            cp "target/${{ matrix.target }}/release/${bin}${{ matrix.ext }}" \
+               "dist/${bin}-${{ matrix.target }}${{ matrix.ext }}"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
