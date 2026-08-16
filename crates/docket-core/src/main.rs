@@ -1,8 +1,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
-use axum::extract::{Path, Query, State};
+use axum::Extension;
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -76,20 +80,70 @@ async fn api_not_found() -> impl IntoResponse {
     )
 }
 
+/// Tracks when `docket-core` last handled a request, using a monotonic
+/// clock so system-time adjustments never skew the idle calculation.
+/// `/status` itself is deliberately excluded from touching this (see
+/// `build_router`) — otherwise `docket-core-updater`'s own polling would
+/// count as activity and the server would never appear idle.
+struct LastRequest(Mutex<Instant>);
+
+impl LastRequest {
+    fn new() -> Self {
+        Self(Mutex::new(Instant::now()))
+    }
+
+    fn touch(&self) {
+        *self.0.lock().unwrap() = Instant::now();
+    }
+
+    fn idle_seconds(&self) -> u64 {
+        self.0.lock().unwrap().elapsed().as_secs()
+    }
+}
+
+async fn track_idle(
+    Extension(last_request): Extension<Arc<LastRequest>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    last_request.touch();
+    next.run(request).await
+}
+
+#[derive(Serialize)]
+struct StatusBody {
+    version: String,
+    idle_seconds: u64,
+}
+
+/// Not wrapped by `track_idle` (see `build_router`) — polling this endpoint
+/// must never reset the idle clock it reports on.
+async fn status_handler(Extension(last_request): Extension<Arc<LastRequest>>) -> Json<StatusBody> {
+    Json(StatusBody {
+        version: format!("v{}", env!("CARGO_PKG_VERSION")),
+        idle_seconds: last_request.idle_seconds(),
+    })
+}
+
 /// `console_dir` (the built docket-console, e.g. `console/dist`) can be missing —
 /// `ServeDir`/`ServeFile` defer file I/O to request time, so a missing directory
 /// only produces 404s per-request, not a server startup failure.
 fn build_router(store: Arc<Store>, console_dir: &std::path::Path) -> Router {
     let index_file = tower_http::services::ServeFile::new(console_dir.join("index.html"));
     let static_service = tower_http::services::ServeDir::new(console_dir).fallback(index_file);
+    let last_request = Arc::new(LastRequest::new());
 
-    // The bare routes' api_not_found fallback (via merge) is intentionally overridden by
-    // fallback_service: bare paths fall through to the SPA, while /api/* keeps its JSON 404.
-    Router::new()
+    let tracked = Router::new()
         .merge(api_routes())
         .nest("/api", api_routes())
         .fallback_service(static_service)
-        .with_state(store)
+        .layer(middleware::from_fn(track_idle))
+        .with_state(store);
+
+    Router::new()
+        .route("/status", get(status_handler))
+        .merge(tracked)
+        .layer(Extension(last_request))
 }
 
 /// Wraps [`StoreError`] so this binary crate can implement the foreign
@@ -865,5 +919,117 @@ mod tests {
         let comments = json_body(resp).await;
         assert_eq!(comments.as_array().unwrap().len(), 1);
         assert_eq!(comments[0]["body"], "looking into it");
+    }
+
+    #[tokio::test]
+    async fn status_reports_version_and_idle_seconds() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["version"], format!("v{}", env!("CARGO_PKG_VERSION")));
+        assert!(body["idle_seconds"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn status_itself_does_not_reset_the_idle_clock() {
+        let app = test_app();
+
+        // A non-/status request touches the idle clock...
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        // ...but polling /status repeatedly must not reset it back to ~0.
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let first_idle = json_body(first).await["idle_seconds"].as_u64().unwrap();
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second_idle = json_body(second).await["idle_seconds"].as_u64().unwrap();
+
+        assert!(
+            first_idle >= 1,
+            "expected idle_seconds >= 1, got {first_idle}"
+        );
+        assert!(
+            second_idle >= first_idle,
+            "polling /status must not reset the idle clock: first={first_idle}, second={second_idle}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_request_resets_idle_seconds() {
+        let app = test_app();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        let before = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let idle_before = json_body(before).await["idle_seconds"].as_u64().unwrap();
+        assert!(idle_before >= 1);
+
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let after = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let idle_after = json_body(after).await["idle_seconds"].as_u64().unwrap();
+        assert!(
+            idle_after < idle_before,
+            "a request other than /status must reset the idle clock: before={idle_before}, after={idle_after}"
+        );
     }
 }
