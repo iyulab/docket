@@ -4,6 +4,7 @@ import { fetchItems, type Item } from './api'
 export interface UseItemsResult {
   items: Item[]
   connected: boolean
+  loading: boolean
 }
 
 const POLL_INTERVAL_MS = 5000
@@ -14,6 +15,7 @@ const POLL_INTERVAL_MS = 5000
 export function useItems(intervalMs: number = POLL_INTERVAL_MS): UseItemsResult {
   const [items, setItems] = useState<Item[]>([])
   const [connected, setConnected] = useState(true)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
@@ -27,6 +29,8 @@ export function useItems(intervalMs: number = POLL_INTERVAL_MS): UseItemsResult 
         }
       } catch {
         if (!cancelled) setConnected(false)
+      } finally {
+        if (!cancelled) setLoading(false)
       }
     }
 
@@ -38,5 +42,5 @@ export function useItems(intervalMs: number = POLL_INTERVAL_MS): UseItemsResult 
     }
   }, [intervalMs])
 
-  return { items, connected }
+  return { items, connected, loading }
 }
