@@ -11,7 +11,7 @@ export interface Filters {
   relation: RelationFilter
 }
 
-const FOUND_IN_PREFIX = 'found-in:'
+export const FOUND_IN_PREFIX = 'found-in:'
 
 // `found-in:<repo>` is an opaque caller-defined tag (core doesn't parse
 // or interpret tags) that records which topic discovered/filed this

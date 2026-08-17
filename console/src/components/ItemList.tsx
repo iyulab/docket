@@ -1,4 +1,5 @@
 import type { Item } from '../api'
+import { FOUND_IN_PREFIX } from '../filters'
 
 interface ItemListProps {
   items: Item[]
@@ -54,7 +55,7 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
                 <span
                   key={tag}
                   className={
-                    tag.startsWith('found-in:') ? 'tag-chip tag-chip-found-in' : 'tag-chip'
+                    tag.startsWith(FOUND_IN_PREFIX) ? 'tag-chip tag-chip-found-in' : 'tag-chip'
                   }
                 >
                   {tag}

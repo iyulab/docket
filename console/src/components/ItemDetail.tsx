@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Comment, Item } from '../api'
 import { fetchComments } from '../api'
+import { FOUND_IN_PREFIX } from '../filters'
 
 interface ItemDetailProps {
   item: Item | null
@@ -23,6 +24,7 @@ export function ItemDetail({ item, loading, onClose }: ItemDetailProps) {
       return
     }
     let cancelled = false
+    setComments([])
     setCommentsError(false)
     fetchComments(item.id)
       .then((next) => {
@@ -76,7 +78,7 @@ export function ItemDetail({ item, loading, onClose }: ItemDetailProps) {
           {item.tags.map((tag) => (
             <span
               key={tag}
-              className={tag.startsWith('found-in:') ? 'tag-chip tag-chip-found-in' : 'tag-chip'}
+              className={tag.startsWith(FOUND_IN_PREFIX) ? 'tag-chip tag-chip-found-in' : 'tag-chip'}
             >
               {tag}
             </span>
@@ -88,14 +90,16 @@ export function ItemDetail({ item, loading, onClose }: ItemDetailProps) {
         <h3>댓글</h3>
         {commentsError && <p className="banner banner-error">댓글을 불러오지 못했습니다.</p>}
         {!commentsError && comments.length === 0 && <p>댓글이 없습니다.</p>}
-        <ul>
-          {comments.map((comment) => (
-            <li key={comment.id}>
-              <span className="comment-author">{comment.author}</span>
-              <span className="comment-body">{comment.body}</span>
-            </li>
-          ))}
-        </ul>
+        {!commentsError && (
+          <ul>
+            {comments.map((comment) => (
+              <li key={comment.id}>
+                <span className="comment-author">{comment.author}</span>
+                <span className="comment-body">{comment.body}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   )
