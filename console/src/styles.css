@@ -154,3 +154,72 @@ body {
   width: 100%;
   font-size: 0.8rem;
 }
+
+.item-list {
+  flex: 1;
+  border-collapse: collapse;
+  background: white;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(9, 30, 66, 0.15);
+}
+
+.item-list th,
+.item-list td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #ebecf0;
+}
+
+.item-row {
+  cursor: pointer;
+}
+
+.item-row:hover {
+  background: #f4f5f7;
+}
+
+.item-row-selected {
+  background: #e6effc;
+}
+
+.item-list-empty {
+  padding: 1rem;
+  color: #6b778c;
+}
+
+.tag-chip {
+  display: inline-block;
+  margin: 0.1rem 0.2rem 0.1rem 0;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  background: #dfe1e6;
+  color: #42526e;
+}
+
+.tag-chip-found-in {
+  background: #deebff;
+  color: #0052cc;
+}
+
+.badge-state-open {
+  background: #deebff;
+  color: #0052cc;
+}
+
+.badge-state-claimed {
+  background: #fff0b3;
+  color: #974f0c;
+}
+
+.badge-state-resolved {
+  background: #e3fcef;
+  color: #006644;
+}
+
+.badge-state-closed {
+  background: #dfe1e6;
+  color: #42526e;
+}
