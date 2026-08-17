@@ -13,9 +13,12 @@
 //! becomes the file's markdown body (docs/glossary.md: `body` <-> `.md
 //! file`) with the rest of the item as frontmatter.
 //!
-//! Not yet implemented: the `hook` subcommand a Claude Code `SessionStart`
-//! hook would call, and the local daemon that would back it — this binary
-//! only does one-shot `sync` for now. `sync` also only ever writes/updates
+//! Also implements the `hook` subcommand a Claude Code `SessionStart` hook
+//! calls, and `topic` — deriving the `topic` a given directory belongs to
+//! (nearest `.git` remote, walked up through monorepo/submodule/worktree
+//! structure; see [`topic`]) so a caller doesn't have to invent that string
+//! by hand. Not yet implemented: the local daemon `hook` could run behind
+//! instead of a one-shot `sync`. `sync` also only ever writes/updates
 //! files; it never removes a stale projection (an item that closed, or a
 //! topic the worker no longer owns) — deliberately left open rather than
 //! picked here, since it is its own design question, not an implementation
@@ -24,6 +27,8 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+mod topic;
 
 #[derive(Debug, Deserialize)]
 struct ItemDto {
@@ -239,6 +244,16 @@ async fn hook_summary(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `topic` is purely local (no docket-core connectivity needed), so it
+    // is dispatched before the env vars below are required — a caller
+    // asking "what topic am I in" shouldn't need a worker already
+    // registered to get an answer.
+    if std::env::args().nth(1).as_deref() == Some("topic") {
+        let cwd = std::env::current_dir()?;
+        println!("{}", topic::derive_topic(&cwd));
+        return Ok(());
+    }
+
     let base_url =
         std::env::var("DOCKET_CORE_URL").unwrap_or_else(|_| "http://127.0.0.1:8420".to_string());
     let worker_id = std::env::var("DOCKET_WORKER_ID").map_err(|_| {

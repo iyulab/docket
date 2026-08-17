@@ -17,7 +17,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 ## Current status
 
-**M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection + a `SessionStart` hook) exist and are covered by tests. `docket-console` exists as a read-only kanban board — see "As a console" below.
+**M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API, tags, comments, full-text search over both), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection, a `SessionStart` hook, and local topic derivation) exist and are covered by tests. `docket-console` exists as a read-only kanban board — see "As a console" below.
 
 ## Running it
 
@@ -124,6 +124,19 @@ See [Installing docket-mcp and docket-cc](#installing-docket-mcp-and-docket-cc-w
 
 A sync failure inside `hook` (core unreachable, worker not registered) is swallowed — reported to stderr, not stdout — so a broken connection reports nothing rather than injecting an error into every session's context. There's no daemon behind this yet; each invocation does its own one-shot sync, and whether a persistent daemon is actually needed is still open (see [architecture.md](docs/architecture.md) for `docket-cc`'s full intended shape).
 
+### As a topic-deriving helper
+
+`docket-cc topic` prints the `topic` the current directory belongs to, without needing `DOCKET_WORKER_ID`/`DOCKET_CORE_URL` set — it never talks to `docket-core`, only the local filesystem:
+
+```
+cd path/to/some/repo && docket-cc topic
+# iyulab/some-repo
+```
+
+The topic comes from the nearest `.git` above the current directory — its `origin` remote's `org/repo`. The whole repository is one topic by default, however many packages live inside it (a package inside a monorepo resolves to the same topic as the repository root). A submodule's own `.git` stops the walk at the submodule, so it resolves to its own remote rather than the umbrella repository's — and a `git worktree` resolves through to the same remote as the repository it was created from. Drop a `.docket/topic` file (one line, the topic to use) in any ancestor directory to override the derivation entirely — useful when there's no remote yet, or to opt a specific directory into a finer-grained topic than the repo-level default.
+
+**`git worktree` and `claim` are orthogonal, not substitutes.** Running several Claude Code sessions in parallel usually means several `git worktree` checkouts of the same repository — but a worktree only isolates the working tree on disk; it says nothing about which session owns which item. Every worktree of the same repository resolves to the same topic (see above), so nothing about worktree isolation prevents two sessions from claiming — and safely racing for — items in that topic; `claim` is what makes exactly one of them win. Conversely, `claim` doesn't isolate a session's filesystem changes from another session's — that's what the worktree is for. Use both together: the worktree keeps two sessions from stepping on each other's files, `claim` keeps them from stepping on each other's work.
+
 ### As a console
 
 `docket-console` is a read-only kanban board: every item, grouped into `open` / `claimed` /
@@ -148,6 +161,21 @@ with client-side routes falling back to `index.html`; the API it talks to is ava
 same origin under `/api/*` (an alias for the same routes documented above). Only `/api/*` is
 guaranteed a JSON error on an unmatched path — the root namespace falls back to the SPA's
 `index.html` for anything it doesn't recognize, since that's what client-side routing needs.
+
+## Development
+
+`scripts/verify.sh` (`scripts/verify.ps1` on Windows) runs the same fmt-check → clippy → build → test sequence as `.github/workflows/ci.yml`, in the same order, so a failure shows up locally before it shows up in CI:
+
+```bash
+scripts/verify.sh
+```
+
+When developing `docket-mcp`/`docket-cc` themselves, set `DOCKET_LAUNCHER_LOCAL_BIN` to a locally-built binary's path to make either launcher exec it directly — no GitHub Releases check, no cache, no checksum verification:
+
+```bash
+cargo build -p docket-cc
+DOCKET_LAUNCHER_LOCAL_BIN=target/debug/docket-cc cargo run -p docket-cc-launcher -- hook
+```
 
 ## Docs
 

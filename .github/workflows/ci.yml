@@ -44,3 +44,23 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install dependencies
+        working-directory: console
+        run: npm ci
+
+      - name: Build
+        working-directory: console
+        run: npm run build

@@ -14,6 +14,13 @@ const OWNER: &str = "iyulab";
 const REPO: &str = "docket";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 
+/// Skips the cache/download path entirely and execs this path directly when
+/// set — matches the existing `DOCKET_DB_PATH`/`DOCKET_BIND` override
+/// convention (`docket-core`). For developing a launcher's worker itself: a
+/// locally-built binary can be exercised through the real delegate path
+/// without cutting a release and waiting for it to appear in the cache.
+const LOCAL_BIN_ENV_VAR: &str = "DOCKET_LAUNCHER_LOCAL_BIN";
+
 #[cfg(windows)]
 const BINARY_EXT: &str = ".exe";
 #[cfg(not(windows))]
@@ -23,7 +30,27 @@ const BINARY_EXT: &str = "";
 /// it with `args`, inheriting this process's stdio. Returns the worker's
 /// exit code; callers are expected to `std::process::exit` with it so the
 /// launcher's own exit code always matches the worker it ran.
+///
+/// If `DOCKET_LAUNCHER_LOCAL_BIN` is set, that path is exec'd directly
+/// instead — no cache lookup, no network request, no checksum check.
 pub async fn resolve_and_run(worker_name: &str, args: &[&str]) -> anyhow::Result<i32> {
+    let local_bin_override = std::env::var(LOCAL_BIN_ENV_VAR).ok();
+    resolve_and_run_inner(worker_name, args, local_bin_override.as_deref()).await
+}
+
+/// `resolve_and_run`'s logic with the env var already read — split out so
+/// the override path is testable without mutating real process state
+/// (matches how `resolve_worker_binary` takes an injected `api_base` rather
+/// than reading a real endpoint in tests).
+async fn resolve_and_run_inner(
+    worker_name: &str,
+    args: &[&str],
+    local_bin_override: Option<&str>,
+) -> anyhow::Result<i32> {
+    if let Some(local_bin) = local_bin_override {
+        return delegate::run(Path::new(local_bin), args);
+    }
+
     let cache_root = cache::cache_root(worker_name)?;
     let asset_name = platform::current_asset_name(worker_name).ok_or_else(|| {
         anyhow::anyhow!(
@@ -229,6 +256,23 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    /// The override bypasses cache/network entirely — verified by never
+    /// starting a mock server and calling `resolve_and_run_inner` directly
+    /// with a real, cheap child process instead of a `worker_name` that
+    /// would otherwise trigger a release check.
+    #[tokio::test]
+    async fn local_bin_override_execs_directly_and_propagates_exit_code() {
+        #[cfg(windows)]
+        let (bin, args): (&str, &[&str]) = ("cmd.exe", &["/c", "exit 7"]);
+        #[cfg(not(windows))]
+        let (bin, args): (&str, &[&str]) = ("sh", &["-c", "exit 7"]);
+
+        let code = resolve_and_run_inner("docket-mcp", args, Some(bin))
+            .await
+            .unwrap();
+        assert_eq!(code, 7);
     }
 
     #[tokio::test]

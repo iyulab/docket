@@ -6,16 +6,20 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "console/package.json"
+      - "console/package-lock.json"
       - ".github/workflows/audit.yml"
   pull_request:
     branches: [main]
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "console/package.json"
+      - "console/package-lock.json"
       - ".github/workflows/audit.yml"
   schedule:
-    # Catch newly-published RustSec advisories against already-pinned
-    # dependencies, not just dependency changes.
+    # Catch newly-published advisories against already-pinned dependencies,
+    # not just dependency changes — for both ecosystems this repo uses.
     - cron: "0 0 * * *"
 
 permissions:
@@ -30,3 +34,23 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install dependencies
+        working-directory: console
+        run: npm ci
+
+      - name: Audit
+        working-directory: console
+        run: npm audit

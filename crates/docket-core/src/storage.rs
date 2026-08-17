@@ -87,6 +87,12 @@ impl Store {
             CREATE TRIGGER IF NOT EXISTS items_fts_au AFTER UPDATE ON items BEGIN
                 INSERT INTO items_fts(items_fts, rowid, title, body) VALUES('delete', old.rowid, old.title, old.body);
                 INSERT INTO items_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+            END;
+            CREATE VIRTUAL TABLE IF NOT EXISTS comments_fts USING fts5(
+                body, content='item_comments', content_rowid='rowid'
+            );
+            CREATE TRIGGER IF NOT EXISTS comments_fts_ai AFTER INSERT ON item_comments BEGIN
+                INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
             END;",
         )?;
         // Resyncs the external-content index against `items` on every open:
@@ -97,6 +103,15 @@ impl Store {
         // through to `items`, so it always reports every row as present.
         // 'rebuild' is idempotent and cheap at this project's scale.
         conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
+        // Same rationale as items_fts above, applied to comments_fts. No
+        // AFTER DELETE/UPDATE trigger exists for comments_fts because
+        // item_comments is append-only (no edit/delete API, ADR-0009) — an
+        // INSERT-only trigger can never fall out of sync with a table that
+        // never changes existing rows.
+        conn.execute(
+            "INSERT INTO comments_fts(comments_fts) VALUES('rebuild')",
+            [],
+        )?;
         Ok(Store {
             conn: Mutex::new(conn),
         })
@@ -350,9 +365,11 @@ impl Store {
     }
 
     /// `list_items`'s superset: adds tag filtering (`tags`/`tag_match`) and
-    /// full-text search (`query`, matched against title+body via the
-    /// `items_fts` index from Task 1). `list_items` itself is untouched —
-    /// this is a separate method so its existing callers/tests can't regress.
+    /// full-text search (`query`, matched against title+body via `items_fts`
+    /// or a comment's body via `comments_fts` — an item whose thread
+    /// mentions the term is as findable as one whose title does).
+    /// `list_items` itself is untouched — this is a separate method so its
+    /// existing callers/tests can't regress.
     pub fn search_items(
         &self,
         topic: Option<&str>,
@@ -381,9 +398,20 @@ impl Store {
         // are syntax errors rather than searches. Wrapping the input in an
         // FTS5 phrase literal makes the whole thing match as plain text. A
         // blank query constrains nothing, so it is treated as absent.
+        //
+        // Matches against either items_fts (title/body) or comments_fts (a
+        // comment's body, joined back to its item via item_id) — a thread's
+        // conversation is as searchable as its opening title/body, not just
+        // the part that happened to be written first.
         if let Some(q) = query.map(str::trim).filter(|q| !q.is_empty()) {
-            sql.push_str(" AND i.rowid IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)");
-            args.push(Box::new(format!("\"{}\"", q.replace('"', "\"\""))));
+            sql.push_str(
+                " AND (i.rowid IN (SELECT rowid FROM items_fts WHERE items_fts MATCH ?)
+                   OR i.id IN (SELECT item_id FROM item_comments WHERE rowid IN
+                       (SELECT rowid FROM comments_fts WHERE comments_fts MATCH ?)))",
+            );
+            let phrase = format!("\"{}\"", q.replace('"', "\"\""));
+            args.push(Box::new(phrase.clone()));
+            args.push(Box::new(phrase));
         }
         if !tags.is_empty() {
             let placeholders = std::iter::repeat_n("?", tags.len())
@@ -880,5 +908,108 @@ mod tests {
         let store = open_test_store();
         let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
         assert!(store.list_comments(&item.id).unwrap().is_empty());
+    }
+
+    /// A term that appears only in a comment, never in the item's own
+    /// title/body, must still surface the item — a thread's conversation is
+    /// as searchable as its opening post.
+    #[test]
+    fn search_items_matches_comment_body() {
+        let store = open_test_store();
+        let matching = store
+            .create_item("iyulab/docket", "unrelated title", None, &[])
+            .unwrap();
+        let other = store
+            .create_item("iyulab/docket", "also unrelated", None, &[])
+            .unwrap();
+        store
+            .add_comment(
+                &matching.id,
+                "maintainer",
+                "root cause is a race in claim_item",
+            )
+            .unwrap();
+        store
+            .add_comment(&other.id, "maintainer", "unrelated follow-up")
+            .unwrap();
+
+        let results = store
+            .search_items(None, None, &[], TagMatch::Any, Some("race in claim_item"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, matching.id);
+    }
+
+    /// A row written before `comments_fts` existed is not covered by its
+    /// AFTER INSERT trigger — same backfill requirement as
+    /// `open_indexes_rows_written_before_the_fts_migration`, applied to
+    /// comments instead of items.
+    #[test]
+    fn open_indexes_comments_written_before_the_comments_fts_migration() {
+        let dir = temp_db_dir("legacy-comments-migration-test");
+        let db_path = dir.join("legacy.db");
+
+        // The schema exactly as it stood before comments_fts was introduced:
+        // items_fts already exists, item_comments already exists, but
+        // comments_fts and its trigger do not.
+        let legacy = Connection::open(&db_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE items (
+                    id TEXT PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT,
+                    state TEXT NOT NULL,
+                    resolution TEXT,
+                    owner TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE item_comments (
+                    id         TEXT PRIMARY KEY,
+                    item_id    TEXT NOT NULL REFERENCES items(id),
+                    author     TEXT NOT NULL,
+                    body       TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO items (id, topic, title, body, state, resolution, owner, created_at, updated_at)
+                 VALUES ('legacy-1', 'iyulab/docket', 'unrelated title', NULL, 'open', NULL, NULL, 0, 0)",
+                [],
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO item_comments (id, item_id, author, body, created_at)
+                 VALUES ('c1', 'legacy-1', 'maintainer', 'root cause is a race in claim_item', 0)",
+                [],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+
+        let found = store
+            .search_items(None, None, &[], TagMatch::Any, Some("race in claim_item"))
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "legacy-1");
+
+        // The AFTER INSERT trigger must also work going forward on a
+        // backfilled table, not just the retroactive rebuild.
+        store
+            .add_comment("legacy-1", "requester", "thanks for the fix")
+            .unwrap();
+        let found2 = store
+            .search_items(None, None, &[], TagMatch::Any, Some("thanks for the fix"))
+            .unwrap();
+        assert_eq!(found2.len(), 1);
+
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
