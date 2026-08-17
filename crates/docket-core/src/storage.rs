@@ -277,14 +277,23 @@ impl Store {
 
     /// Adds `tags` to an item. Idempotent — already-present tags are
     /// silently skipped (`INSERT OR IGNORE`). Returns the item's full tag
-    /// set after the add.
+    /// set after the add. Bumps `updated_at` only if a tag was actually
+    /// new — a fully-idempotent call is not activity.
     pub fn add_tags(&self, item_id: &str, tags: &[String]) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         require_item(&conn, item_id)?;
+        let mut changed = false;
         for tag in tags {
-            conn.execute(
+            let affected = conn.execute(
                 "INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?1, ?2)",
                 params![item_id, tag],
+            )?;
+            changed |= affected > 0;
+        }
+        if changed {
+            conn.execute(
+                "UPDATE items SET updated_at = ?1 WHERE id = ?2",
+                params![now_millis(), item_id],
             )?;
         }
         tags_for_item(&conn, item_id).map_err(Into::into)
@@ -292,12 +301,21 @@ impl Store {
 
     /// Removes `tags` from an item. Idempotent — removing an absent tag is
     /// not an error. Returns the item's full tag set after the removal.
+    /// Bumps `updated_at` only if a tag was actually removed.
     pub fn remove_tags(&self, item_id: &str, tags: &[String]) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut changed = false;
         for tag in tags {
-            conn.execute(
+            let affected = conn.execute(
                 "DELETE FROM item_tags WHERE item_id = ?1 AND tag = ?2",
                 params![item_id, tag],
+            )?;
+            changed |= affected > 0;
+        }
+        if changed {
+            conn.execute(
+                "UPDATE items SET updated_at = ?1 WHERE id = ?2",
+                params![now_millis(), item_id],
             )?;
         }
         tags_for_item(&conn, item_id).map_err(Into::into)
@@ -327,6 +345,10 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// A comment is always new activity (no idempotency to consider, unlike
+    /// `add_tags`/`remove_tags`), so this unconditionally bumps the parent
+    /// item's `updated_at` — a thread's most recent comment counts as its
+    /// most recent activity for recency sorting.
     pub fn add_comment(&self, item_id: &str, author: &str, body: &str) -> Result<Comment> {
         let id = Uuid::new_v4().to_string();
         let now = now_millis();
@@ -335,6 +357,10 @@ impl Store {
         conn.execute(
             "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, item_id, author, body, now],
+        )?;
+        conn.execute(
+            "UPDATE items SET updated_at = ?1 WHERE id = ?2",
+            params![now, item_id],
         )?;
         Ok(Comment {
             id,
@@ -775,6 +801,27 @@ mod tests {
     }
 
     #[test]
+    fn add_tags_bumps_updated_at_only_when_a_tag_is_actually_new() {
+        let store = open_test_store();
+        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let created_updated_at = item.updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .add_tags(&item.id, &["awaiting-release".to_string()])
+            .unwrap();
+        let after_new_tag = store.get_item(&item.id).unwrap().updated_at;
+        assert!(after_new_tag > created_updated_at);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .add_tags(&item.id, &["awaiting-release".to_string()])
+            .unwrap();
+        let after_duplicate_tag = store.get_item(&item.id).unwrap().updated_at;
+        assert_eq!(after_duplicate_tag, after_new_tag);
+    }
+
+    #[test]
     fn remove_tags_is_idempotent() {
         let store = open_test_store();
         let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
@@ -793,6 +840,34 @@ mod tests {
             .remove_tags(&item.id, &["awaiting-release".to_string()])
             .unwrap();
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn remove_tags_bumps_updated_at_only_when_a_tag_is_actually_removed() {
+        let store = open_test_store();
+        let item = store
+            .create_item(
+                "iyulab/docket",
+                "t",
+                None,
+                &["awaiting-release".to_string()],
+            )
+            .unwrap();
+        let created_updated_at = item.updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .remove_tags(&item.id, &["never-added".to_string()])
+            .unwrap();
+        let after_noop_remove = store.get_item(&item.id).unwrap().updated_at;
+        assert_eq!(after_noop_remove, created_updated_at);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .remove_tags(&item.id, &["awaiting-release".to_string()])
+            .unwrap();
+        let after_real_remove = store.get_item(&item.id).unwrap().updated_at;
+        assert!(after_real_remove > created_updated_at);
     }
 
     #[test]
@@ -901,6 +976,21 @@ mod tests {
         assert_eq!(comments[0].author, "requester");
         assert_eq!(comments[1].id, second.id);
         assert_eq!(comments[1].author, "maintainer");
+    }
+
+    #[test]
+    fn add_comment_bumps_item_updated_at() {
+        let store = open_test_store();
+        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let created_updated_at = item.updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .add_comment(&item.id, "requester", "please look at this")
+            .unwrap();
+
+        let after_comment = store.get_item(&item.id).unwrap().updated_at;
+        assert!(after_comment > created_updated_at);
     }
 
     #[test]
