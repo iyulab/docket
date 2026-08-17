@@ -5,6 +5,7 @@
 //! control (that's `task_control`, Task 6) — so it's fully testable with
 //! temp directories on any platform.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct DeployPaths {
@@ -15,6 +16,13 @@ pub struct DeployPaths {
 }
 
 impl DeployPaths {
+    /// `console_dir` is hardcoded to `<root>/console/dist` — this must stay
+    /// in sync with whatever `docket-core`'s own `DOCKET_CONSOLE_DIR` env
+    /// var is actually set to on the deployment host (default
+    /// `console/dist`, see `docket-core/src/main.rs`); if the deployment
+    /// ever overrides that var, the updater would extract to a directory
+    /// nobody serves and the mismatch would surface as "swap succeeded but
+    /// the console didn't change" rather than an error.
     pub fn under(root: &Path, exe_name: &str) -> Self {
         Self {
             exe: root.join(exe_name),
@@ -43,7 +51,13 @@ pub fn install(
     if paths.exe.exists() {
         std::fs::rename(&paths.exe, &paths.exe_prev)?;
     }
-    std::fs::write(&paths.exe, exe_bytes)?;
+    let mut exe_file = std::fs::File::create(&paths.exe)?;
+    exe_file.write_all(exe_bytes)?;
+    // A power loss between write and rename must not leave a truncated exe
+    // with the backup already consumed — fsync before this function returns
+    // so the write is durable, not just buffered.
+    exe_file.sync_all()?;
+    drop(exe_file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
