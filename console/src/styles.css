@@ -282,3 +282,24 @@ body {
   font-weight: 600;
   margin-right: 0.5rem;
 }
+
+.view-switcher {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+}
+
+.view-switcher-btn {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid #dfe1e6;
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.view-switcher-btn.active {
+  background: #0052cc;
+  color: white;
+  border-color: #0052cc;
+}
