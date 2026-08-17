@@ -61,6 +61,10 @@ jobs:
         working-directory: console
         run: npm ci
 
+      - name: Test
+        working-directory: console
+        run: npm test
+
       - name: Build
         working-directory: console
         run: npm run build
