@@ -13,11 +13,10 @@ export interface Filters {
 
 const FOUND_IN_PREFIX = 'found-in:'
 
-// The org convention that records who discovered/filed an item against
-// another topic (central CLAUDE.md §5) — an opaque caller-defined tag,
-// not core vocabulary, but the only one with real production usage for
-// this relation (docs' `topic:<X>` mention convention has zero usage —
-// verified against `list_tags()`, see design doc §0).
+// `found-in:<repo>` is an opaque caller-defined tag (core doesn't parse
+// or interpret tags) that records which topic discovered/filed this
+// item against another topic. It is the convention actually used in
+// production for this relation.
 export function relationOf(item: Item, perspectiveTopic: string): Relation {
   if (item.topic === perspectiveTopic) return 'to'
   if (item.tags.includes(`${FOUND_IN_PREFIX}${perspectiveTopic}`)) return 'from'
