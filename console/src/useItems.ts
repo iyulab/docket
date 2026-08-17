@@ -12,7 +12,14 @@ const POLL_INTERVAL_MS = 5000
 // Keeps the last successfully fetched items on the screen when a poll
 // fails — `connected` flips to false so the caller can show a banner,
 // but the board itself never goes blank on a transient failure.
-export function useItems(intervalMs: number = POLL_INTERVAL_MS): UseItemsResult {
+//
+// `query` is forwarded to every poll, so changing it (via its effect
+// dependency) re-fetches immediately and restarts the interval — same
+// mechanism `intervalMs` already used.
+export function useItems(
+  query: string = '',
+  intervalMs: number = POLL_INTERVAL_MS,
+): UseItemsResult {
   const [items, setItems] = useState<Item[]>([])
   const [connected, setConnected] = useState(true)
   const [loading, setLoading] = useState(true)
@@ -22,7 +29,7 @@ export function useItems(intervalMs: number = POLL_INTERVAL_MS): UseItemsResult 
 
     async function poll() {
       try {
-        const next = await fetchItems()
+        const next = await fetchItems(query)
         if (!cancelled) {
           setItems(next)
           setConnected(true)
@@ -40,7 +47,7 @@ export function useItems(intervalMs: number = POLL_INTERVAL_MS): UseItemsResult 
       cancelled = true
       clearInterval(id)
     }
-  }, [intervalMs])
+  }, [query, intervalMs])
 
   return { items, connected, loading }
 }

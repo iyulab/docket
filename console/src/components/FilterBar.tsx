@@ -10,6 +10,8 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
 ]
 
 interface FilterBarProps {
+  query: string
+  onQueryChange: (query: string) => void
   topics: string[]
   perspectiveTopic: string | null
   onPerspectiveTopicChange: (topic: string | null) => void
@@ -72,7 +74,37 @@ function TagFilterInput({
   )
 }
 
+function QueryInput({ query, onChange }: { query: string; onChange: (query: string) => void }) {
+  const [draft, setDraft] = useState(query)
+
+  useEffect(() => {
+    setDraft(query)
+  }, [query])
+
+  function commit() {
+    onChange(draft.trim())
+  }
+
+  return (
+    <input
+      type="text"
+      value={draft}
+      placeholder="제목·본문·댓글 검색"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit()
+        }
+      }}
+    />
+  )
+}
+
 export function FilterBar({
+  query,
+  onQueryChange,
   topics,
   perspectiveTopic,
   onPerspectiveTopicChange,
@@ -94,6 +126,11 @@ export function FilterBar({
 
   return (
     <div className="filter-bar">
+      <label className="filter-field">
+        검색
+        <QueryInput query={query} onChange={onQueryChange} />
+      </label>
+
       <label className="filter-field">
         관점
         <select

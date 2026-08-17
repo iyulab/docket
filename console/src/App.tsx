@@ -18,6 +18,14 @@ function serializeTopic(value: string | null): string | null {
   return value
 }
 
+function parseQuery(raw: string | null): string {
+  return raw ?? ''
+}
+function serializeQuery(value: string): string | null {
+  const trimmed = value.trim()
+  return trimmed ? trimmed : null
+}
+
 function parseStates(raw: string | null): ItemState[] {
   return raw ? (raw.split(',') as ItemState[]) : ['open', 'claimed']
 }
@@ -61,7 +69,8 @@ function serializeView(value: 'list' | 'board'): string | null {
 }
 
 export default function App() {
-  const { items, connected, loading } = useItems()
+  const [query, setQuery] = useUrlState<string>('q', parseQuery, serializeQuery)
+  const { items, connected, loading } = useItems(query)
   const [availableTags, setAvailableTags] = useState<string[]>([])
 
   useEffect(() => {
@@ -118,6 +127,8 @@ export default function App() {
         )}
       </header>
       <FilterBar
+        query={query}
+        onQueryChange={setQuery}
         topics={topics}
         perspectiveTopic={perspectiveTopic}
         onPerspectiveTopicChange={setPerspectiveTopic}
