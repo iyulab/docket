@@ -303,3 +303,9 @@ body {
   color: white;
   border-color: #0052cc;
 }
+
+.app-body {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
