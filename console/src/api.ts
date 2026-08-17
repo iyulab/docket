@@ -29,8 +29,10 @@ export interface TagCount {
   count: number
 }
 
-export async function fetchItems(): Promise<Item[]> {
-  const res = await fetch('/api/items')
+export async function fetchItems(query?: string): Promise<Item[]> {
+  const trimmed = query?.trim()
+  const url = trimmed ? `/api/items?q=${encodeURIComponent(trimmed)}` : '/api/items'
+  const res = await fetch(url)
   if (!res.ok) {
     throw new Error(`GET /api/items failed: ${res.status}`)
   }
