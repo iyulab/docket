@@ -98,6 +98,14 @@ pub async fn run(ctx: &UpdateContext<'_>) -> anyhow::Result<Outcome> {
             to: release.tag_name,
         }),
         Err(e) => {
+            // The new binary may still be alive (e.g. returning 500s rather
+            // than having crashed) — Windows locks a running exe's file, so
+            // deploy::rollback's remove_file/rename would fail if the
+            // scheduled task isn't stopped first. Tolerate stop() failing
+            // here (the process may have already died on its own, which is
+            // also a valid reason smoke failed) but always attempt it
+            // before touching the filesystem.
+            let _ = task_control::stop(ctx.task_name);
             deploy::rollback(&paths)?;
             task_control::start(ctx.task_name)?;
             Ok(Outcome::RolledBack {
