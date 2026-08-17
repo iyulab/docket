@@ -9,8 +9,8 @@ This is the discipline that keeps layer boundaries from leaking. If a term from 
 | Core vocabulary | Application vocabulary (layer 3, etc.) |
 |---|---|
 | worker | session, Claude Code session |
-| topic | repo, repository |
-| item | card, ticket, message, mail |
+| topic | repo, repository, channel |
+| item | card, ticket, message, mail, thread |
 | claim | assign, assignment |
 | body | markdown, .md file |
 | stream | hook |
@@ -26,3 +26,4 @@ Concepts in the right-hand column get translated into the left-hand column at la
 - **`claim` vs `assign`**: `claim` is a worker picking up work on its own (pull). `assign` (application-layer term, "force-assign" in the admin console) is an admin triggering that on someone's behalf (push). The core primitive is `claim` alone — `assign` is the application layer's entry point for triggering that same `claim` under admin authority.
 - **`state` vs `resolution`**: `state` is the workflow stage (`open/claimed/resolved/closed`); `resolution` is why it closed (`done/duplicate/wontfix/invalid`). Splitting the two follows Bugzilla/Jira practice — one fewer state, and each admin action gets its own clear meaning.
 - **`task` vs `question`**: `task` is an item with a state machine (stays on the board). `question` fails immediately with no state machine (does not stay on the board). See [vision.md](vision.md) S3.
+- **`topic` as a mention target**: referencing another subject from inside a comment (the `@mention` of a chat tool) is an opaque `tag` of the form `topic:<other-topic>` attached to the item — a caller-defined convention, not something core parses or interprets. Core still never resolves "who" a comment is for; it only ever indexes "what" (a `topic`) the tag names. If core ever needs to interpret this prefix itself (e.g. to answer "list items mentioning topic X" without a table scan), that crosses into new core vocabulary and needs its own ADR — see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)'s re-open trigger.

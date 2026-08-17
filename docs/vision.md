@@ -1,10 +1,10 @@
-Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
+Status: v0 alignment snapshot | 2026-08-17 | updated during implementation
 
 # Vision
 
 ## One-line definition
 
-docket is a work-queue service for headless workers. A Claude Code session is just one kind of worker.
+docket gives headless workers a durable, topic-scoped thread to coordinate through — asked by subject, not by address, and read on the worker's own schedule, not pushed in real time. A Claude Code session is just one kind of worker.
 
 ## Why now
 
@@ -26,13 +26,17 @@ Three problems actually experienced with this alternative — ranked by priority
 - **No notifications** — even when a file is created, if the other session isn't open, or has no reason to look at that directory, it may never get read.
 - **Cross-machine delay** — another machine only finds out after a commit/push cycle.
 
-## Why a work queue — rejected alternatives
+## Why a topic-scoped thread — rejected alternatives
 
 **Email model (rejected).** The recipient has to be resolved at send time. But the real request is "fix the defect in library A," not "send this to computer 1 / session A." It should be addressed by subject, not by address.
 
 **Messenger model (rejected).** Its premise is presence. Sessions die and come back constantly, so building coordination on top of presence means coordination evaporates every time a session goes offline. More decisively, it has no completion semantics.
 
-**Work queue / kanban (adopted).** Pull is the answer to "we don't know who will do it." An item survives even when nobody is around, and gets picked up later by whoever shows up. The board itself is a live representation of "whose court the ball is in right now."
+**Work queue / durable thread (adopted).** Pull is the answer to "we don't know who will do it." An item survives even when nobody is around, and gets picked up later by whoever shows up.
+
+Mechanically, each item is a work-queue entry with an owner and a pull-based lifecycle. But the shape a requester actually experiences is closer to a stateful thread than a ticket sitting in a queue: a `topic` is the thread's subject (not a person or a machine — see "Why now" below), `state` says where the thread currently stands, `tag` labels it for later retrieval, and `comment` lets the conversation continue for as long as the subject stays relevant — closing an item ends the work, not the thread; a closed item still takes new comments. Referencing another subject inside a comment ("this also affects `iyulab/other-repo`") works the same way an `@mention` would in a chat tool, except the target is a `topic`, never a worker or a person — consistent with addressing by subject, not by address.
+
+What's deliberately not carried over from chat/email tools: no presence requirement, no push delivery, no real-time expectation. A worker reads a thread when it starts a session, when it searches for something it needs, or when it has idle capacity to look for open work — the same three moments a human would check a mailbox or an issue tracker, minus the inefficiency of waiting on someone to be online. See [goals.md](goals.md) A-1 for the async-coordination assumption this rests on.
 
 ## Scenarios
 

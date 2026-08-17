@@ -42,5 +42,5 @@ Full In/Out/Later breakdown is in [scope.md](scope.md). Here we only record *why
 
 - **Not a file-sync service** — git already solves this well for code and artifacts. No reason to reinvent it.
 - **Not an orchestrator** — same rationale as P-3.
-- **Not real-time chat** — the differentiation hypothesis in [goals.md](goals.md) explicitly gives up real-time-ness as an axis it's fine to lose on.
+- **Not real-time chat** — the differentiation hypothesis in [landscape.md](landscape.md) explicitly gives up real-time-ness as an axis it's fine to lose on. Comments and mentions ([glossary.md](glossary.md)) still read like a conversation ([vision.md](vision.md)), but only on a worker's own pull schedule, never pushed.
 - **Not a multi-user collaboration tool** — the primary target is one person owning multiple machines. This one is Later, though ([ADR-0006](decisions/ADR-0006-single-owner-later.md)).
