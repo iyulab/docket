@@ -19,6 +19,8 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 **M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API, tags, comments, full-text search over both), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection, a `SessionStart` hook, and local topic derivation) exist and are covered by tests. `docket-console` exists as a read-only kanban board — see "As a console" below.
 
+**Operating docket** (as an MCP-calling agent or a plain HTTP client — register, file, discover, claim, complete work): [docs/usage.md](docs/usage.md) is the single complete reference. The rest of this README is a shorter, example-driven walkthrough of the same ground.
+
 ## Running it
 
 ```
@@ -181,6 +183,7 @@ DOCKET_LAUNCHER_LOCAL_BIN=target/debug/docket-cc cargo run -p docket-cc-launcher
 
 | Doc | Contents |
 |---|---|
+| [usage.md](docs/usage.md) | **Start here to operate docket** — MCP tools, HTTP API, the worker loop, topic derivation |
 | [vision.md](docs/vision.md) | Problem · users · scenarios |
 | [principles.md](docs/principles.md) | Philosophy · principles · non-goals |
 | [scope.md](docs/scope.md) | In / Out / Later |
