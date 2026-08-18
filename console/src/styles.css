@@ -207,6 +207,21 @@ body {
   margin-top: 0;
 }
 
+.item-list-group-header th {
+  background: #ebecf0;
+  color: #44546f;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 0.35rem 0.75rem;
+}
+
+.item-list-group-count {
+  color: #6b778c;
+  font-weight: 400;
+  text-transform: none;
+}
+
 .item-row {
   cursor: pointer;
 }
