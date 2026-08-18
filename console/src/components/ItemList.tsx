@@ -16,6 +16,10 @@ interface ItemListProps {
 // instead — a header row per
 // topic, once — carries the same information without the repetition, and
 // reads closer to how the board's per-state columns already categorize.
+// `items` arrives pre-sorted by the caller's chosen sort key, so a topic's
+// first-encountered item is that topic's best-ranked item under that key.
+// Keeping `order` in first-encounter order (no re-sort) lets group order
+// inherit the same ranking instead of collapsing to alphabetical.
 function groupByTopic(items: Item[]): [string, Item[]][] {
   const order: string[] = []
   const groups = new Map<string, Item[]>()
@@ -28,7 +32,7 @@ function groupByTopic(items: Item[]): [string, Item[]][] {
     }
     group.push(item)
   }
-  return order.sort((a, b) => a.localeCompare(b)).map((topic) => [topic, groups.get(topic)!])
+  return order.map((topic) => [topic, groups.get(topic)!])
 }
 
 export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
