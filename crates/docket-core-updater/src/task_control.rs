@@ -10,6 +10,7 @@
 //! design (§7) already scopes the stop→swap→restart→rollback sequence to
 //! manual E2E verification on the deployment host instead.
 
+#[cfg(windows)]
 use std::process::Command;
 
 #[cfg(windows)]
