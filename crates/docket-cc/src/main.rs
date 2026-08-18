@@ -41,10 +41,10 @@ struct ItemDto {
     /// Absent from servers older than ADR-0010. Defaulted so an old-server
     /// response still deserializes.
     #[serde(default)]
-    from: Option<String>,
+    requester: Option<String>,
     /// Was `owner` before ADR-0010.
     #[serde(default)]
-    to: Option<String>,
+    assignee: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -149,13 +149,13 @@ fn topic_to_path(root: &Path, topic: &str) -> PathBuf {
 /// the sole source of truth), so nothing reads this format back yet.
 fn render_item_file(item: &ItemDto) -> String {
     format!(
-        "---\nid: {}\ntopic: {}\nstate: {}\nresolution: {}\nfrom: {}\nto: {}\ncreated_at: {}\nupdated_at: {}\n---\n\n# {}\n\n{}\n",
+        "---\nid: {}\ntopic: {}\nstate: {}\nresolution: {}\nrequester: {}\nassignee: {}\ncreated_at: {}\nupdated_at: {}\n---\n\n# {}\n\n{}\n",
         item.id,
         item.topic,
         item.state,
         item.resolution.as_deref().unwrap_or("null"),
-        item.from.as_deref().unwrap_or("null"),
-        item.to.as_deref().unwrap_or("null"),
+        item.requester.as_deref().unwrap_or("null"),
+        item.assignee.as_deref().unwrap_or("null"),
         item.created_at,
         item.updated_at,
         item.title,
@@ -354,8 +354,8 @@ mod tests {
             body: Some("some detail".to_string()),
             state: "open".to_string(),
             resolution: None,
-            from: None,
-            to: None,
+            requester: None,
+            assignee: None,
             created_at: 1,
             updated_at: 2,
         }
@@ -407,12 +407,12 @@ mod tests {
 
         let mut updated = sample_item();
         updated.state = "claimed".to_string();
-        updated.to = Some("w1".to_string());
+        updated.assignee = Some("w1".to_string());
         let path2 = write_item_file(&dir, &updated).unwrap();
         assert_eq!(path1, path2, "same item id must overwrite the same file");
         let contents = std::fs::read_to_string(&path2).unwrap();
         assert!(contents.contains("state: claimed"));
-        assert!(contents.contains("to: w1"));
+        assert!(contents.contains("assignee: w1"));
 
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()

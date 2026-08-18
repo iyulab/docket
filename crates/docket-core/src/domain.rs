@@ -74,20 +74,19 @@ pub struct Worker {
 
 /// Whose hand an item is currently in. Derived from `state` — see
 /// [`Item::turn_for`] — and never persisted, so it can't drift out of sync
-/// with the state it's computed from (see [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md)).
+/// with the state it's computed from (see [ADR-0011](../../../docs/decisions/ADR-0011-requester-assignee-naming.md)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Turn {
-    From,
-    To,
+    Requester,
+    Assignee,
 }
 
 /// A single unit of work waiting to be processed.
 ///
-/// `from`/`to` on the wire map to `requester`/`assignee` in storage — both
-/// `from` and `to` are SQL keywords, so the rename happens at this
-/// serialization boundary rather than in every query string. See
-/// [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+/// `requester`/`assignee` are the same name on the wire, in storage, and
+/// here — no serde rename needed. See
+/// [ADR-0011](../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
@@ -97,11 +96,9 @@ pub struct Item {
     pub state: State,
     pub resolution: Option<Resolution>,
     /// Who this item is being worked for. Optional, set at creation only.
-    #[serde(rename = "from")]
     pub requester: Option<String>,
     /// The worker currently holding the item (was `owner`) — set by `claim`,
     /// checked by `submit`.
-    #[serde(rename = "to")]
     pub assignee: Option<String>,
     /// Derived, not stored — see [`Item::turn_for`].
     pub turn: Option<Turn>,
@@ -118,8 +115,8 @@ impl Item {
     pub fn turn_for(state: State) -> Option<Turn> {
         match state {
             State::Open => None,
-            State::Claimed => Some(Turn::To),
-            State::Resolved => Some(Turn::From),
+            State::Claimed => Some(Turn::Assignee),
+            State::Resolved => Some(Turn::Requester),
             State::Closed => None,
         }
     }

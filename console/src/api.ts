@@ -1,6 +1,6 @@
 export type ItemState = 'open' | 'claimed' | 'resolved' | 'closed'
 export type Resolution = 'done' | 'duplicate' | 'wontfix' | 'invalid'
-export type Turn = 'from' | 'to'
+export type Turn = 'requester' | 'assignee'
 
 // Mirrors docket-core's Item exactly (crates/docket-core/src/domain.rs) —
 // field names and casing are the wire format, not renamed to camelCase.
@@ -12,24 +12,26 @@ export interface Item {
   state: ItemState
   resolution: Resolution | null
   /** Who this item is being worked for. Optional, set at creation only. */
-  from: string | null
+  requester: string | null
   /** The worker currently holding the item (was `owner`). */
-  to: string | null
-  /** Derived from `state`, not stored — see ADR-0010. */
+  assignee: string | null
+  /** Derived from `state`, not stored — see ADR-0011. */
   turn: Turn | null
   tags: string[]
   created_at: number
   updated_at: number
 }
 
-// `to` is only set once a worker actually claims the item — before that,
-// the closest honest answer to "who should look at this" is whoever owns
-// the item's topic. The API stays honest (a null `to` means "not yet
-// specifically assigned"); this is purely a display-layer fallback, kept
+// `assignee` is only set once a worker actually claims the item — before
+// that, the closest honest answer to "who should look at this" is whoever
+// owns the item's topic. The API stays honest (a null `assignee` means "not
+// yet specifically assigned"); this is purely a display-layer fallback, kept
 // next to Item so every consumer renders the same thing rather than each
-// reinventing `item.to ?? item.topic`.
-export function toDisplay(item: Item): { value: string; isFallback: boolean } {
-  return item.to ? { value: item.to, isFallback: false } : { value: item.topic, isFallback: true }
+// reinventing `item.assignee ?? item.topic`.
+export function assigneeDisplay(item: Item): { value: string; isFallback: boolean } {
+  return item.assignee
+    ? { value: item.assignee, isFallback: false }
+    : { value: item.topic, isFallback: true }
 }
 
 export interface Comment {

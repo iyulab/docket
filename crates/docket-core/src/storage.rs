@@ -197,20 +197,22 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
-    /// Sets `from` (the requester) on an item that already exists — the one
-    /// way to give an item a requester after creation, for items filed
-    /// before ADR-0010 or before a requester identity was available.
+    /// Sets `requester` on an item that already exists — the one way to
+    /// give an item a requester after creation, for items filed before
+    /// ADR-0010 or before a requester identity was available.
     /// State-independent (works on a closed item too — this corrects
     /// metadata, it isn't a workflow transition).
-    pub fn set_item_from(&self, id: &str, from: &str) -> Result<Item> {
-        let from = from.trim();
-        if from.is_empty() {
-            return Err(StoreError::Validation("from must not be blank".to_string()));
+    pub fn set_item_requester(&self, id: &str, requester: &str) -> Result<Item> {
+        let requester = requester.trim();
+        if requester.is_empty() {
+            return Err(StoreError::Validation(
+                "requester must not be blank".to_string(),
+            ));
         }
         let conn = self.conn.lock().expect("store mutex poisoned");
         let affected = conn.execute(
             "UPDATE items SET requester = ?1, updated_at = ?2 WHERE id = ?3",
-            params![from, now_millis(), id],
+            params![requester, now_millis(), id],
         )?;
         if affected == 0 {
             return Err(StoreError::NotFound);
@@ -1044,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn set_item_from_updates_requester_and_bumps_updated_at() {
+    fn set_item_requester_updates_requester_and_bumps_updated_at() {
         let store = open_test_store();
         let item = store
             .create_item("iyulab/docket", "t", None, &[], None)
@@ -1054,37 +1056,37 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         let updated = store
-            .set_item_from(&item.id, "  backfilled-reporter  ")
+            .set_item_requester(&item.id, "  backfilled-reporter  ")
             .unwrap();
         assert_eq!(updated.requester.as_deref(), Some("backfilled-reporter"));
         assert!(updated.updated_at > created_updated_at);
     }
 
     #[test]
-    fn set_item_from_works_on_a_closed_item() {
+    fn set_item_requester_works_on_a_closed_item() {
         let store = open_test_store();
         let item = store
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.remove_item(&item.id).unwrap();
 
-        let updated = store.set_item_from(&item.id, "reporter-1").unwrap();
+        let updated = store.set_item_requester(&item.id, "reporter-1").unwrap();
         assert_eq!(updated.state, State::Closed);
         assert_eq!(updated.requester.as_deref(), Some("reporter-1"));
     }
 
     #[test]
-    fn set_item_from_rejects_blank_and_missing_item() {
+    fn set_item_requester_rejects_blank_and_missing_item() {
         let store = open_test_store();
         let item = store
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         assert!(matches!(
-            store.set_item_from(&item.id, "   "),
+            store.set_item_requester(&item.id, "   "),
             Err(StoreError::Validation(_))
         ));
         assert!(matches!(
-            store.set_item_from("nonexistent-id", "reporter-1"),
+            store.set_item_requester("nonexistent-id", "reporter-1"),
             Err(StoreError::NotFound)
         ));
     }

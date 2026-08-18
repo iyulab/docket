@@ -211,9 +211,9 @@ struct CreateItemRequest {
     #[serde(default)]
     tags: Vec<String>,
     /// Who this item is being worked for — see
-    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     #[serde(default)]
-    from: Option<String>,
+    requester: Option<String>,
 }
 
 async fn create_item(
@@ -225,7 +225,7 @@ async fn create_item(
         &req.title,
         req.body.as_deref(),
         &req.tags,
-        req.from.as_deref(),
+        req.requester.as_deref(),
     )?;
     Ok((StatusCode::CREATED, Json(item)))
 }
@@ -235,18 +235,18 @@ struct ListItemsQuery {
     /// Exact-match topic filter.
     topic: Option<String>,
     state: Option<String>,
-    /// A worker id — narrows the list to items whose `to` (assignee) is
-    /// exactly this worker. See
-    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
-    to: Option<String>,
-    /// Exact-match on `from` (the requester) — symmetric to `to`, above.
-    from: Option<String>,
+    /// A worker id — narrows the list to items whose `assignee` is exactly
+    /// this worker. See
+    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
+    assignee: Option<String>,
+    /// Exact-match on `requester` — symmetric to `assignee`, above.
+    requester: Option<String>,
     /// A registered worker's id — narrows the list to items under any topic
     /// that worker is registered for (prefix match, see
     /// [`docket_core::domain::topic_matches`]) — this is a topic-jurisdiction
-    /// filter, unrelated to who currently holds any given item (that's `to`,
-    /// above). This is the "discover it via list" step of the M1 completion
-    /// criteria. Was `owned_by`, split and renamed by ADR-0010.
+    /// filter, unrelated to who currently holds any given item (that's
+    /// `assignee`, above). This is the "discover it via list" step of the M1
+    /// completion criteria. Was `owned_by`, split and renamed by ADR-0010.
     topic_scope: Option<String>,
     /// Full-text match against title+body. Presence of `q` and/or `tag`
     /// routes this request through `Store::search_items` instead of
@@ -292,14 +292,14 @@ async fn list_items(
         }
         None => items,
     };
-    let items = match q.to {
+    let items = match q.assignee {
         Some(worker_id) => items
             .into_iter()
             .filter(|item| item.assignee.as_deref() == Some(worker_id.as_str()))
             .collect(),
         None => items,
     };
-    let items = match q.from {
+    let items = match q.requester {
         Some(requester) => items
             .into_iter()
             .filter(|item| item.requester.as_deref() == Some(requester.as_str()))
@@ -318,13 +318,13 @@ async fn get_item(
 
 #[derive(Deserialize)]
 struct UpdateItemRequest {
-    /// Sets `from` (the requester) on an existing item — the only field
-    /// this covers so far. `from` is normally set once at creation
-    /// (ADR-0010); this exists for the case an item was filed before a
-    /// requester identity was available and needs it added after the fact.
-    /// Editing `title`/`body`/`topic` post-creation is a separate,
-    /// not-yet-built gap (see ROADMAP.md).
-    from: String,
+    /// Sets `requester` on an existing item — the only field this covers so
+    /// far. `requester` is normally set once at creation (ADR-0010); this
+    /// exists for the case an item was filed before a requester identity
+    /// was available and needs it added after the fact. Editing
+    /// `title`/`body`/`topic` post-creation is a separate, not-yet-built
+    /// gap (see ROADMAP.md).
+    requester: String,
 }
 
 async fn update_item(
@@ -332,7 +332,7 @@ async fn update_item(
     Path(id): Path<String>,
     Json(req): Json<UpdateItemRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.set_item_from(&id, &req.from)?))
+    Ok(Json(store.set_item_requester(&id, &req.requester)?))
 }
 
 #[derive(Deserialize)]
@@ -561,11 +561,11 @@ mod tests {
         assert_eq!(closed["resolution"], "done");
     }
 
-    /// `from` round-trips from creation, `to` is set by claim, and `turn`
-    /// tracks each state transition — see
-    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+    /// `requester` round-trips from creation, `assignee` is set by claim,
+    /// and `turn` tracks each state transition — see
+    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     #[tokio::test]
-    async fn from_to_turn_track_the_lifecycle_over_http() {
+    async fn requester_assignee_turn_track_the_lifecycle_over_http() {
         let app = test_app();
 
         let resp = app
@@ -573,15 +573,15 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 "/items",
-                serde_json::json!({"topic": "iyulab/docket", "title": "t", "from": "reporter-1"}),
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "requester": "reporter-1"}),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let item = json_body(resp).await;
         let id = item["id"].as_str().unwrap().to_string();
-        assert_eq!(item["from"], "reporter-1");
-        assert_eq!(item["to"], serde_json::Value::Null);
+        assert_eq!(item["requester"], "reporter-1");
+        assert_eq!(item["assignee"], serde_json::Value::Null);
         assert_eq!(item["turn"], serde_json::Value::Null);
 
         let resp = app
@@ -595,9 +595,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let claimed = json_body(resp).await;
-        assert_eq!(claimed["from"], "reporter-1");
-        assert_eq!(claimed["to"], "w1");
-        assert_eq!(claimed["turn"], "to");
+        assert_eq!(claimed["requester"], "reporter-1");
+        assert_eq!(claimed["assignee"], "w1");
+        assert_eq!(claimed["turn"], "assignee");
 
         let resp = app
             .clone()
@@ -609,7 +609,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(json_body(resp).await["turn"], "from");
+        assert_eq!(json_body(resp).await["turn"], "requester");
 
         let resp = app
             .clone()
@@ -626,12 +626,12 @@ mod tests {
         assert_eq!(json_body(resp).await["turn"], serde_json::Value::Null);
     }
 
-    /// `to` matches exactly against the item's assignee field; `topic_scope`
-    /// (the old `owned_by` behavior) matches by the worker's registered
-    /// topics instead — the two must stay independent, see
-    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+    /// `assignee` matches exactly against the item's assignee field;
+    /// `topic_scope` (the old `owned_by` behavior) matches by the worker's
+    /// registered topics instead — the two must stay independent, see
+    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     #[tokio::test]
-    async fn to_filter_matches_assignee_not_topic_scope() {
+    async fn assignee_filter_matches_assignee_not_topic_scope() {
         let app = test_app();
 
         let resp = app
@@ -657,12 +657,12 @@ mod tests {
         let id = json_body(resp).await["id"].as_str().unwrap().to_string();
 
         // w1 is registered for the item's topic, but hasn't claimed it —
-        // `to=w1` must not match on topic jurisdiction alone.
+        // `assignee=w1` must not match on topic jurisdiction alone.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/items?to=w1")
+                    .uri("/items?assignee=w1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -683,7 +683,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/items?to=w1")
+                    .uri("/items?assignee=w1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -694,10 +694,10 @@ mod tests {
         assert_eq!(listed[0]["id"], id);
     }
 
-    /// `from` is symmetric to `to` (above) — exact match against the
-    /// requester field, unaffected by claim/assignment.
+    /// `requester` is symmetric to `assignee` (above) — exact match against
+    /// the requester field, unaffected by claim/assignment.
     #[tokio::test]
-    async fn from_filter_matches_requester_exactly() {
+    async fn requester_filter_matches_requester_exactly() {
         let app = test_app();
 
         let resp = app
@@ -705,7 +705,7 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 "/items",
-                serde_json::json!({"topic": "iyulab/docket", "title": "t", "from": "reporter-a"}),
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "requester": "reporter-a"}),
             ))
             .await
             .unwrap();
@@ -715,7 +715,7 @@ mod tests {
             .oneshot(json_request(
                 "POST",
                 "/items",
-                serde_json::json!({"topic": "iyulab/docket", "title": "t", "from": "reporter-b"}),
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "requester": "reporter-b"}),
             ))
             .await
             .unwrap();
@@ -724,7 +724,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/items?from=reporter-a")
+                    .uri("/items?requester=reporter-a")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -737,7 +737,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/items?from=nobody-filed-anything-here")
+                    .uri("/items?requester=nobody-filed-anything-here")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -746,10 +746,10 @@ mod tests {
         assert_eq!(json_body(resp).await.as_array().unwrap().len(), 0);
     }
 
-    /// The one way to give a pre-existing item a `from` after the fact —
+    /// The one way to give a pre-existing item a `requester` after the fact —
     /// e.g. backfilling items filed before ADR-0010 added the field.
     #[tokio::test]
-    async fn patch_item_sets_from() {
+    async fn patch_item_sets_requester() {
         let app = test_app();
 
         let resp = app
@@ -763,19 +763,19 @@ mod tests {
             .unwrap();
         let item = json_body(resp).await;
         let id = item["id"].as_str().unwrap().to_string();
-        assert_eq!(item["from"], serde_json::Value::Null);
+        assert_eq!(item["requester"], serde_json::Value::Null);
 
         let resp = app
             .clone()
             .oneshot(json_request(
                 "PATCH",
                 &format!("/items/{id}"),
-                serde_json::json!({"from": "backfilled-reporter"}),
+                serde_json::json!({"requester": "backfilled-reporter"}),
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(json_body(resp).await["from"], "backfilled-reporter");
+        assert_eq!(json_body(resp).await["requester"], "backfilled-reporter");
 
         let resp = app
             .oneshot(
@@ -786,11 +786,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(json_body(resp).await["from"], "backfilled-reporter");
+        assert_eq!(json_body(resp).await["requester"], "backfilled-reporter");
     }
 
     #[tokio::test]
-    async fn patch_item_rejects_blank_from() {
+    async fn patch_item_rejects_blank_requester() {
         let app = test_app();
         let resp = app
             .clone()
@@ -807,7 +807,7 @@ mod tests {
             .oneshot(json_request(
                 "PATCH",
                 &format!("/items/{id}"),
-                serde_json::json!({"from": "   "}),
+                serde_json::json!({"requester": "   "}),
             ))
             .await
             .unwrap();
@@ -821,7 +821,7 @@ mod tests {
             .oneshot(json_request(
                 "PATCH",
                 "/items/nonexistent-id",
-                serde_json::json!({"from": "reporter-1"}),
+                serde_json::json!({"requester": "reporter-1"}),
             ))
             .await
             .unwrap();

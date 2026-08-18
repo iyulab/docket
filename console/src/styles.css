@@ -132,8 +132,8 @@ body {
   color: #a4262c;
 }
 
-.badge-turn-to,
-.badge-turn-from {
+.badge-turn-assignee,
+.badge-turn-requester {
   background: transparent;
   border: 1px solid #6b778c;
   color: #44546f;
@@ -244,9 +244,9 @@ body {
   font-size: 0.8rem;
 }
 
-/* `to` falling back to the item's topic (nobody has claimed it yet) reads
-   as a real assignee unless visually marked as a stand-in. */
-.item-to-fallback {
+/* `assignee` falling back to the item's topic (nobody has claimed it yet)
+   reads as a real assignee unless visually marked as a stand-in. */
+.item-assignee-fallback {
   font-style: italic;
   color: #6b778c;
 }

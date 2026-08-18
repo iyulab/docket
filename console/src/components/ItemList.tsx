@@ -1,6 +1,6 @@
 import { Fragment } from 'react'
 import type { Item } from '../api'
-import { toDisplay } from '../api'
+import { assigneeDisplay } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
 import { formatRelativeTime } from '../time'
 
@@ -11,8 +11,9 @@ interface ItemListProps {
 }
 
 // `topic` as its own column repeated the same string down an entire group of
-// rows, and duplicated what `to`'s topic fallback (see `toDisplay`) already
-// shows for unclaimed items. Grouping by topic instead — a header row per
+// rows, and duplicated what `assignee`'s topic fallback (see
+// `assigneeDisplay`) already shows for unclaimed items. Grouping by topic
+// instead — a header row per
 // topic, once — carries the same information without the repetition, and
 // reads closer to how the board's per-state columns already categorize.
 function groupByTopic(items: Item[]): [string, Item[]][] {
@@ -41,8 +42,8 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
         <tr>
           <th>제목</th>
           <th>state</th>
-          <th>from</th>
-          <th>to</th>
+          <th>requester</th>
+          <th>assignee</th>
           <th>turn</th>
           <th>tags</th>
           <th>갱신</th>
@@ -69,13 +70,13 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
                     <span className={`badge badge-${item.resolution}`}>{item.resolution}</span>
                   )}
                 </td>
-                <td className="item-list-worker-cell">{item.from ?? '—'}</td>
+                <td className="item-list-worker-cell">{item.requester ?? '—'}</td>
                 <td className="item-list-worker-cell">
                   {(() => {
-                    const to = toDisplay(item)
+                    const assignee = assigneeDisplay(item)
                     return (
-                      <span className={to.isFallback ? 'item-to-fallback' : undefined}>
-                        {to.value}
+                      <span className={assignee.isFallback ? 'item-assignee-fallback' : undefined}>
+                        {assignee.value}
                       </span>
                     )
                   })()}
@@ -83,7 +84,7 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
                 <td>
                   {item.turn ? (
                     <span className={`badge badge-turn-${item.turn}`}>
-                      {item.turn === 'to' ? '→ to' : '→ from'}
+                      {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
                     </span>
                   ) : (
                     '—'

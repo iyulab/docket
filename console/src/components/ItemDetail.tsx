@@ -3,6 +3,7 @@ import type { Comment, Item } from '../api'
 import {
   addItemTags,
   approveItem,
+  assigneeDisplay,
   claimItem,
   fetchComments,
   forceCloseItem,
@@ -10,7 +11,6 @@ import {
   removeItem,
   removeItemTags,
   submitItem,
-  toDisplay,
 } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
 import { formatRelativeTime } from '../time'
@@ -130,7 +130,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
           {item.state}
           {item.turn && (
             <span className={`badge badge-turn-${item.turn}`}>
-              {item.turn === 'to' ? '→ to' : '→ from'}
+              {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
             </span>
           )}
         </dd>
@@ -140,18 +140,20 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
             <dd>{item.resolution}</dd>
           </>
         )}
-        {item.from && (
+        {item.requester && (
           <>
-            <dt>from</dt>
-            <dd>{item.from}</dd>
+            <dt>requester</dt>
+            <dd>{item.requester}</dd>
           </>
         )}
-        <dt>to</dt>
+        <dt>assignee</dt>
         <dd>
           {(() => {
-            const to = toDisplay(item)
+            const assignee = assigneeDisplay(item)
             return (
-              <span className={to.isFallback ? 'item-to-fallback' : undefined}>{to.value}</span>
+              <span className={assignee.isFallback ? 'item-assignee-fallback' : undefined}>
+                {assignee.value}
+              </span>
             )
           })()}
         </dd>
@@ -166,7 +168,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
             Claim
           </button>
         )}
-        {item.state === 'claimed' && item.to === CONSOLE_WORKER_ID && (
+        {item.state === 'claimed' && item.assignee === CONSOLE_WORKER_ID && (
           <button
             type="button"
             disabled={actionPending}

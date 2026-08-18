@@ -1,6 +1,16 @@
-Status: v0 alignment snapshot | 2026-08-18 | settled
+Status: v0 alignment snapshot | 2026-08-18 | settled — field names superseded by [ADR-0011](ADR-0011-requester-assignee-naming.md)
 
 # ADR-0010: Item `from`/`to`/`turn` — explicit two-party handoff fields
+
+> **Naming update ([ADR-0011](ADR-0011-requester-assignee-naming.md), same day)**: the wire field
+> names below (`from`, `to`) were renamed to `requester`/`assignee` — `topic` and `to` had converged
+> to mean nearly the same thing in the console, and `from`/`to` read as directional prepositions
+> rather than roles. `turn`'s values changed to match (`"assignee"`/`"requester"` instead of
+> `"to"`/`"from"`); the `turn` field name itself, and every other decision in this ADR (the
+> two-party model, the derived-not-stored `turn`, the `requester`/`assignee` *storage* column names
+> that motivated the original wire names' SQL-keyword avoidance), are unaffected. Everything below
+> is read with that substitution in mind — kept as originally written rather than edited, per this
+> project's "corrected, not silently edited" convention.
 
 ## Context
 

@@ -80,7 +80,7 @@ describe('fetchItems', () => {
 
 describe('claimItem', () => {
   it('POSTs the worker id and returns the updated item', async () => {
-    const item = { id: 'i1', state: 'claimed', to: 'console' }
+    const item = { id: 'i1', state: 'claimed', assignee: 'console' }
     mockFetchOnce(item)
 
     const result = await claimItem('i1', 'console')

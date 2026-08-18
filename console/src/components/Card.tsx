@@ -24,7 +24,7 @@ export function Card({ item, selected, onSelect }: CardProps) {
       <div className="card-id">{item.id.slice(0, 8)}</div>
       {item.turn && (
         <span className={`badge badge-turn-${item.turn}`}>
-          {item.turn === 'to' ? '→ to' : '→ from'}
+          {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
         </span>
       )}
       {item.resolution && (
