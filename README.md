@@ -141,15 +141,16 @@ The topic comes from the nearest `.git` above the current directory — its `ori
 
 ### As a console
 
-`docket-console` is a list→detail view over every item (a kanban board grouped into `open` /
-`claimed` / `resolved` / `closed` columns is available as a secondary view), polling `docket-core`
-every 5 seconds. It's a pure client of the core HTTP API — no `docket-cc` involved. The list
-supports filtering by state/tag/topic, full-text search across title/body/comments, and a topic-level
-from/to perspective toggle built on the `found-in:<discoverer-topic>` tag convention (see
-[glossary.md](docs/glossary.md) — distinct from the item-level `from`/`to`/`turn` fields below).
-An item's detail view shows `from`/`to`/`turn` ([ADR-0010](docs/decisions/ADR-0010-item-from-to-turn.md))
-and supports the core write operations — claim, submit, approve, and tag add/remove — attributed to
-a fixed `console` identity, since multi-user identity is Later
+`docket-console` is a list view over every item (a kanban board grouped into `open` / `claimed` /
+`resolved` / `closed` columns is available as a secondary view), polling `docket-core` every 5
+seconds. It's a pure client of the core HTTP API — no `docket-cc` involved. The list shows
+`from`/`to`/`turn` ([ADR-0010](docs/decisions/ADR-0010-item-from-to-turn.md)) as columns, and
+supports filtering by state/tag/topic, full-text search across title/body/comments, and a
+topic-level from/to perspective toggle (a separate, topic-to-topic axis — see
+[glossary.md](docs/glossary.md) — kept for items still carrying a legacy `found-in:` tag). Selecting
+an item navigates to a dedicated detail page (rendered from markdown) rather than opening a side
+panel, and supports the core write operations — claim, submit, approve, and tag add/remove —
+attributed to a fixed `console` identity, since multi-user identity is Later
 ([ADR-0006](docs/decisions/ADR-0006-single-owner-later.md)). It also exposes the three admin close
 operations (remove/merge/force-close, valid from any non-closed state, assignee-agnostic) that set
 `resolution` to `invalid`/`duplicate`/`wontfix` — see [usage.md](docs/usage.md#8-console).

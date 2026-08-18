@@ -229,6 +229,13 @@ body {
   font-size: 0.8rem;
 }
 
+/* `to` falling back to the item's topic (nobody has claimed it yet) reads
+   as a real assignee unless visually marked as a stand-in. */
+.item-to-fallback {
+  font-style: italic;
+  color: #6b778c;
+}
+
 .tag-chip {
   display: inline-block;
   margin: 0.1rem 0.2rem 0.1rem 0;

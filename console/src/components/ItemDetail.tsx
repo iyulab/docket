@@ -10,6 +10,7 @@ import {
   removeItem,
   removeItemTags,
   submitItem,
+  toDisplay,
 } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
 import { formatRelativeTime } from '../time'
@@ -145,12 +146,15 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
             <dd>{item.from}</dd>
           </>
         )}
-        {item.to && (
-          <>
-            <dt>to</dt>
-            <dd>{item.to}</dd>
-          </>
-        )}
+        <dt>to</dt>
+        <dd>
+          {(() => {
+            const to = toDisplay(item)
+            return (
+              <span className={to.isFallback ? 'item-to-fallback' : undefined}>{to.value}</span>
+            )
+          })()}
+        </dd>
       </dl>
       <div className="item-page-actions">
         {item.state === 'open' && (

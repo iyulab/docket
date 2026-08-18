@@ -86,3 +86,24 @@ parallel rather than clarify it; glossary.md documents the distinction explicitl
 
 If a workflow needs more than two parties (e.g., a reviewer distinct from both `from` and `to`),
 `turn`'s two-value model stops being sufficient and the schema needs revisiting.
+
+## 2026-08-18 update — `found-in:` superseded, not a parallel axis
+
+The "Naming note" and "Given up" sections above have not held up in practice and are corrected
+here rather than silently edited, so the original reasoning stays visible:
+
+- **`found-in:` is deprecated, not a separate axis.** In actual use, `from` is populated with
+  exactly the value the `found-in:<topic>` tag used to carry (the discoverer). Treating them as
+  unrelated per-item concepts was wrong — `from` is the proper field for what the tag was standing
+  in for. New items should set `from` at creation instead of adding the tag; see
+  [glossary.md](../glossary.md)'s updated `found-in:` entry.
+- **The backfill did happen.** `PATCH /items/{id} {"from": "…"}` was added (admin-only, HTTP-only,
+  no MCP tool — same reasoning as the three close operations) specifically to set `from` on items
+  that predate this ADR. Every non-closed production item carrying a `found-in:` tag was backfilled
+  from that tag's value, then the now-redundant tag removed via the existing `remove_tags` — see
+  `docket-works` HISTORY for the 2026-08-18 entries. Closed items were left untouched (no
+  practical need surfaced yet, and their `found-in:` tag remains the only record of the value until
+  one exists).
+- **`to`'s display fallback lives in the console, not here.** `docket-console` shows `to`, falling
+  back to the item's own `topic` when nobody has claimed it yet, so "who should look at this" always
+  has an answer. This is display-only — `Item.to` itself is unchanged, still `null` until `claim`.

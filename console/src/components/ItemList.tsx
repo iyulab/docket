@@ -1,4 +1,5 @@
 import type { Item } from '../api'
+import { toDisplay } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
 import { formatRelativeTime } from '../time'
 
@@ -43,7 +44,16 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
               )}
             </td>
             <td className="item-list-worker-cell">{item.from ?? '—'}</td>
-            <td className="item-list-worker-cell">{item.to ?? '—'}</td>
+            <td className="item-list-worker-cell">
+              {(() => {
+                const to = toDisplay(item)
+                return (
+                  <span className={to.isFallback ? 'item-to-fallback' : undefined}>
+                    {to.value}
+                  </span>
+                )
+              })()}
+            </td>
             <td>
               {item.turn ? (
                 <span className={`badge badge-turn-${item.turn}`}>
