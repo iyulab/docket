@@ -56,6 +56,9 @@ struct ListItemsParams {
     /// assignee) is exactly this worker.
     #[serde(default)]
     to: Option<String>,
+    /// Exact-match on `from` (the requester) — symmetric to `to`, above.
+    #[serde(default)]
+    from: Option<String>,
     /// A registered worker id — narrows the list to items under any topic
     /// that worker is registered for (prefix match). Unlike `to`, this
     /// doesn't check who actually holds any given item — it's a
@@ -230,7 +233,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (to), and/or a worker's topic jurisdiction (topic_scope)"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (to), the requester (from), and/or a worker's topic jurisdiction (topic_scope)"
     )]
     async fn list_items(
         &self,
@@ -243,6 +246,7 @@ impl DocketMcp {
                 ("topic", p.topic.as_deref()),
                 ("state", p.state.as_deref()),
                 ("to", p.to.as_deref()),
+                ("from", p.from.as_deref()),
                 ("topic_scope", p.topic_scope.as_deref()),
             ])
             .send()
@@ -564,6 +568,7 @@ mod tests {
                 topic: None,
                 state: Some("open".to_string()),
                 to: None,
+                from: None,
                 topic_scope: Some("w1".to_string()),
             }))
             .await

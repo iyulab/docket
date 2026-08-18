@@ -97,7 +97,7 @@ losing a claim race), never a silent protocol failure.
 |---|---|---|---|
 | `register_worker` | `id`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5 |
 | `create_item` | `topic`, `title`, `body?`, `tags[]?`, `from?` | `POST /items` | **Call `search_items` first** to avoid filing a duplicate. `from` is who this item is being worked for — optional (see [ADR-0010](decisions/ADR-0010-item-from-to-turn.md)) |
-| `list_items` | `topic?`, `state?`, `to?`, `topic_scope?` | `GET /items?topic=&state=&to=&topic_scope=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `to=<worker id>` matches the current assignee exactly |
+| `list_items` | `topic?`, `state?`, `to?`, `from?`, `topic_scope?` | `GET /items?topic=&state=&to=&from=&topic_scope=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `to`/`from` match the current assignee/requester exactly |
 | `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=` | `query` full-text matches title+body+comments; `tag_match` is `any` (default) or `all` |
 | `claim_item` | `item_id`, `worker_id` | `POST /items/{id}/claim {"worker_id"}` | `open → claimed`. Exclusive — loser gets a tool-level error, not a crash |
 | `submit_item` | `item_id`, `worker_id` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current assignee (`to`) may submit |

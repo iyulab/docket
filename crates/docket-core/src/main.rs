@@ -239,6 +239,8 @@ struct ListItemsQuery {
     /// exactly this worker. See
     /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
     to: Option<String>,
+    /// Exact-match on `from` (the requester) — symmetric to `to`, above.
+    from: Option<String>,
     /// A registered worker's id — narrows the list to items under any topic
     /// that worker is registered for (prefix match, see
     /// [`docket_core::domain::topic_matches`]) — this is a topic-jurisdiction
@@ -294,6 +296,13 @@ async fn list_items(
         Some(worker_id) => items
             .into_iter()
             .filter(|item| item.assignee.as_deref() == Some(worker_id.as_str()))
+            .collect(),
+        None => items,
+    };
+    let items = match q.from {
+        Some(requester) => items
+            .into_iter()
+            .filter(|item| item.requester.as_deref() == Some(requester.as_str()))
             .collect(),
         None => items,
     };
@@ -664,6 +673,58 @@ mod tests {
         let listed = json_body(resp).await;
         assert_eq!(listed.as_array().unwrap().len(), 1);
         assert_eq!(listed[0]["id"], id);
+    }
+
+    /// `from` is symmetric to `to` (above) — exact match against the
+    /// requester field, unaffected by claim/assignment.
+    #[tokio::test]
+    async fn from_filter_matches_requester_exactly() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "from": "reporter-a"}),
+            ))
+            .await
+            .unwrap();
+        let id_a = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "from": "reporter-b"}),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?from=reporter-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed = json_body(resp).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], id_a);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items?from=nobody-filed-anything-here")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await.as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
