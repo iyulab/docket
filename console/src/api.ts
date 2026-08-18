@@ -54,3 +54,60 @@ export async function fetchTags(): Promise<TagCount[]> {
   }
   return res.json() as Promise<TagCount[]>
 }
+
+// docket-core reports a conflict (e.g. "cannot claim: item is claimed") as
+// `{error: string}` — surfaced verbatim instead of a generic status code so
+// the console can show the actual reason inline.
+async function parseErrorMessage(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: string }
+    if (typeof body.error === 'string') return body.error
+  } catch {
+    // Response body wasn't JSON — fall through to the generic message.
+  }
+  return `request failed: ${res.status}`
+}
+
+async function mutate<T>(url: string, init: RequestInit): Promise<T> {
+  const res = await fetch(url, init)
+  if (!res.ok) {
+    throw new Error(await parseErrorMessage(res))
+  }
+  return res.json() as Promise<T>
+}
+
+export async function claimItem(id: string, workerId: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/claim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ worker_id: workerId }),
+  })
+}
+
+export async function submitItem(id: string, workerId: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ worker_id: workerId }),
+  })
+}
+
+export async function approveItem(id: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/approve`, { method: 'POST' })
+}
+
+export async function addItemTags(id: string, tags: string[]): Promise<string[]> {
+  return mutate<string[]>(`/api/items/${id}/tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags }),
+  })
+}
+
+export async function removeItemTags(id: string, tags: string[]): Promise<string[]> {
+  return mutate<string[]>(`/api/items/${id}/tags`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags }),
+  })
+}

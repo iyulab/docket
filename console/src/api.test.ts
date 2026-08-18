@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchComments, fetchItems, fetchTags } from './api'
+import {
+  addItemTags,
+  approveItem,
+  claimItem,
+  fetchComments,
+  fetchItems,
+  fetchTags,
+  removeItemTags,
+  submitItem,
+} from './api'
 
 function mockFetchOnce(body: unknown, ok = true, status = 200) {
   vi.stubGlobal(
@@ -63,6 +72,111 @@ describe('fetchItems', () => {
     mockFetchOnce({}, false, 500)
 
     await expect(fetchItems()).rejects.toThrow('GET /api/items failed: 500')
+  })
+})
+
+describe('claimItem', () => {
+  it('POSTs the worker id and returns the updated item', async () => {
+    const item = { id: 'i1', state: 'claimed', owner: 'console' }
+    mockFetchOnce(item)
+
+    const result = await claimItem('i1', 'console')
+
+    expect(result).toEqual(item)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/items/i1/claim',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ worker_id: 'console' }),
+      }),
+    )
+  })
+
+  it('throws the server error message on conflict', async () => {
+    mockFetchOnce({ error: 'cannot claim: item is claimed' }, false, 409)
+
+    await expect(claimItem('i1', 'console')).rejects.toThrow('cannot claim: item is claimed')
+  })
+
+  it('falls back to a generic message when the error body is not JSON', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: () => Promise.reject(new Error('not json')),
+      }),
+    )
+
+    await expect(claimItem('i1', 'console')).rejects.toThrow('request failed: 500')
+  })
+})
+
+describe('submitItem', () => {
+  it('POSTs the worker id and returns the updated item', async () => {
+    const item = { id: 'i1', state: 'resolved' }
+    mockFetchOnce(item)
+
+    const result = await submitItem('i1', 'console')
+
+    expect(result).toEqual(item)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/items/i1/submit',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ worker_id: 'console' }),
+      }),
+    )
+  })
+})
+
+describe('approveItem', () => {
+  it('POSTs with no body and returns the updated item', async () => {
+    const item = { id: 'i1', state: 'closed', resolution: 'done' }
+    mockFetchOnce(item)
+
+    const result = await approveItem('i1')
+
+    expect(result).toEqual(item)
+    expect(fetch).toHaveBeenCalledWith('/api/items/i1/approve', expect.objectContaining({ method: 'POST' }))
+  })
+})
+
+describe('addItemTags', () => {
+  it('POSTs the tags and returns the full tag set', async () => {
+    mockFetchOnce(['a', 'b'])
+
+    const result = await addItemTags('i1', ['b'])
+
+    expect(result).toEqual(['a', 'b'])
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/items/i1/tags',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: ['b'] }),
+      }),
+    )
+  })
+})
+
+describe('removeItemTags', () => {
+  it('DELETEs the tags and returns the remaining tag set', async () => {
+    mockFetchOnce(['a'])
+
+    const result = await removeItemTags('i1', ['b'])
+
+    expect(result).toEqual(['a'])
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/items/i1/tags',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: ['b'] }),
+      }),
+    )
   })
 })
 
