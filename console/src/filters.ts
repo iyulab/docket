@@ -13,12 +13,14 @@ export interface Filters {
 
 export const FOUND_IN_PREFIX = 'found-in:'
 
-// `found-in:<repo>` is an opaque caller-defined tag (core doesn't parse
-// or interpret tags) that records which topic discovered/filed this
-// item against another topic. It is the convention actually used in
-// production for this relation.
+// `item.requester` (ADR-0010/ADR-0011) is the current way to record which
+// topic this item is for. `found-in:<repo>` is the legacy opaque tag the
+// same relation used to be recorded as, before requester existed — items
+// filed before the deprecation may still carry only the tag, so both are
+// checked (requester first, since it's the maintained source now).
 export function relationOf(item: Item, perspectiveTopic: string): Relation {
   if (item.topic === perspectiveTopic) return 'to'
+  if (item.requester === perspectiveTopic) return 'from'
   if (item.tags.includes(`${FOUND_IN_PREFIX}${perspectiveTopic}`)) return 'from'
   return null
 }
@@ -54,6 +56,9 @@ export function deriveTopics(items: Item[]): string[] {
   const topics = new Set<string>()
   for (const item of items) {
     topics.add(item.topic)
+    if (item.requester) {
+      topics.add(item.requester)
+    }
     for (const tag of item.tags) {
       if (tag.startsWith(FOUND_IN_PREFIX)) {
         topics.add(tag.slice(FOUND_IN_PREFIX.length))

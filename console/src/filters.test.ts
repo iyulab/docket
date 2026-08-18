@@ -43,6 +43,20 @@ describe('relationOf', () => {
     })
     expect(relationOf(item, 'iyulab/EDMS-v2')).toBe('from')
   })
+
+  it('returns "from" when item.requester matches the perspective topic, with no found-in tag', () => {
+    const item = makeItem({ topic: 'iyulab/docket', requester: 'iyulab/router', tags: [] })
+    expect(relationOf(item, 'iyulab/router')).toBe('from')
+  })
+
+  it('still returns "from" via the legacy found-in tag when requester is unset', () => {
+    const item = makeItem({
+      topic: 'iyulab/docket',
+      requester: null,
+      tags: ['found-in:iyulab/router'],
+    })
+    expect(relationOf(item, 'iyulab/router')).toBe('from')
+  })
 })
 
 describe('matchesFilters', () => {
@@ -85,6 +99,12 @@ describe('matchesFilters', () => {
     const filters = { ...noFilter, perspectiveTopic: 'iyulab/router', relation: 'from' as const }
     expect(matchesFilters(fromItem, filters)).toBe(true)
     expect(matchesFilters(toItem, filters)).toBe(false)
+  })
+
+  it('matches "from" via item.requester alone, no found-in tag needed', () => {
+    const fromItem = makeItem({ topic: 'iyulab/docket', requester: 'iyulab/router', tags: [] })
+    const filters = { ...noFilter, perspectiveTopic: 'iyulab/router', relation: 'from' as const }
+    expect(matchesFilters(fromItem, filters)).toBe(true)
   })
 })
 
@@ -132,5 +152,10 @@ describe('deriveTopics', () => {
 
   it('returns an empty list for no items', () => {
     expect(deriveTopics([])).toEqual([])
+  })
+
+  it('also collects item.requester, even with no found-in tag', () => {
+    const items = [makeItem({ topic: 'iyulab/docket', requester: 'iyulab/router', tags: [] })]
+    expect(deriveTopics(items)).toEqual(['iyulab/docket', 'iyulab/router'])
   })
 })
