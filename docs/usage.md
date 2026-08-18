@@ -22,6 +22,7 @@ MCP-capable session, or raw HTTP for anything else (`docket-console`, `curl`, sc
 | `claim` | A worker pulling an open item to itself, exclusively |
 | `state` | `open → claimed → resolved → closed` — the workflow stage |
 | `resolution` | Why an item closed: `done` (requester approval) / `duplicate` (merge) / `wontfix` (force-close) / `invalid` (remove) |
+| `from` / `to` / `turn` | `from` is who the item is for, `to` is the current assignee (was `owner`), `turn` says whose hand it's in right now — derived from `state`, not stored. See [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) |
 | `tag` | An opaque, caller-defined string on an item — docket never interprets it |
 | `comment` | An opaque, append-only note on an item — no edit/delete, corrections are new comments |
 
