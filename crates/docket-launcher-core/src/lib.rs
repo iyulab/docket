@@ -7,12 +7,20 @@ pub mod checksum;
 mod delegate;
 pub mod platform;
 pub mod release_client;
+mod staleness;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const OWNER: &str = "iyulab";
 const REPO: &str = "docket";
 const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// How often a running worker's launcher re-checks for a newer release —
+/// see `staleness` module doc. An hour keeps the extra API load low even
+/// across many concurrently-running sessions on one machine, while still
+/// surfacing a same-day release well before most sessions end.
+const STALENESS_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Skips the cache/download path entirely and execs this path directly when
 /// set — matches the existing `DOCKET_DB_PATH`/`DOCKET_BIND` override
@@ -68,6 +76,27 @@ async fn resolve_and_run_inner(
         GITHUB_API_BASE,
     )
     .await?;
+
+    // The cache layout (`cache_root/<version>/<worker_name><ext>`) already
+    // encodes the version as the binary's parent directory name, on every
+    // path that can produce `binary_path` (fresh download, cache hit, or
+    // fallback-to-cache) — reading it back out avoids threading a second
+    // "which version did we actually resolve" value through all three.
+    if let Some(version) = binary_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+    {
+        staleness::spawn_watcher(
+            worker_name.to_string(),
+            version.to_string(),
+            GITHUB_API_BASE.to_string(),
+            OWNER.to_string(),
+            REPO.to_string(),
+            STALENESS_CHECK_INTERVAL,
+        );
+    }
+
     delegate::run(&binary_path, args)
 }
 

@@ -57,6 +57,13 @@ Linux/macOS, `%LOCALAPPDATA%\docket\bin` on Windows — override with `DOCKET_IN
 launcher checks GitHub Releases for its own worker binary on every run and caches the result, so once
 installed you never manually update either one again.
 
+"Every run" means every time the launcher process is *started* — for `docket-mcp` that's once per
+MCP client session, since the client spawns it as a long-lived stdio server rather than re-invoking
+it per call. A release that lands while a session is already running won't reach that session; the
+launcher also re-checks once an hour in the background for as long as the session stays up, and
+prints a one-line warning to stderr the first time it finds a newer release than the one the session
+started with — restart the session (or the MCP connection) to pick it up.
+
 ## 3. Register `docket-mcp` with an MCP client
 
 Claude Code:
