@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  # A tag pushed by another workflow's GITHUB_TOKEN (auto-tag.yml, in
+  # particular) doesn't fire the `push: tags:` trigger above — GitHub
+  # doesn't chain workflow runs off GITHUB_TOKEN-authored events, to avoid
+  # accidental recursion. auto-tag.yml compensates by dispatching this
+  # workflow directly for the tag it just pushed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.3.1) — must already exist"
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,6 +39,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
@@ -63,6 +75,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4

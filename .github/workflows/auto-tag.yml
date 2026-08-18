@@ -10,8 +10,15 @@ name: Auto Tag on Version Bump
 # `v<version>` isn't already tagged, tags and pushes it. Picking the
 # version number itself — and deciding a change deserves a release at all
 # — stays a human decision made via the version-bump commit; this workflow
-# never chooses a number. Pushing the tag is what triggers `release.yml`,
-# which does the actual build+publish.
+# never chooses a number.
+#
+# Pushing the tag does NOT, on its own, trigger `release.yml`'s `push:
+# tags:` listener: GitHub doesn't chain workflow runs off an event authored
+# by another workflow's GITHUB_TOKEN (an anti-recursion guard), and the tag
+# push below is exactly that. So this workflow dispatches `release.yml`
+# directly for the tag it just pushed, via `workflow_dispatch` — a manual
+# API call rather than an automatic event, which isn't subject to that
+# guard.
 
 on:
   push:
@@ -24,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write # to dispatch release.yml for the tag this job creates
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,15 +48,25 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Tag and push if this version isn't tagged yet
+        id: tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           tag="v$VERSION"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if git rev-parse "$tag" >/dev/null 2>&1; then
             echo "$tag already exists — nothing to do."
+            echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$tag" -m "$tag"
           git push origin "$tag"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch release.yml for the new tag
+        if: steps.tag.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref main -f tag="${{ steps.tag.outputs.tag }}"
