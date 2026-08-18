@@ -10,7 +10,13 @@ const COLUMNS: { state: ItemState; title: string }[] = [
   { state: 'closed', title: 'Closed' },
 ]
 
-export function Board({ items }: { items: Item[] }) {
+interface BoardProps {
+  items: Item[]
+  selectedId: string | null
+  onSelect: (id: string) => void
+}
+
+export function Board({ items, selectedId, onSelect }: BoardProps) {
   return (
     <div className="board">
       {COLUMNS.map(({ state, title }) => (
@@ -18,6 +24,8 @@ export function Board({ items }: { items: Item[] }) {
           key={state}
           title={title}
           items={items.filter((item) => item.state === state)}
+          selectedId={selectedId}
+          onSelect={onSelect}
         />
       ))}
     </div>

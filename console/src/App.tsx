@@ -145,18 +145,16 @@ export default function App() {
       <ViewSwitcher view={view} onChange={setView} />
       <div className="app-body">
         {view === 'list' ? (
-          <>
-            <ItemList items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
-            <ItemDetail
-              item={selectedItem}
-              loading={loading}
-              onClose={() => setSelectedId(null)}
-              onMutated={refresh}
-            />
-          </>
+          <ItemList items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
         ) : (
-          <Board items={visibleItems} />
+          <Board items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
         )}
+        <ItemDetail
+          item={selectedItem}
+          loading={loading}
+          onClose={() => setSelectedId(null)}
+          onMutated={refresh}
+        />
       </div>
     </div>
   )
