@@ -112,6 +112,7 @@ export default function App() {
     'item',
     parseSelectedId,
     serializeSelectedId,
+    'push',
   )
   const [view, setView] = useUrlState<'list' | 'board'>('view', parseView, serializeView)
 
