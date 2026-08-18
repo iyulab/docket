@@ -170,6 +170,7 @@ impl IntoResponse for ApiError {
         let status = match &self.0 {
             StoreError::NotFound => StatusCode::NOT_FOUND,
             StoreError::Conflict(_) => StatusCode::CONFLICT,
+            StoreError::Validation(_) => StatusCode::BAD_REQUEST,
             StoreError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
@@ -209,13 +210,23 @@ struct CreateItemRequest {
     body: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    /// Who this item is being worked for — see
+    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+    #[serde(default)]
+    from: Option<String>,
 }
 
 async fn create_item(
     State(store): State<Arc<Store>>,
     Json(req): Json<CreateItemRequest>,
 ) -> Result<(StatusCode, Json<Item>), ApiError> {
-    let item = store.create_item(&req.topic, &req.title, req.body.as_deref(), &req.tags)?;
+    let item = store.create_item(
+        &req.topic,
+        &req.title,
+        req.body.as_deref(),
+        &req.tags,
+        req.from.as_deref(),
+    )?;
     Ok((StatusCode::CREATED, Json(item)))
 }
 
@@ -224,10 +235,17 @@ struct ListItemsQuery {
     /// Exact-match topic filter.
     topic: Option<String>,
     state: Option<String>,
+    /// A worker id — narrows the list to items whose `to` (assignee) is
+    /// exactly this worker. See
+    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+    to: Option<String>,
     /// A registered worker's id — narrows the list to items under any topic
-    /// that worker owns (prefix match, see [`docket_core::domain::topic_matches`]).
-    /// This is the "discover it via list" step of the M1 completion criteria.
-    owned_by: Option<String>,
+    /// that worker is registered for (prefix match, see
+    /// [`docket_core::domain::topic_matches`]) — this is a topic-jurisdiction
+    /// filter, unrelated to who currently holds any given item (that's `to`,
+    /// above). This is the "discover it via list" step of the M1 completion
+    /// criteria. Was `owned_by`, split and renamed by ADR-0010.
+    topic_scope: Option<String>,
     /// Full-text match against title+body. Presence of `q` and/or `tag`
     /// routes this request through `Store::search_items` instead of
     /// `Store::list_items` — see the branch below.
@@ -257,7 +275,7 @@ async fn list_items(
     } else {
         store.list_items(q.topic.as_deref(), state)?
     };
-    let items = match q.owned_by {
+    let items = match q.topic_scope {
         Some(worker_id) => {
             let worker = store.get_worker(&worker_id)?;
             items
@@ -270,6 +288,13 @@ async fn list_items(
                 })
                 .collect()
         }
+        None => items,
+    };
+    let items = match q.to {
+        Some(worker_id) => items
+            .into_iter()
+            .filter(|item| item.assignee.as_deref() == Some(worker_id.as_str()))
+            .collect(),
         None => items,
     };
     Ok(Json(items))
@@ -458,7 +483,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/items?owned_by=w1&state=open")
+                    .uri("/items?topic_scope=w1&state=open")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -506,6 +531,139 @@ mod tests {
         let closed = json_body(resp).await;
         assert_eq!(closed["state"], "closed");
         assert_eq!(closed["resolution"], "done");
+    }
+
+    /// `from` round-trips from creation, `to` is set by claim, and `turn`
+    /// tracks each state transition — see
+    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+    #[tokio::test]
+    async fn from_to_turn_track_the_lifecycle_over_http() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "from": "reporter-1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let item = json_body(resp).await;
+        let id = item["id"].as_str().unwrap().to_string();
+        assert_eq!(item["from"], "reporter-1");
+        assert_eq!(item["to"], serde_json::Value::Null);
+        assert_eq!(item["turn"], serde_json::Value::Null);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let claimed = json_body(resp).await;
+        assert_eq!(claimed["from"], "reporter-1");
+        assert_eq!(claimed["to"], "w1");
+        assert_eq!(claimed["turn"], "to");
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["turn"], "from");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/items/{id}/approve"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["turn"], serde_json::Value::Null);
+    }
+
+    /// `to` matches exactly against the item's assignee field; `topic_scope`
+    /// (the old `owned_by` behavior) matches by the worker's registered
+    /// topics instead — the two must stay independent, see
+    /// [ADR-0010](../../../../docs/decisions/ADR-0010-item-from-to-turn.md).
+    #[tokio::test]
+    async fn to_filter_matches_assignee_not_topic_scope() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/workers",
+                serde_json::json!({"id": "w1", "topics": ["iyulab"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        // w1 is registered for the item's topic, but hasn't claimed it —
+        // `to=w1` must not match on topic jurisdiction alone.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?to=w1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await.as_array().unwrap().len(), 0);
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?to=w1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed = json_body(resp).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], id);
     }
 
     #[tokio::test]
@@ -636,6 +794,20 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let found = json_body(resp).await;
         assert_eq!(found.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_item_with_blank_topic_is_400_not_created() {
+        let app = test_app();
+        let resp = app
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "  ", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Repeated `tag=` keys are the shape `docket-mcp`'s `search_items` sends,
@@ -774,7 +946,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/items?owned_by=nobody")
+                    .uri("/items?topic_scope=nobody")
                     .body(Body::empty())
                     .unwrap(),
             )

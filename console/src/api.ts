@@ -1,5 +1,6 @@
 export type ItemState = 'open' | 'claimed' | 'resolved' | 'closed'
 export type Resolution = 'done' | 'duplicate' | 'wontfix' | 'invalid'
+export type Turn = 'from' | 'to'
 
 // Mirrors docket-core's Item exactly (crates/docket-core/src/domain.rs) —
 // field names and casing are the wire format, not renamed to camelCase.
@@ -10,7 +11,12 @@ export interface Item {
   body: string | null
   state: ItemState
   resolution: Resolution | null
-  owner: string | null
+  /** Who this item is being worked for. Optional, set at creation only. */
+  from: string | null
+  /** The worker currently holding the item (was `owner`). */
+  to: string | null
+  /** Derived from `state`, not stored — see ADR-0010. */
+  turn: Turn | null
   tags: string[]
   created_at: number
   updated_at: number

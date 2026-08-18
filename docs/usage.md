@@ -96,11 +96,11 @@ losing a claim race), never a silent protocol failure.
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5 |
-| `create_item` | `topic`, `title`, `body?`, `tags[]?` | `POST /items` | **Call `search_items` first** to avoid filing a duplicate |
-| `list_items` | `topic?`, `state?`, `owned_by?` | `GET /items?topic=&state=&owned_by=` | `owned_by=<worker id>` is how a worker discovers its own queue (§5) |
+| `create_item` | `topic`, `title`, `body?`, `tags[]?`, `from?` | `POST /items` | **Call `search_items` first** to avoid filing a duplicate. `from` is who this item is being worked for — optional (see [ADR-0010](decisions/ADR-0010-item-from-to-turn.md)) |
+| `list_items` | `topic?`, `state?`, `to?`, `topic_scope?` | `GET /items?topic=&state=&to=&topic_scope=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `to=<worker id>` matches the current assignee exactly |
 | `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=` | `query` full-text matches title+body+comments; `tag_match` is `any` (default) or `all` |
 | `claim_item` | `item_id`, `worker_id` | `POST /items/{id}/claim {"worker_id"}` | `open → claimed`. Exclusive — loser gets a tool-level error, not a crash |
-| `submit_item` | `item_id`, `worker_id` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current owner may submit |
+| `submit_item` | `item_id`, `worker_id` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current assignee (`to`) may submit |
 | `approve_item` | `item_id` | `POST /items/{id}/approve` | `resolved → closed`, `resolution=done`. The requester's sign-off |
 | `add_tags` / `remove_tags` | `item_id`, `tags[]` | `POST`/`DELETE /items/{id}/tags {"tags"}` | Idempotent both ways |
 | `list_tags` | `topic?` | `GET /tags?topic=` | **Call before tagging** to reuse existing vocabulary instead of inventing a synonym. Returns `{tag, count}[]`, most-used first |
@@ -113,7 +113,7 @@ filter if you're going through MCP.
 
 Three more HTTP-only admin operations close an item early, bypassing the normal
 `claimed → resolved → closed` path — they're console/admin actions (`docket-console` exposes them as
-buttons), not worker actions, so there's no MCP tool for them. All three are owner-agnostic and valid
+buttons), not worker actions, so there's no MCP tool for them. All three are assignee-agnostic and valid
 from any state except `closed` (unlike `approve`, they don't require reaching `resolved` first):
 
 | HTTP | resolution | Meaning |
@@ -127,10 +127,15 @@ An `Item` looks like:
 ```json
 {
   "id": "…", "topic": "iyulab/docket", "title": "…", "body": null,
-  "state": "open", "resolution": null, "owner": null,
+  "state": "open", "resolution": null, "from": null, "to": null, "turn": null,
   "tags": [], "created_at": 1734000000000, "updated_at": 1734000000000
 }
 ```
+
+`from`/`to`/`turn` are the two-party handoff — `from` is who this item is being worked for, `to` is
+the current assignee (was `owner`), `turn` is derived from `state` and tells you whose hand it's in
+right now (`"to"` while claimed, `"from"` while resolved and awaiting approval, `null` when open or
+closed). See [ADR-0010](decisions/ADR-0010-item-from-to-turn.md).
 
 Errors are `{"error": "<message>"}` with `404` (not found), `409` (state conflict — e.g. `"cannot
 claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`approve`/`remove`/
@@ -145,7 +150,7 @@ This is the pattern an agent repeats:
 1. **Once per session**: `register_worker(id, topics)` — `topics` are prefixes (`"iyulab"` owns every
    topic starting `iyulab/…`, exact match or `/`-delimited prefix; see `topic_matches` in
    [glossary.md](glossary.md)).
-2. **Discover work**: `list_items(owned_by=<your id>, state="open")`.
+2. **Discover work**: `list_items(topic_scope=<your id>, state="open")`.
 3. **Before filing something new**: `search_items(query=…)` — check it doesn't already exist.
 4. **Take an item**: `claim_item(item_id, worker_id)`. If it 409s, someone else got there first — go
    back to step 2.
@@ -216,7 +221,8 @@ connection reports nothing rather than injecting an error into every session's c
 
 `docket-console` is a list→detail admin UI (secondary Board/kanban view also available), polling
 every 5s — a pure HTTP client, no `docket-cc` involved. Besides browsing (state/tag/topic filters,
-full-text search across title/body/comments), the detail view can claim/submit/approve an item and
+full-text search across title/body/comments), the detail view shows `from`/`to`/`turn` alongside
+state and can claim/submit/approve an item and
 edit its tags, and — for any item not yet `closed` — remove/merge/force-close it (§4's admin
 operations). Writes are attributed to a fixed `console` worker id; multi-user identity is out of
 scope while docket stays single-owner. In production, `docket-core` itself serves the built console

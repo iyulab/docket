@@ -22,6 +22,11 @@ export function Card({ item, selected, onSelect }: CardProps) {
       <div className="card-title">{item.title}</div>
       <div className="card-topic">{item.topic}</div>
       <div className="card-id">{item.id.slice(0, 8)}</div>
+      {item.turn && (
+        <span className={`badge badge-turn-${item.turn}`}>
+          {item.turn === 'to' ? '→ to' : '→ from'}
+        </span>
+      )}
       {item.resolution && (
         <span className={`badge badge-${item.resolution}`}>
           {RESOLUTION_LABEL[item.resolution]}

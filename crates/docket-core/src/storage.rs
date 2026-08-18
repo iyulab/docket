@@ -14,6 +14,11 @@ pub enum StoreError {
     /// (e.g. claiming an already-claimed item, or an owner mismatch).
     #[error("conflict: {0}")]
     Conflict(String),
+    /// The request is well-formed JSON but its values are unusable (e.g. a
+    /// blank `topic`/`title`) — distinct from `Conflict`, which is about
+    /// state, not input shape.
+    #[error("validation: {0}")]
+    Validation(String),
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
 }
@@ -55,7 +60,8 @@ impl Store {
                 body TEXT,
                 state TEXT NOT NULL,
                 resolution TEXT,
-                owner TEXT,
+                requester TEXT,
+                assignee TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -95,6 +101,7 @@ impl Store {
                 INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
             END;",
         )?;
+        migrate_owner_to_requester_assignee(&conn)?;
         // Resyncs the external-content index against `items` on every open:
         // rows written before this virtual table existed are never covered by
         // the AFTER INSERT trigger, and an un-indexed row makes the AFTER
@@ -138,15 +145,29 @@ impl Store {
         title: &str,
         body: Option<&str>,
         tags: &[String],
+        requester: Option<&str>,
     ) -> Result<Item> {
+        let topic = topic.trim();
+        let title = title.trim();
+        if topic.is_empty() {
+            return Err(StoreError::Validation(
+                "topic must not be blank".to_string(),
+            ));
+        }
+        if title.is_empty() {
+            return Err(StoreError::Validation(
+                "title must not be blank".to_string(),
+            ));
+        }
+        let requester = requester.map(str::trim).filter(|s| !s.is_empty());
         let id = Uuid::new_v4().to_string();
         let now = now_millis();
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO items (id, topic, title, body, state, resolution, owner, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'open', NULL, NULL, ?5, ?5)",
-            params![id, topic, title, body, now],
+            "INSERT INTO items (id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'open', NULL, ?5, NULL, ?6, ?6)",
+            params![id, topic, title, body, requester, now],
         )?;
         for tag in tags {
             tx.execute(
@@ -162,7 +183,9 @@ impl Store {
             body: body.map(str::to_string),
             state: State::Open,
             resolution: None,
-            owner: None,
+            requester: requester.map(str::to_string),
+            assignee: None,
+            turn: Item::turn_for(State::Open),
             tags: tags.to_vec(),
             created_at: now,
             updated_at: now,
@@ -198,7 +221,7 @@ impl Store {
     pub fn list_items(&self, topic: Option<&str>, state: Option<State>) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
-            "SELECT id, topic, title, body, state, resolution, owner, created_at, updated_at FROM items WHERE 1=1",
+            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at FROM items WHERE 1=1",
         );
         if topic.is_some() {
             sql.push_str(" AND topic = ?1");
@@ -232,7 +255,7 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let now = now_millis();
         let affected = conn.execute(
-            "UPDATE items SET state = 'claimed', owner = ?1, updated_at = ?2
+            "UPDATE items SET state = 'claimed', assignee = ?1, updated_at = ?2
              WHERE id = ?3 AND state = 'open'",
             params![worker_id, now, id],
         )?;
@@ -242,14 +265,14 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
-    /// Atomically transitions `claimed -> resolved`. Only the current owner
-    /// may submit.
+    /// Atomically transitions `claimed -> resolved`. Only the current
+    /// assignee may submit.
     pub fn submit_item(&self, id: &str, worker_id: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'resolved', updated_at = ?1
-             WHERE id = ?2 AND state = 'claimed' AND owner = ?3",
+             WHERE id = ?2 AND state = 'claimed' AND assignee = ?3",
             params![now, id, worker_id],
         )?;
         if affected == 0 {
@@ -278,20 +301,20 @@ impl Store {
     /// `resolution = invalid` ([architecture.md](../../../docs/architecture.md)'s
     /// admin-operation mapping). Unlike `approve_item`, this isn't gated on
     /// reaching `resolved` first — a mistaken item is caught at any
-    /// pre-closed stage — and it's owner-agnostic, matching `approve_item`.
+    /// pre-closed stage — and it's assignee-agnostic, matching `approve_item`.
     pub fn remove_item(&self, id: &str) -> Result<Item> {
         self.close_with_resolution(id, Resolution::Invalid, "remove")
     }
 
     /// Admin operation: closes an item as a duplicate of another, with
-    /// `resolution = duplicate`. Same any-pre-closed-state, owner-agnostic
+    /// `resolution = duplicate`. Same any-pre-closed-state, assignee-agnostic
     /// rules as `remove_item` — see its doc comment.
     pub fn merge_item(&self, id: &str) -> Result<Item> {
         self.close_with_resolution(id, Resolution::Duplicate, "merge")
     }
 
     /// Admin operation: closes an item that's become irrelevant, with
-    /// `resolution = wontfix`. Same any-pre-closed-state, owner-agnostic
+    /// `resolution = wontfix`. Same any-pre-closed-state, assignee-agnostic
     /// rules as `remove_item` — see its doc comment.
     pub fn force_close_item(&self, id: &str) -> Result<Item> {
         self.close_with_resolution(id, Resolution::Wontfix, "force-close")
@@ -442,7 +465,7 @@ impl Store {
     ) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
-            "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.owner, i.created_at, i.updated_at
+            "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.requester, i.assignee, i.created_at, i.updated_at
              FROM items i WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -515,6 +538,27 @@ impl Store {
     }
 }
 
+/// Upgrades a database created before [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md):
+/// `items.owner` becomes `items.assignee`, and a new nullable `items.requester`
+/// column is added. `CREATE TABLE IF NOT EXISTS` above already gives a fresh
+/// database both new columns directly, so this only fires for a database that
+/// still has the pre-ADR-0010 `owner` column — checked via `pragma_table_info`
+/// rather than tracking a schema-version number, since that's the one fact
+/// this migration actually depends on. Idempotent: a database already
+/// migrated (or created fresh) has no `owner` column, so this is a no-op.
+fn migrate_owner_to_requester_assignee(conn: &Connection) -> rusqlite::Result<()> {
+    let has_owner_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'owner'")?
+        .exists([])?;
+    if has_owner_column {
+        conn.execute_batch(
+            "ALTER TABLE items RENAME COLUMN owner TO assignee;
+             ALTER TABLE items ADD COLUMN requester TEXT;",
+        )?;
+    }
+    Ok(())
+}
+
 fn existing_state_conflict(conn: &Connection, id: &str, op: &str) -> Result<StoreError> {
     match row_to_item(conn, id)? {
         Some(item) => Ok(StoreError::Conflict(format!(
@@ -542,7 +586,7 @@ fn require_item(conn: &Connection, item_id: &str) -> Result<()> {
 fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
     let item = conn
         .query_row(
-            "SELECT id, topic, title, body, state, resolution, owner, created_at, updated_at
+            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at
              FROM items WHERE id = ?1",
             params![id],
             item_from_row_without_tags,
@@ -555,21 +599,26 @@ fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
 }
 
 /// Reads every non-tag column. Safe to use inside `query_map` closures
-/// because it never re-borrows `conn`.
+/// because it never re-borrows `conn`. Expects the column order every SQL
+/// string in this module uses: `id, topic, title, body, state, resolution,
+/// requester, assignee, created_at, updated_at`.
 fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
     let state_str: String = row.get(4)?;
     let resolution_str: Option<String> = row.get(5)?;
+    let state = State::parse(&state_str).expect("state column always holds a valid State");
     Ok(Item {
         id: row.get(0)?,
         topic: row.get(1)?,
         title: row.get(2)?,
         body: row.get(3)?,
-        state: State::parse(&state_str).expect("state column always holds a valid State"),
+        state,
         resolution: resolution_str.and_then(|s| Resolution::parse(&s)),
-        owner: row.get(6)?,
+        requester: row.get(6)?,
+        assignee: row.get(7)?,
+        turn: Item::turn_for(state),
         tags: Vec::new(),
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -612,13 +661,13 @@ mod tests {
             .register_worker("w1", &["iyulab".to_string()])
             .unwrap();
         let item = store
-            .create_item("iyulab/docket", "fix bug", None, &[])
+            .create_item("iyulab/docket", "fix bug", None, &[], None)
             .unwrap();
         assert_eq!(item.state, State::Open);
 
         let claimed = store.claim_item(&item.id, "w1").unwrap();
         assert_eq!(claimed.state, State::Claimed);
-        assert_eq!(claimed.owner.as_deref(), Some("w1"));
+        assert_eq!(claimed.assignee.as_deref(), Some("w1"));
 
         let resolved = store.submit_item(&item.id, "w1").unwrap();
         assert_eq!(resolved.state, State::Resolved);
@@ -631,7 +680,9 @@ mod tests {
     #[test]
     fn remove_item_closes_an_open_item_as_invalid() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         assert_eq!(item.state, State::Open);
 
         let closed = store.remove_item(&item.id).unwrap();
@@ -642,20 +693,24 @@ mod tests {
     #[test]
     fn merge_item_closes_a_claimed_item_as_duplicate() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
 
         let closed = store.merge_item(&item.id).unwrap();
         assert_eq!(closed.state, State::Closed);
         assert_eq!(closed.resolution, Some(Resolution::Duplicate));
         // owner-agnostic — the claim it interrupted is preserved as history
-        assert_eq!(closed.owner.as_deref(), Some("w1"));
+        assert_eq!(closed.assignee.as_deref(), Some("w1"));
     }
 
     #[test]
     fn force_close_item_closes_a_resolved_item_as_wontfix() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
         store.submit_item(&item.id, "w1").unwrap();
 
@@ -667,7 +722,9 @@ mod tests {
     #[test]
     fn admin_close_ops_reject_an_already_closed_item() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         store.remove_item(&item.id).unwrap();
 
         assert!(matches!(
@@ -704,7 +761,9 @@ mod tests {
     #[test]
     fn claim_rejects_already_claimed() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
         let err = store.claim_item(&item.id, "w2").unwrap_err();
         assert!(matches!(err, StoreError::Conflict(_)));
@@ -713,7 +772,9 @@ mod tests {
     #[test]
     fn submit_rejects_non_owner() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
         let err = store.submit_item(&item.id, "w2").unwrap_err();
         assert!(matches!(err, StoreError::Conflict(_)));
@@ -725,7 +786,7 @@ mod tests {
     fn concurrent_claims_exactly_one_winner() {
         let store = Arc::new(open_test_store());
         let item = store
-            .create_item("iyulab/docket", "race", None, &[])
+            .create_item("iyulab/docket", "race", None, &[], None)
             .unwrap();
 
         let handles: Vec<_> = (0..8)
@@ -774,15 +835,15 @@ mod tests {
         // `search_items` are added in Task 2).
         let conn = Connection::open(&db_path).unwrap();
         conn.execute(
-            "INSERT INTO items (id, topic, title, body, state, resolution, owner, created_at, updated_at)
+            "INSERT INTO items (id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at)
              VALUES ('t1', 'iyulab/node-packages', 'form Enter bypasses preventDefault',
-                     'trusted keydown events navigate anyway', 'open', NULL, NULL, 0, 0)",
+                     'trusted keydown events navigate anyway', 'open', NULL, NULL, NULL, 0, 0)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO items (id, topic, title, body, state, resolution, owner, created_at, updated_at)
-             VALUES ('t2', 'iyulab/node-packages', 'unrelated item', NULL, 'open', NULL, NULL, 0, 0)",
+            "INSERT INTO items (id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at)
+             VALUES ('t2', 'iyulab/node-packages', 'unrelated item', NULL, 'open', NULL, NULL, NULL, 0, 0)",
             [],
         )
         .unwrap();
@@ -867,9 +928,98 @@ mod tests {
 
         let claimed = store.claim_item("legacy-1", "w1").unwrap();
         assert_eq!(claimed.state, State::Claimed);
+        // The pre-ADR-0010 `owner` column migrated to `assignee` and got
+        // written by claim_item exactly as a fresh-schema row would.
+        assert_eq!(claimed.assignee.as_deref(), Some("w1"));
+        assert_eq!(claimed.requester, None);
 
         drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Dedicated migration test (distinct from the FTS-migration test above,
+    /// which only needs a fresh `owner`-free schema): a database that still
+    /// has the pre-ADR-0010 `owner` column gets it renamed to `assignee` and
+    /// gains a new `requester` column, without losing existing data.
+    #[test]
+    fn open_migrates_owner_column_to_requester_and_assignee() {
+        let dir = temp_db_dir("owner-migration-test");
+        let db_path = dir.join("pre-adr-0010.db");
+
+        let legacy = Connection::open(&db_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE items (
+                    id TEXT PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT,
+                    state TEXT NOT NULL,
+                    resolution TEXT,
+                    owner TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO items (id, topic, title, body, state, resolution, owner, created_at, updated_at)
+                 VALUES ('pre-1', 'iyulab/docket', 'pre-migration item', NULL, 'claimed', NULL, 'w1', 0, 0)",
+                [],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+        let item = store.get_item("pre-1").unwrap();
+        assert_eq!(item.assignee.as_deref(), Some("w1"));
+        assert_eq!(item.requester, None);
+
+        // Idempotent: opening an already-migrated database again must not
+        // error (there is no `owner` column left to rename a second time).
+        drop(store);
+        Store::open(db_path.to_str().unwrap()).unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn create_item_rejects_blank_topic_or_title() {
+        let store = open_test_store();
+        assert!(matches!(
+            store.create_item("", "t", None, &[], None),
+            Err(StoreError::Validation(_))
+        ));
+        assert!(matches!(
+            store.create_item("   ", "t", None, &[], None),
+            Err(StoreError::Validation(_))
+        ));
+        assert!(matches!(
+            store.create_item("iyulab/docket", "", None, &[], None),
+            Err(StoreError::Validation(_))
+        ));
+        assert!(matches!(
+            store.create_item("iyulab/docket", "  ", None, &[], None),
+            Err(StoreError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn create_item_trims_topic_title_and_requester() {
+        let store = open_test_store();
+        let item = store
+            .create_item(
+                "  iyulab/docket  ",
+                "  t  ",
+                None,
+                &[],
+                Some("  reporter-1  "),
+            )
+            .unwrap();
+        assert_eq!(item.topic, "iyulab/docket");
+        assert_eq!(item.title, "t");
+        assert_eq!(item.requester.as_deref(), Some("reporter-1"));
     }
 
     #[test]
@@ -884,6 +1034,7 @@ mod tests {
                     "severity:medium".to_string(),
                     "evidence:reproduced".to_string(),
                 ],
+                None,
             )
             .unwrap();
         let mut tags = item.tags.clone();
@@ -899,7 +1050,9 @@ mod tests {
     #[test]
     fn add_tags_is_idempotent() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         store
             .add_tags(&item.id, &["awaiting-release".to_string()])
             .unwrap();
@@ -912,7 +1065,9 @@ mod tests {
     #[test]
     fn add_tags_bumps_updated_at_only_when_a_tag_is_actually_new() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         let created_updated_at = item.updated_at;
 
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -933,7 +1088,9 @@ mod tests {
     #[test]
     fn remove_tags_is_idempotent() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         store
             .add_tags(&item.id, &["awaiting-release".to_string()])
             .unwrap();
@@ -960,6 +1117,7 @@ mod tests {
                 "t",
                 None,
                 &["awaiting-release".to_string()],
+                None,
             )
             .unwrap();
         let created_updated_at = item.updated_at;
@@ -983,13 +1141,25 @@ mod tests {
     fn list_tags_counts_and_orders_by_frequency() {
         let store = open_test_store();
         let a = store
-            .create_item("iyulab/node-packages", "a", None, &["blocked".to_string()])
+            .create_item(
+                "iyulab/node-packages",
+                "a",
+                None,
+                &["blocked".to_string()],
+                None,
+            )
             .unwrap();
         let b = store
-            .create_item("iyulab/node-packages", "b", None, &["blocked".to_string()])
+            .create_item(
+                "iyulab/node-packages",
+                "b",
+                None,
+                &["blocked".to_string()],
+                None,
+            )
             .unwrap();
         store
-            .create_item("iyulab/router", "c", None, &["deferred".to_string()])
+            .create_item("iyulab/router", "c", None, &["deferred".to_string()], None)
             .unwrap();
         let _ = (a.id, b.id);
 
@@ -1011,10 +1181,11 @@ mod tests {
                 "both",
                 None,
                 &["a".to_string(), "b".to_string()],
+                None,
             )
             .unwrap();
         let only_a = store
-            .create_item("iyulab/docket", "only-a", None, &["a".to_string()])
+            .create_item("iyulab/docket", "only-a", None, &["a".to_string()], None)
             .unwrap();
 
         let any_match = store
@@ -1049,10 +1220,10 @@ mod tests {
     fn search_items_combines_topic_state_and_query() {
         let store = open_test_store();
         store
-            .create_item("iyulab/node-packages", "form bug", None, &[])
+            .create_item("iyulab/node-packages", "form bug", None, &[], None)
             .unwrap();
         store
-            .create_item("iyulab/router", "form bug elsewhere", None, &[])
+            .create_item("iyulab/router", "form bug elsewhere", None, &[], None)
             .unwrap();
 
         let results = store
@@ -1071,7 +1242,9 @@ mod tests {
     #[test]
     fn add_comment_then_list_comments_in_order() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         let first = store
             .add_comment(&item.id, "requester", "please look at this")
             .unwrap();
@@ -1090,7 +1263,9 @@ mod tests {
     #[test]
     fn add_comment_bumps_item_updated_at() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         let created_updated_at = item.updated_at;
 
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -1105,7 +1280,9 @@ mod tests {
     #[test]
     fn list_comments_on_item_with_none_is_empty() {
         let store = open_test_store();
-        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
         assert!(store.list_comments(&item.id).unwrap().is_empty());
     }
 
@@ -1116,10 +1293,10 @@ mod tests {
     fn search_items_matches_comment_body() {
         let store = open_test_store();
         let matching = store
-            .create_item("iyulab/docket", "unrelated title", None, &[])
+            .create_item("iyulab/docket", "unrelated title", None, &[], None)
             .unwrap();
         let other = store
-            .create_item("iyulab/docket", "also unrelated", None, &[])
+            .create_item("iyulab/docket", "also unrelated", None, &[], None)
             .unwrap();
         store
             .add_comment(

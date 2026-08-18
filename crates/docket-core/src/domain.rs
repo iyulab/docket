@@ -72,7 +72,22 @@ pub struct Worker {
     pub online: bool,
 }
 
+/// Whose hand an item is currently in. Derived from `state` — see
+/// [`Item::turn_for`] — and never persisted, so it can't drift out of sync
+/// with the state it's computed from (see [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Turn {
+    From,
+    To,
+}
+
 /// A single unit of work waiting to be processed.
+///
+/// `from`/`to` on the wire map to `requester`/`assignee` in storage — both
+/// `from` and `to` are SQL keywords, so the rename happens at this
+/// serialization boundary rather than in every query string. See
+/// [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
@@ -81,10 +96,33 @@ pub struct Item {
     pub body: Option<String>,
     pub state: State,
     pub resolution: Option<Resolution>,
-    pub owner: Option<String>,
+    /// Who this item is being worked for. Optional, set at creation only.
+    #[serde(rename = "from")]
+    pub requester: Option<String>,
+    /// The worker currently holding the item (was `owner`) — set by `claim`,
+    /// checked by `submit`.
+    #[serde(rename = "to")]
+    pub assignee: Option<String>,
+    /// Derived, not stored — see [`Item::turn_for`].
+    pub turn: Option<Turn>,
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl Item {
+    /// Whose turn it is, purely as a function of `state` — the single place
+    /// this mapping is defined, so every code path that builds an `Item`
+    /// (create/claim/submit/approve/list/search/...) stays consistent by
+    /// construction rather than by convention.
+    pub fn turn_for(state: State) -> Option<Turn> {
+        match state {
+            State::Open => None,
+            State::Claimed => Some(Turn::To),
+            State::Resolved => Some(Turn::From),
+            State::Closed => None,
+        }
+    }
 }
 
 /// Prefix match on `/`-separated topic paths: a worker owning `iyulab` is a

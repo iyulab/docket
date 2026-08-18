@@ -38,7 +38,7 @@ curl -X POST localhost:8420/items $JSON \
 
 # register as owning that topic, then discover the item via list
 curl -X POST localhost:8420/workers $JSON -d '{"id":"w1","topics":["iyulab"]}'
-curl "localhost:8420/items?owned_by=w1&state=open"
+curl "localhost:8420/items?topic_scope=w1&state=open"
 
 # claim it, submit it, and have the requester approve it
 curl -X POST localhost:8420/items/<id>/claim  $JSON -d '{"worker_id":"w1"}'
@@ -144,14 +144,15 @@ The topic comes from the nearest `.git` above the current directory — its `ori
 `docket-console` is a list→detail view over every item (a kanban board grouped into `open` /
 `claimed` / `resolved` / `closed` columns is available as a secondary view), polling `docket-core`
 every 5 seconds. It's a pure client of the core HTTP API — no `docket-cc` involved. The list
-supports filtering by state/tag/topic, full-text search across title/body/comments, and a from/to
-perspective toggle built on the `found-in:<discoverer-topic>` tag convention (see
-[glossary.md](docs/glossary.md)). An item's detail view supports the core write operations —
-claim, submit, approve, and tag add/remove — attributed to a fixed `console` identity, since
-multi-user identity is Later ([ADR-0006](docs/decisions/ADR-0006-single-owner-later.md)). It also
-exposes the three admin close operations (remove/merge/force-close, valid from any non-closed
-state, owner-agnostic) that set `resolution` to `invalid`/`duplicate`/`wontfix` — see
-[usage.md](docs/usage.md#8-console).
+supports filtering by state/tag/topic, full-text search across title/body/comments, and a topic-level
+from/to perspective toggle built on the `found-in:<discoverer-topic>` tag convention (see
+[glossary.md](docs/glossary.md) — distinct from the item-level `from`/`to`/`turn` fields below).
+An item's detail view shows `from`/`to`/`turn` ([ADR-0010](docs/decisions/ADR-0010-item-from-to-turn.md))
+and supports the core write operations — claim, submit, approve, and tag add/remove — attributed to
+a fixed `console` identity, since multi-user identity is Later
+([ADR-0006](docs/decisions/ADR-0006-single-owner-later.md)). It also exposes the three admin close
+operations (remove/merge/force-close, valid from any non-closed state, assignee-agnostic) that set
+`resolution` to `invalid`/`duplicate`/`wontfix` — see [usage.md](docs/usage.md#8-console).
 
 ```bash
 cd console

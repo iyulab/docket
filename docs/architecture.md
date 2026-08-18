@@ -58,6 +58,21 @@ There's no `expired` here — the policy for automatic claim expiry / automatic 
 
 Full decision rationale: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
 
+## Item from/to/turn
+
+```
+from: string | null   # who this item is being worked for. Optional, set at creation.
+to:   string | null   # the current assignee (was `owner`) — set by claim, checked by submit.
+turn: from | to | null   # derived from `state`, never stored — see below.
+```
+
+`turn` makes the "ball is back in the requester's court" language above literal: `null` while
+`open` (unclaimed) or `closed` (done), `to` while `claimed` (the assignee's turn to act), `from`
+while `resolved` (the requester's turn to approve). It's computed from `state` at read time, not a
+fourth stored field, so it can never drift out of sync with the state it describes.
+
+Full decision rationale: [ADR-0010](decisions/ADR-0010-item-from-to-turn.md).
+
 ## Question
 
 Separately from items (`task`), there's a request type with no state machine that fails immediately — if there's no owner, it fails on the spot and never lands on the board. See [vision.md](vision.md) S3. Whether it lives in the core or only at layer 3 is still undecided.

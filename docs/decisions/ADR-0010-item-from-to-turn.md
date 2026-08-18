@@ -1,0 +1,88 @@
+Status: v0 alignment snapshot | 2026-08-18 | settled
+
+# ADR-0010: Item `from`/`to`/`turn` — explicit two-party handoff fields
+
+## Context
+
+`Item.owner` is used for exactly one thing: the worker id currently holding the item (set by
+`claim`, checked by `submit`). It correctly answers "who is working this," but nothing in the
+schema answers the complementary question — "who is this being worked *for*." That side of the
+relationship has so far existed only as an informal tag convention (a caller adding a
+`found-in:<origin>`-shaped tag by hand), which is invisible to any consumer that doesn't already
+know to look for it, and isn't queryable as a first-class value.
+
+Once an item is understood as a two-party handoff — a requester waiting on a worker, then the
+worker handing back to the requester for approval — the schema should say so directly instead of
+making every consumer re-derive it from `state` plus a tag-string convention.
+
+## Options considered and trade-offs
+
+- **Keep `owner`, document the informal tag convention better**: no schema change, but "who filed
+  this" stays unqueryable, and consumer-specific parsing of a free-form tag is fragile.
+- **Replace `state`/`owner` with a new from/to/turn-only lifecycle**: more uniform, but breaking —
+  every existing consumer of `claim`/`submit`/`approve` and the ownership list filter would need to
+  change, and the four-state lifecycle ([ADR-0003](ADR-0003-item-state-schema.md)) already earned
+  its simplicity through review; nothing here invalidates it.
+- **Rename `owner`→`to`, add `from`, derive `turn` (adopted)**: keeps the settled state machine and
+  its transition rules untouched — `to` is exactly what `owner` already meant, just named for its
+  role in the relationship instead of the mechanic that sets it. `from` is new, optional, explicit.
+  `turn` is *derived*, never persisted, so it can never drift out of sync with `state` — the same
+  reasoning ADR-0003 used to leave `expired` out of the stored schema rather than let a derivable
+  fact double as a second source of truth.
+
+## Decision
+
+Wire format (JSON field names on `Item`, and `docket-mcp` tool parameters):
+
+```
+from: string | null   // who this item is being worked for. Optional, set at creation only —
+                        // never auto-derived from tags; a caller identifies itself explicitly or
+                        // not at all.
+to:   string | null   // was `owner` — the worker currently holding the item (claim/submit-checked)
+turn: "from" | "to" | null   // derived from `state`, not persisted:
+                              //   open     -> null   (unclaimed, no current holder)
+                              //   claimed  -> "to"    (worker's turn to act)
+                              //   resolved -> "from"  (requester's turn to approve)
+                              //   closed   -> null   (done)
+```
+
+No change to `state`/`resolution` or to the claim/submit/approve transition rules — `to` is a
+rename of what `owner` already tracked, not a new mechanic.
+
+**Storage note**: the backing SQLite columns are named `requester`/`assignee`, not `from`/`to` —
+both are SQL keywords (`FROM` appears in essentially every statement; `TO` in `RENAME TO`, foreign
+key clauses), and quoting every occurrence throughout the query strings was judged a worse trade
+than a one-line rename at the Rust/JSON boundary (`#[serde(rename = "from"/"to")]`). Every consumer
+of the HTTP API and the MCP tools sees `from`/`to` either way — this is purely an internal
+implementation detail of `docket-core`'s SQL layer.
+
+**List filter**: the existing `owned_by` filter conflated two different questions under one name —
+"items this worker currently holds" (never actually implemented that way) and "items under a topic
+this worker is registered for" (what it actually did — a topic-jurisdiction filter, unrelated to
+who holds any given item). This change splits it into two honestly-named filters:
+`to=<worker_id>` (exact match against the new field) and `topic_scope=<worker_id>` (the
+pre-existing topic-prefix behavior, renamed).
+
+## Consequences
+
+**Gained**: "who is this for" becomes a first-class, queryable field instead of tag archaeology.
+Every consumer (console, `docket-mcp` tools) can show whose turn it is without re-deriving it from
+`state`. The `to`/`topic_scope` split fixes a filter that silently returned the wrong items for its
+documented purpose.
+
+**Given up**: `from` is opt-in at creation — existing items and callers that don't pass it simply
+have `from = null`; there is no attempt to backfill it from the pre-existing tag convention, which
+remains a separate, unrelated mechanism.
+
+**Naming note**: the `found-in:<topic>` tag convention (see [glossary.md](../glossary.md)) already
+uses "from"/"to" in prose to describe a **topic-to-topic** reference (which topic found an item vs.
+which topic owns it). This ADR's `from`/`to` are a different axis — a **party-to-party** relationship
+(which requester vs. which worker) — and the two can coexist on the same item without being related.
+Kept the same vocabulary anyway because it's the accurate English word for both relationships and
+disambiguating with alternate names (e.g. `requester_topic` vs `requester_id`) would obscure the
+parallel rather than clarify it; glossary.md documents the distinction explicitly.
+
+## Re-open trigger
+
+If a workflow needs more than two parties (e.g., a reviewer distinct from both `from` and `to`),
+`turn`'s two-value model stops being sufficient and the schema needs revisiting.

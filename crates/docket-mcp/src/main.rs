@@ -37,6 +37,11 @@ struct CreateItemParams {
     /// vocabulary instead of inventing a new tag string.
     #[serde(default)]
     tags: Vec<String>,
+    /// Who this item is being worked for — the requester's identity, shown
+    /// back as `from` on the item. Optional; omit if there's no natural
+    /// caller identity for this item.
+    #[serde(default)]
+    from: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -47,10 +52,16 @@ struct ListItemsParams {
     /// One of open/claimed/resolved/closed.
     #[serde(default)]
     state: Option<String>,
-    /// A registered worker id — narrows the list to items under any topic
-    /// that worker owns (prefix match).
+    /// A worker id — narrows the list to items whose `to` (current
+    /// assignee) is exactly this worker.
     #[serde(default)]
-    owned_by: Option<String>,
+    to: Option<String>,
+    /// A registered worker id — narrows the list to items under any topic
+    /// that worker is registered for (prefix match). Unlike `to`, this
+    /// doesn't check who actually holds any given item — it's a
+    /// topic-jurisdiction filter, not an ownership filter.
+    #[serde(default)]
+    topic_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -117,7 +128,15 @@ struct ItemDto {
     body: Option<String>,
     state: String,
     resolution: Option<String>,
-    owner: Option<String>,
+    /// Absent from servers older than ADR-0010. Defaulted for the same
+    /// reason as `tags` below.
+    #[serde(default)]
+    from: Option<String>,
+    /// Was `owner` before ADR-0010; defaulted for the same reason as `from`.
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    turn: Option<String>,
     /// Absent from servers older than the tag feature. Without a default,
     /// every tool response from such a server fails to deserialize, not just
     /// the tag-related ones.
@@ -211,7 +230,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, and/or a worker's ownership"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (to), and/or a worker's topic jurisdiction (topic_scope)"
     )]
     async fn list_items(
         &self,
@@ -223,7 +242,8 @@ impl DocketMcp {
             .query(&[
                 ("topic", p.topic.as_deref()),
                 ("state", p.state.as_deref()),
-                ("owned_by", p.owned_by.as_deref()),
+                ("to", p.to.as_deref()),
+                ("topic_scope", p.topic_scope.as_deref()),
             ])
             .send()
             .await
@@ -523,6 +543,7 @@ mod tests {
                 title: "fix the thing".to_string(),
                 body: None,
                 tags: vec![],
+                from: None,
             }))
             .await
             .unwrap();
@@ -542,7 +563,8 @@ mod tests {
             .list_items(Parameters(ListItemsParams {
                 topic: None,
                 state: Some("open".to_string()),
-                owned_by: Some("w1".to_string()),
+                to: None,
+                topic_scope: Some("w1".to_string()),
             }))
             .await
             .unwrap();
@@ -599,6 +621,7 @@ mod tests {
                 title: "race".to_string(),
                 body: None,
                 tags: vec![],
+                from: None,
             }))
             .await
             .unwrap();
@@ -639,6 +662,7 @@ mod tests {
                 title: "t".to_string(),
                 body: None,
                 tags: vec![],
+                from: None,
             }))
             .await;
         assert!(result.is_err());
@@ -661,6 +685,7 @@ mod tests {
                 title: "t".to_string(),
                 body: None,
                 tags: vec!["severity:medium".to_string()],
+                from: None,
             }))
             .await
             .unwrap();
@@ -711,6 +736,7 @@ mod tests {
                 title: "form Enter bypasses preventDefault".to_string(),
                 body: None,
                 tags: vec!["severity:medium".to_string()],
+                from: None,
             }))
             .await
             .unwrap();
@@ -720,6 +746,7 @@ mod tests {
                 title: "unrelated".to_string(),
                 body: None,
                 tags: vec![],
+                from: None,
             }))
             .await
             .unwrap();
@@ -756,6 +783,7 @@ mod tests {
                 title: "t".to_string(),
                 body: None,
                 tags: vec![],
+                from: None,
             }))
             .await
             .unwrap();

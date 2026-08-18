@@ -46,6 +46,11 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
             <td>{item.topic}</td>
             <td>
               <span className={`badge badge-state-${item.state}`}>{item.state}</span>
+              {item.turn && (
+                <span className={`badge badge-turn-${item.turn}`}>
+                  {item.turn === 'to' ? '→ to' : '→ from'}
+                </span>
+              )}
               {item.resolution && (
                 <span className={`badge badge-${item.resolution}`}>{item.resolution}</span>
               )}

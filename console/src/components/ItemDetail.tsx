@@ -115,17 +115,30 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
         <dt>topic</dt>
         <dd>{item.topic}</dd>
         <dt>state</dt>
-        <dd>{item.state}</dd>
+        <dd>
+          {item.state}
+          {item.turn && (
+            <span className={`badge badge-turn-${item.turn}`}>
+              {item.turn === 'to' ? '→ to' : '→ from'}
+            </span>
+          )}
+        </dd>
         {item.resolution && (
           <>
             <dt>resolution</dt>
             <dd>{item.resolution}</dd>
           </>
         )}
-        {item.owner && (
+        {item.from && (
           <>
-            <dt>owner</dt>
-            <dd>{item.owner}</dd>
+            <dt>from</dt>
+            <dd>{item.from}</dd>
+          </>
+        )}
+        {item.to && (
+          <>
+            <dt>to</dt>
+            <dd>{item.to}</dd>
           </>
         )}
       </dl>
@@ -139,7 +152,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
             Claim
           </button>
         )}
-        {item.state === 'claimed' && item.owner === CONSOLE_WORKER_ID && (
+        {item.state === 'claimed' && item.to === CONSOLE_WORKER_ID && (
           <button
             type="button"
             disabled={actionPending}
@@ -160,7 +173,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
       </div>
       {item.state !== 'closed' && (
         // Admin operations (architecture.md's admin-operation mapping) —
-        // owner-agnostic and valid from any non-closed state, unlike the
+        // assignee-agnostic and valid from any non-closed state, unlike the
         // claim/submit/approve flow above. Kept visually separate since
         // these bypass the normal workflow rather than advance it.
         <div className="item-detail-actions item-detail-admin-actions">

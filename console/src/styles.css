@@ -128,6 +128,17 @@ body {
   color: #a4262c;
 }
 
+.badge-turn-to,
+.badge-turn-from {
+  background: transparent;
+  border: 1px solid #6b778c;
+  color: #44546f;
+}
+
+.badge + .badge {
+  margin-left: 0.3rem;
+}
+
 .filter-bar {
   display: flex;
   flex-wrap: wrap;
