@@ -248,7 +248,9 @@ connection reports nothing rather than injecting an error into every session's c
 ## 8. Console
 
 `docket-console` is a list→detail admin UI (secondary Board/kanban view also available), polling
-every 5s — a pure HTTP client, no `docket-cc` involved. Besides browsing (state/tag/topic filters,
+every 5s — a pure HTTP client, no `docket-cc` involved. Item/comment body text renders as sanitized
+markdown, including `![alt](url)` images — the URL must point to an already-hosted image; the
+console has no upload/storage of its own. Besides browsing (state/tag/topic filters,
 full-text search across title/body/comments), the detail view shows `requester`/`assignee`/`turn`
 alongside state and can claim/submit/approve an item and
 edit its tags, and — for any item not yet `closed` — remove/merge/force-close it (§4's admin
