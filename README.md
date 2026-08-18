@@ -17,7 +17,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 ## Current status
 
-**M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API, tags, comments, full-text search over both), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection, a `SessionStart` hook, and local topic derivation) exist and are covered by tests. `docket-console` exists as a read-only kanban board — see "As a console" below.
+**M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API, tags, comments, full-text search over both), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection, a `SessionStart` hook, and local topic derivation) exist and are covered by tests. `docket-console` exists — list→detail view with filters/search/sort plus claim/submit/approve and tag editing (a kanban board is available as a secondary view) — see "As a console" below.
 
 **Operating docket** (as an MCP-calling agent or a plain HTTP client — register, file, discover, claim, complete work): [docs/usage.md](docs/usage.md) is the single complete reference. The rest of this README is a shorter, example-driven walkthrough of the same ground.
 
@@ -141,9 +141,14 @@ The topic comes from the nearest `.git` above the current directory — its `ori
 
 ### As a console
 
-`docket-console` is a read-only kanban board: every item, grouped into `open` / `claimed` /
-`resolved` / `closed` columns, polling `docket-core` every 5 seconds. It's a pure client of the
-core HTTP API — no writes, no `docket-cc` involved.
+`docket-console` is a list→detail view over every item (a kanban board grouped into `open` /
+`claimed` / `resolved` / `closed` columns is available as a secondary view), polling `docket-core`
+every 5 seconds. It's a pure client of the core HTTP API — no `docket-cc` involved. The list
+supports filtering by state/tag/topic, full-text search across title/body/comments, and a from/to
+perspective toggle built on the `found-in:<discoverer-topic>` tag convention (see
+[glossary.md](docs/glossary.md)). An item's detail view supports the core write operations —
+claim, submit, approve, and tag add/remove — attributed to a fixed `console` identity, since
+multi-user identity is Later ([ADR-0006](docs/decisions/ADR-0006-single-owner-later.md)).
 
 ```bash
 cd console
@@ -152,9 +157,8 @@ npm run dev
 ```
 
 By default it proxies to `docket-core` at `http://127.0.0.1:8420`. Point it elsewhere by copying
-`.env.example` to `.env` and setting `VITE_DOCKET_CORE_URL`. This is the first slice of M3 — see
-[roadmap.md](docs/roadmap.md#m3--console) for what's still ahead (write operations, stall
-detection, refine).
+`.env.example` to `.env` and setting `VITE_DOCKET_CORE_URL`. See
+[roadmap.md](docs/roadmap.md#m3--console) for what's still ahead (stall detection, refine).
 
 In production, `docket-core` itself serves the built console — no separate server needed. Run
 `npm run build` in `console/`, then point `docket-core` at the output with `DOCKET_CONSOLE_DIR`
