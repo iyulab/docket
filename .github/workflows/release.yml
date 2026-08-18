@@ -117,5 +117,10 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # A `push: tags:` run has a tag as `github.ref_name` for free: the
+          # action defaults to it. A `workflow_dispatch` run doesn't — its
+          # ref is whatever branch was passed to `--ref` (main, here), so
+          # the tag has to come from the dispatch input instead.
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*
           generate_release_notes: true
