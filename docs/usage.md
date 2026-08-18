@@ -154,6 +154,18 @@ claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`a
 never `500` — that's the signal to re-`list_items` and try something else rather than treat it as a
 bug.
 
+**Reads never 404 on a non-matching or unregistered reference — writes do.** `list_items`/
+`search_items`/`list_comments`/`list_tags` answer any filter that matches nothing (an unknown
+`topic`, `assignee`, `requester`, `topic_scope` worker id, or `item_id`) with an empty result, the
+same way a database query does — there is no "does this reference exist" check on a read path.
+`create_item`/`claim_item`/`submit_item`/`approve_item`/`add_comment`/`add_tags`/`remove_tags`/the
+three admin close operations all target one specific item (or, for `topic_scope`, look up one
+specific worker as a side effect of a *write*'s validation) and 404 when it doesn't exist — a mutate
+call has nothing sensible to do with "no such reference" other than fail. Rely on this instead of
+treating an empty list as ambiguous: it always means "no matches", never "the thing you filtered by
+doesn't exist" — there's nothing else it could mean, since reads don't look that up in the first
+place.
+
 ## 5. The worker loop
 
 This is the pattern an agent repeats:

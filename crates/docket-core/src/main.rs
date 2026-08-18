@@ -279,12 +279,20 @@ async fn list_items(
     };
     let items = match q.topic_scope {
         Some(worker_id) => {
-            let worker = store.get_worker(&worker_id)?;
+            // An unregistered worker id is treated as "owns no topics", not
+            // a 404 — this is a read filter, and every other list_items
+            // filter (topic/assignee/requester) answers a non-matching
+            // value with an empty result, never an error (see docs/usage.md
+            // §4's read/write not-found asymmetry).
+            let topics = match store.get_worker(&worker_id) {
+                Ok(worker) => worker.topics,
+                Err(StoreError::NotFound) => Vec::new(),
+                Err(e) => return Err(e.into()),
+            };
             items
                 .into_iter()
                 .filter(|item| {
-                    worker
-                        .topics
+                    topics
                         .iter()
                         .any(|owned| docket_core::domain::topic_matches(owned, &item.topic))
                 })
@@ -1102,8 +1110,12 @@ mod tests {
         assert_eq!(tags[0]["count"], 1);
     }
 
+    /// A read filter never errors on a non-matching or unregistered
+    /// reference — it answers with an empty result, same as `topic`/
+    /// `assignee`/`requester` (see docs/usage.md §4). Only mutate calls
+    /// (`claim_item`, `add_comment`, …) 404 on a missing reference.
     #[tokio::test]
-    async fn list_owned_by_unknown_worker_is_404() {
+    async fn list_topic_scope_unknown_worker_is_empty() {
         let app = test_app();
         let resp = app
             .oneshot(
@@ -1114,7 +1126,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await, serde_json::json!([]));
     }
 
     #[tokio::test]
