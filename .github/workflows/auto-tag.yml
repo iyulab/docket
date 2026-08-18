@@ -1,0 +1,54 @@
+name: Auto Tag on Version Bump
+
+# Cutting a release used to be a fully manual step (bump every crate's
+# version by hand, then `git tag`+push by hand) — the tag was easy to
+# forget even after the version bump itself had already landed on `main`,
+# leaving finished, pushed fixes unreachable by anyone until someone
+# remembered to cut a tag. This workflow only automates that mechanical
+# step: it watches `main` for the workspace version (a single source of
+# truth since `[workspace.package].version`, `Cargo.toml`) changing, and if
+# `v<version>` isn't already tagged, tags and pushes it. Picking the
+# version number itself — and deciding a change deserves a release at all
+# — stays a human decision made via the version-bump commit; this workflow
+# never chooses a number. Pushing the tag is what triggers `release.yml`,
+# which does the actual build+publish.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full tag history to check for an existing tag
+
+      - name: Read workspace version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ -z "$version" ]; then
+            echo "::error::could not find [workspace.package].version in Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and push if this version isn't tagged yet
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "$tag already exists — nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"

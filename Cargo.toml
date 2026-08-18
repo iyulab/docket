@@ -3,5 +3,6 @@ resolver = "3"
 members = ["crates/docket-core", "crates/docket-mcp", "crates/docket-cc", "crates/docket-launcher-core", "crates/docket-mcp-launcher", "crates/docket-cc-launcher", "crates/docket-core-updater"]
 
 [workspace.package]
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
