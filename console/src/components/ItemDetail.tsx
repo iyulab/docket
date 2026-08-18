@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Comment, Item } from '../api'
 import { addItemTags, approveItem, claimItem, fetchComments, removeItemTags, submitItem } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
@@ -23,13 +23,19 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
   const [actionPending, setActionPending] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [tagDraft, setTagDraft] = useState('')
+  // Tracks which item is currently selected so a mutation's response,
+  // arriving after the user has already switched to a different item, does
+  // not paint its error/pending state onto the wrong item.
+  const selectedItemIdRef = useRef<string | null>(null)
 
   // Depends on item?.id, not `item` itself — useItems() returns a new
   // array (and new item objects) on every 5s poll, so depending on the
   // whole object would refetch comments every tick even when the
   // selection hasn't changed.
   useEffect(() => {
+    selectedItemIdRef.current = item?.id ?? null
     setActionError(null)
+    setActionPending(false)
     setTagDraft('')
     if (!item) {
       setComments([])
@@ -60,16 +66,23 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
     )
   }
 
-  async function runAction(action: () => Promise<unknown>) {
+  const runAction = async (action: () => Promise<unknown>) => {
+    const issuedFor = item.id
     setActionPending(true)
     setActionError(null)
     try {
       await action()
+      // Always refresh — a completed mutation should update the list even
+      // if the user has since selected a different item.
       onMutated()
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : String(err))
+      if (selectedItemIdRef.current === issuedFor) {
+        setActionError(err instanceof Error ? err.message : String(err))
+      }
     } finally {
-      setActionPending(false)
+      if (selectedItemIdRef.current === issuedFor) {
+        setActionPending(false)
+      }
     }
   }
 
