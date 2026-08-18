@@ -70,7 +70,7 @@ function serializeView(value: 'list' | 'board'): string | null {
 
 export default function App() {
   const [query, setQuery] = useUrlState<string>('q', parseQuery, serializeQuery)
-  const { items, connected, loading } = useItems(query)
+  const { items, connected, loading, refresh } = useItems(query)
   const [availableTags, setAvailableTags] = useState<string[]>([])
 
   useEffect(() => {
@@ -151,6 +151,7 @@ export default function App() {
               item={selectedItem}
               loading={loading}
               onClose={() => setSelectedId(null)}
+              onMutated={refresh}
             />
           </>
         ) : (

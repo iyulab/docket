@@ -1,10 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { fetchItems, type Item } from './api'
 
 export interface UseItemsResult {
   items: Item[]
   connected: boolean
   loading: boolean
+  /** Re-polls immediately and restarts the interval — call after a
+   * successful mutation (claim/submit/approve/tag) so its effect shows up
+   * without waiting for the next scheduled poll. */
+  refresh: () => void
 }
 
 const POLL_INTERVAL_MS = 5000
@@ -23,6 +27,7 @@ export function useItems(
   const [items, setItems] = useState<Item[]>([])
   const [connected, setConnected] = useState(true)
   const [loading, setLoading] = useState(true)
+  const [refreshNonce, setRefreshNonce] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -47,7 +52,9 @@ export function useItems(
       cancelled = true
       clearInterval(id)
     }
-  }, [query, intervalMs])
+  }, [query, intervalMs, refreshNonce])
 
-  return { items, connected, loading }
+  const refresh = useCallback(() => setRefreshNonce((n) => n + 1), [])
+
+  return { items, connected, loading, refresh }
 }
