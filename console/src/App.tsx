@@ -142,46 +142,49 @@ export default function App() {
           </div>
         )}
       </header>
-      <FilterBar
-        query={query}
-        onQueryChange={setQuery}
-        topics={topics}
-        perspectiveTopic={perspectiveTopic}
-        onPerspectiveTopicChange={setPerspectiveTopic}
-        states={states}
-        onStatesChange={setStates}
-        tags={tags}
-        onTagsChange={setTags}
-        availableTags={availableTags}
-        relation={relation}
-        onRelationChange={setRelation}
-        sortKey={sortKey}
-        onSortKeyChange={setSortKey}
-      />
-      <ViewSwitcher view={view} onChange={setView} />
-      <div className="app-body">
-        <div
-          id="view-panel"
-          role="tabpanel"
-          aria-labelledby={view === 'list' ? 'view-tab-list' : 'view-tab-board'}
-          className="app-body-master"
-        >
-          {view === 'list' ? (
-            <ItemList items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
-          ) : (
-            <Board items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
-          )}
-        </div>
+      {selectedId ? (
         <ItemDetail
           item={selectedItem}
           loading={loading}
-          onClose={() => setSelectedId(null)}
+          onBack={() => setSelectedId(null)}
           onMutated={() => {
             refresh()
             loadTags()
           }}
         />
-      </div>
+      ) : (
+        <>
+          <FilterBar
+            query={query}
+            onQueryChange={setQuery}
+            topics={topics}
+            perspectiveTopic={perspectiveTopic}
+            onPerspectiveTopicChange={setPerspectiveTopic}
+            states={states}
+            onStatesChange={setStates}
+            tags={tags}
+            onTagsChange={setTags}
+            availableTags={availableTags}
+            relation={relation}
+            onRelationChange={setRelation}
+            sortKey={sortKey}
+            onSortKeyChange={setSortKey}
+          />
+          <ViewSwitcher view={view} onChange={setView} />
+          <div
+            id="view-panel"
+            role="tabpanel"
+            aria-labelledby={view === 'list' ? 'view-tab-list' : 'view-tab-board'}
+            className="app-body"
+          >
+            {view === 'list' ? (
+              <ItemList items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
+            ) : (
+              <Board items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
 }

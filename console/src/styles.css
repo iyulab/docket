@@ -224,6 +224,11 @@ body {
   color: #6b778c;
 }
 
+.item-list-worker-cell {
+  color: #44546f;
+  font-size: 0.8rem;
+}
+
 .tag-chip {
   display: inline-block;
   margin: 0.1rem 0.2rem 0.1rem 0;
@@ -275,33 +280,48 @@ body {
   color: #42526e;
 }
 
-.item-detail {
-  width: 320px;
-  flex-shrink: 0;
+/* The detail "page" replaces the list/board area entirely (App.tsx renders
+   one or the other, never both) — a centered column reads better than a
+   full-bleed one at desktop widths, the way an issue-tracker's detail page
+   does. */
+.item-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  max-width: 760px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 1.5rem;
   background: white;
   border-radius: 6px;
-  padding: 1rem;
   box-shadow: 0 1px 2px rgba(9, 30, 66, 0.15);
-  overflow-y: auto;
-  min-height: 0;
 }
 
-.item-detail-empty {
+.item-page-back {
+  border: none;
+  background: none;
+  color: #0052cc;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0;
+  margin-bottom: 1rem;
+}
+
+.item-page-back:hover {
+  text-decoration: underline;
+}
+
+.item-page-empty {
   color: #6b778c;
 }
 
-.item-detail-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+.item-page-header h1 {
+  font-size: 1.3rem;
+  margin: 0 0 0.5rem;
 }
 
-.item-detail-header h2 {
-  font-size: 1rem;
-  margin: 0;
-}
-
-.item-detail-meta {
+.item-page-meta {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 0.15rem 0.5rem;
@@ -310,17 +330,17 @@ body {
   margin: 0.75rem 0;
 }
 
-.item-detail-meta dt {
+.item-page-meta dt {
   font-weight: 600;
 }
 
-.item-detail-actions {
+.item-page-actions {
   display: flex;
   gap: 0.4rem;
   margin-bottom: 0.5rem;
 }
 
-.item-detail-actions button {
+.item-page-actions button {
   font-size: 0.8rem;
   padding: 0.25rem 0.6rem;
   border: 1px solid #dfe1e6;
@@ -329,35 +349,48 @@ body {
   cursor: pointer;
 }
 
-.item-detail-actions button:disabled {
+.item-page-actions button:disabled {
   cursor: default;
   opacity: 0.5;
 }
 
-.item-detail-admin-actions button {
+.item-page-admin-actions button {
   color: #6b6f76;
   border-color: #e4e6ea;
 }
 
-.item-detail-tags {
+.item-page-tags {
   margin-bottom: 0.75rem;
 }
 
-.item-detail-body {
-  font-size: 0.85rem;
-  white-space: pre-wrap;
+.item-page-body {
+  font-size: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #ebecf0;
 }
 
-.item-detail-comments ul {
+.item-page-comments {
+  margin-top: 1.5rem;
+}
+
+.item-page-comments h2 {
+  font-size: 1rem;
+}
+
+.item-page-comments ul {
   list-style: none;
   padding: 0;
   margin: 0;
 }
 
-.item-detail-comments li {
-  padding: 0.4rem 0;
+.item-page-comments li {
+  padding: 0.6rem 0;
   border-top: 1px solid #ebecf0;
   font-size: 0.85rem;
+}
+
+.comment-meta {
+  margin-bottom: 0.15rem;
 }
 
 .comment-author {
@@ -370,10 +403,65 @@ body {
   font-size: 0.75rem;
 }
 
+/* Rendered markdown (item body, comment body) — the parser output has no
+   styling of its own beyond the elements it emits. */
+.item-page-body,
 .comment-body {
-  display: block;
-  white-space: pre-wrap;
-  margin-top: 0.15rem;
+  line-height: 1.5;
+}
+
+.item-page-body > :first-child,
+.comment-body > :first-child {
+  margin-top: 0;
+}
+
+.item-page-body > :last-child,
+.comment-body > :last-child {
+  margin-bottom: 0;
+}
+
+.item-page-body pre,
+.comment-body pre {
+  background: #f4f5f7;
+  padding: 0.6rem 0.75rem;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+
+.item-page-body code,
+.comment-body code {
+  background: #f4f5f7;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.item-page-body pre code,
+.comment-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.item-page-body blockquote,
+.comment-body blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid #dfe1e6;
+  color: #44546f;
+}
+
+.item-page-body table,
+.comment-body table {
+  border-collapse: collapse;
+}
+
+.item-page-body th,
+.item-page-body td,
+.comment-body th,
+.comment-body td {
+  border: 1px solid #ebecf0;
+  padding: 0.3rem 0.5rem;
 }
 
 .view-switcher {
@@ -399,43 +487,22 @@ body {
 
 .app-body {
   display: flex;
-  gap: 1rem;
-  flex: 1;
-  min-height: 0;
-}
-
-.app-body-master {
-  display: flex;
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
 }
 
-/* Below this width the board's 4-column grid and a 320px-fixed detail
-   panel no longer fit side by side without both becoming unreadably
-   cramped — stack detail below the master list/board instead. */
+/* Below this width the board's 4-column grid gets cramped — not worth a
+   dedicated fallback beyond letting it scroll horizontally along with the
+   rest of the page. */
 @media (max-width: 900px) {
-  /* Below this width, give up on independent scroll regions (there isn't
-     room for master and detail side by side anyway) and fall back to one
-     normal scrolling page — simpler than fighting nested-flex height math
-     in a stacked layout for a screen size that reads top-to-bottom anyway. */
   .app {
     height: auto;
     overflow-y: visible;
   }
 
   .app-body {
-    flex-direction: column;
-  }
-
-  .app-body-master,
-  .item-detail {
     overflow-y: visible;
-    min-height: 0;
-  }
-
-  .item-detail {
-    width: 100%;
   }
 }

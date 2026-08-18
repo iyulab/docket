@@ -20,6 +20,9 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
           <th>제목</th>
           <th>topic</th>
           <th>state</th>
+          <th>from</th>
+          <th>to</th>
+          <th>turn</th>
           <th>tags</th>
           <th>갱신</th>
         </tr>
@@ -35,13 +38,19 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
             <td>{item.topic}</td>
             <td>
               <span className={`badge badge-state-${item.state}`}>{item.state}</span>
-              {item.turn && (
+              {item.resolution && (
+                <span className={`badge badge-${item.resolution}`}>{item.resolution}</span>
+              )}
+            </td>
+            <td className="item-list-worker-cell">{item.from ?? '—'}</td>
+            <td className="item-list-worker-cell">{item.to ?? '—'}</td>
+            <td>
+              {item.turn ? (
                 <span className={`badge badge-turn-${item.turn}`}>
                   {item.turn === 'to' ? '→ to' : '→ from'}
                 </span>
-              )}
-              {item.resolution && (
-                <span className={`badge badge-${item.resolution}`}>{item.resolution}</span>
+              ) : (
+                '—'
               )}
             </td>
             <td>

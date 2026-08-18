@@ -13,6 +13,7 @@ import {
 } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
 import { formatRelativeTime } from '../time'
+import { Markdown } from './Markdown'
 
 // The console is a human looking at a browser tab, not a docket-mcp worker
 // session — multi-user identity is out of scope while docket stays
@@ -22,13 +23,14 @@ const CONSOLE_WORKER_ID = 'console'
 interface ItemDetailProps {
   item: Item | null
   loading: boolean
-  onClose: () => void
+  /** Navigates back to the list/board page. */
+  onBack: () => void
   /** Called after a write op succeeds, so the caller can re-poll immediately
    * instead of waiting for the next scheduled tick. */
   onMutated: () => void
 }
 
-export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProps) {
+export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps) {
   const [comments, setComments] = useState<Comment[]>([])
   const [commentsError, setCommentsError] = useState(false)
   const [actionPending, setActionPending] = useState(false)
@@ -69,10 +71,19 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item?.id])
 
+  const backButton = (
+    <button type="button" className="item-page-back" onClick={onBack}>
+      ← 목록으로
+    </button>
+  )
+
   if (!item) {
     return (
-      <div className="item-detail item-detail-empty">
-        {loading ? '불러오는 중...' : '아이템을 선택하세요.'}
+      <div className="item-page">
+        {backButton}
+        <div className="item-page-empty">
+          {loading ? '불러오는 중...' : '해당 아이템을 찾을 수 없습니다.'}
+        </div>
       </div>
     )
   }
@@ -105,14 +116,12 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
   }
 
   return (
-    <div className="item-detail">
-      <div className="item-detail-header">
-        <h2>{item.title}</h2>
-        <button type="button" onClick={onClose} aria-label="닫기">
-          ×
-        </button>
+    <div className="item-page">
+      {backButton}
+      <div className="item-page-header">
+        <h1>{item.title}</h1>
       </div>
-      <dl className="item-detail-meta">
+      <dl className="item-page-meta">
         <dt>topic</dt>
         <dd>{item.topic}</dd>
         <dt>state</dt>
@@ -143,7 +152,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
           </>
         )}
       </dl>
-      <div className="item-detail-actions">
+      <div className="item-page-actions">
         {item.state === 'open' && (
           <button
             type="button"
@@ -177,7 +186,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
         // assignee-agnostic and valid from any non-closed state, unlike the
         // claim/submit/approve flow above. Kept visually separate since
         // these bypass the normal workflow rather than advance it.
-        <div className="item-detail-actions item-detail-admin-actions">
+        <div className="item-page-actions item-page-admin-actions">
           <button
             type="button"
             title="상태를 invalid로 종료 — 실수로 만든 항목"
@@ -205,7 +214,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
         </div>
       )}
       {actionError && <p className="banner banner-error">{actionError}</p>}
-      <div className="item-detail-tags">
+      <div className="item-page-tags">
         {item.tags.map((tag) => (
           <span
             key={tag}
@@ -240,18 +249,20 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
           }}
         />
       </div>
-      {item.body && <p className="item-detail-body">{item.body}</p>}
-      <div className="item-detail-comments">
-        <h3>댓글</h3>
+      {item.body && <Markdown className="item-page-body" text={item.body} />}
+      <div className="item-page-comments">
+        <h2>댓글</h2>
         {commentsError && <p className="banner banner-error">댓글을 불러오지 못했습니다.</p>}
         {!commentsError && comments.length === 0 && <p>댓글이 없습니다.</p>}
         {!commentsError && (
           <ul>
             {comments.map((comment) => (
               <li key={comment.id}>
-                <span className="comment-author">{comment.author}</span>
-                <span className="comment-time">{formatRelativeTime(comment.created_at)}</span>
-                <span className="comment-body">{comment.body}</span>
+                <div className="comment-meta">
+                  <span className="comment-author">{comment.author}</span>
+                  <span className="comment-time">{formatRelativeTime(comment.created_at)}</span>
+                </div>
+                <Markdown className="comment-body" text={comment.body} />
               </li>
             ))}
           </ul>
