@@ -69,10 +69,12 @@ assignee:  string | null   # the current holder (was `owner`) — set by claim, 
 turn: requester | assignee | null   # derived from `state`, never stored — see below.
 ```
 
-`turn` makes the "ball is back in the requester's court" language above literal: `null` while
-`open` (unclaimed) or `closed` (done), `assignee` while `claimed` (the assignee's turn to act),
-`requester` while `resolved` (the requester's turn to approve). It's computed from `state` at read
-time, not a fourth stored field, so it can never drift out of sync with the state it describes.
+`turn` makes the "ball is back in the requester's court" language above literal: `assignee` while
+`open` (unclaimed, but still squarely waiting on the assignee side to look at it and act — the same
+party as once it's claimed) or `claimed` (the assignee's turn to act), `requester` while `resolved`
+(the requester's turn to approve), `null` only while `closed` (done — nobody's turn). It's computed
+from `state` at read time, not a fourth stored field, so it can never drift out of sync with the
+state it describes.
 
 Full decision rationale: [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) /
 [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md).

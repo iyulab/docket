@@ -108,9 +108,10 @@ losing a claim race), never a silent protocol failure.
 | `add_comment` | `item_id`, `body`, `author?` | `POST /items/{id}/comments {"author","body"}` | `author` defaults to `"unknown"` if omitted |
 | `list_comments` | `item_id` | `GET /items/{id}/comments` | Chronological, append-only |
 
-`GET /items/{id}` also exists at the HTTP level (fetch one item by id) but has no MCP tool
-equivalent yet — reach it directly if you're a plain HTTP client, or `list_items`/`search_items` and
-filter if you're going through MCP.
+`GET /items/{id}` and `GET /workers/{id}` also exist at the HTTP level (fetch one item/worker by id)
+but have no MCP tool equivalent yet — reach them directly if you're a plain HTTP client, or
+`list_items`/`search_items` and filter if you're going through MCP. `GET /workers/{id}` is the only
+way to positively confirm a worker is registered — see the read/write not-found note below.
 
 `PATCH /items/{id} {"requester": "…"}` sets `requester` on an item that already exists — the only
 field this covers so far, and the only way to give an item a requester after creation (`requester` is
@@ -136,15 +137,16 @@ An `Item` looks like:
 ```json
 {
   "id": "…", "topic": "iyulab/docket", "title": "…", "body": null,
-  "state": "open", "resolution": null, "requester": null, "assignee": null, "turn": null,
+  "state": "open", "resolution": null, "requester": null, "assignee": null, "turn": "assignee",
   "tags": [], "created_at": 1734000000000, "updated_at": 1734000000000
 }
 ```
 
 `requester`/`assignee`/`turn` are the two-party handoff — `requester` is who this item is being
 worked for, `assignee` is the current holder (was `owner`), `turn` is derived from `state` and tells
-you whose hand it's in right now (`"assignee"` while claimed, `"requester"` while resolved and
-awaiting approval, `null` when open or closed). See
+you whose hand it's in right now: `"assignee"` while `open` (unclaimed, but still squarely waiting on
+the assignee side to look at it) or `claimed` (the assignee's turn to act), `"requester"` while
+`resolved` (awaiting approval), `null` only while `closed` (done — nobody's turn). See
 [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) /
 [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md).
 
@@ -154,17 +156,20 @@ claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`a
 never `500` — that's the signal to re-`list_items` and try something else rather than treat it as a
 bug.
 
-**Reads never 404 on a non-matching or unregistered reference — writes do.** `list_items`/
-`search_items`/`list_comments`/`list_tags` answer any filter that matches nothing (an unknown
-`topic`, `assignee`, `requester`, `topic_scope` worker id, or `item_id`) with an empty result, the
-same way a database query does — there is no "does this reference exist" check on a read path.
-`create_item`/`claim_item`/`submit_item`/`approve_item`/`add_comment`/`add_tags`/`remove_tags`/the
-three admin close operations all target one specific item (or, for `topic_scope`, look up one
-specific worker as a side effect of a *write*'s validation) and 404 when it doesn't exist — a mutate
-call has nothing sensible to do with "no such reference" other than fail. Rely on this instead of
-treating an empty list as ambiguous: it always means "no matches", never "the thing you filtered by
-doesn't exist" — there's nothing else it could mean, since reads don't look that up in the first
-place.
+**A *list/search* filter never 404s on a non-matching or unregistered reference — a call that
+targets one specific known resource by id does.** `list_items`/`search_items`/`list_comments`/
+`list_tags` answer any filter that matches nothing (an unknown `topic`, `assignee`, `requester`,
+`topic_scope` worker id, or `item_id`) with an empty result, the same way a database query does —
+there is no "does this reference exist" check on a filter. `GET /items/{id}` and
+`GET /workers/{id}`, and every mutate call (`create_item`/`claim_item`/`submit_item`/`approve_item`/
+`add_comment`/`add_tags`/`remove_tags`/the three admin close operations), target one specific item
+or worker by id and 404 when it doesn't exist — fetching or acting on one named thing has nothing
+sensible to do with "no such reference" other than fail. Rely on this instead of treating an empty
+list as ambiguous: it always means "no matches", never "the thing you filtered by doesn't exist" —
+there's nothing else it could mean, since a filter doesn't look that up in the first place.
+`list_items(topic_scope=<id>)` in particular can't tell you whether `<id>` is a registered worker —
+it treats "unregistered" the same as "registered, no matching topics" (both: empty result) — call
+`GET /workers/{id}` directly if you need to know which.
 
 ## 5. The worker loop
 

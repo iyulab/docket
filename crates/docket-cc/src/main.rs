@@ -192,6 +192,22 @@ async fn sync(
     worker_id: &str,
     root: &Path,
 ) -> anyhow::Result<Vec<ItemDto>> {
+    // `GET /items?topic_scope=` no longer 404s for an unregistered worker —
+    // it's a read filter, and an unregistered worker just has no matching
+    // topics (see docs/usage.md §4's read/write not-found asymmetry). So
+    // registration has to be confirmed separately, via the one endpoint
+    // that fetches a specific worker by id and does 404 when it's missing.
+    let worker_resp = client
+        .get(format!("{base_url}/workers/{worker_id}"))
+        .send()
+        .await?;
+    if !worker_resp.status().is_success() {
+        anyhow::bail!(
+            "docket-core returned {} fetching worker '{worker_id}' — is it registered?",
+            worker_resp.status()
+        );
+    }
+
     let resp = client
         .get(format!("{base_url}/items"))
         .query(&[("topic_scope", worker_id)])
@@ -199,7 +215,7 @@ async fn sync(
         .await?;
     if !resp.status().is_success() {
         anyhow::bail!(
-            "docket-core returned {} listing items owned by '{worker_id}' — is the worker registered?",
+            "docket-core returned {} listing items owned by '{worker_id}'",
             resp.status()
         );
     }

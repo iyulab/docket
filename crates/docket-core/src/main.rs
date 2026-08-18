@@ -53,6 +53,7 @@ async fn shutdown_signal() {
 fn api_routes() -> Router<Arc<Store>> {
     Router::new()
         .route("/workers", post(register_worker))
+        .route("/workers/{id}", get(get_worker))
         .route("/items", post(create_item).get(list_items))
         .route("/items/{id}", get(get_item).patch(update_item))
         .route("/items/{id}/claim", post(claim_item))
@@ -200,6 +201,19 @@ async fn register_worker(
     Json(req): Json<RegisterWorkerRequest>,
 ) -> Result<Json<docket_core::Worker>, ApiError> {
     Ok(Json(store.register_worker(&req.id, &req.topics)?))
+}
+
+/// Fetches one worker by id — 404 if never registered. This is the only
+/// way a caller can positively confirm registration: `list_items`'s
+/// `topic_scope` filter treats an unregistered worker the same as one with
+/// no matching topics (empty result, not an error — see the read/write
+/// not-found asymmetry in docs/usage.md §4), so it can't answer "does this
+/// worker exist" on its own.
+async fn get_worker(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Json<docket_core::Worker>, ApiError> {
+    Ok(Json(store.get_worker(&id)?))
 }
 
 #[derive(Deserialize)]
@@ -590,7 +604,7 @@ mod tests {
         let id = item["id"].as_str().unwrap().to_string();
         assert_eq!(item["requester"], "reporter-1");
         assert_eq!(item["assignee"], serde_json::Value::Null);
-        assert_eq!(item["turn"], serde_json::Value::Null);
+        assert_eq!(item["turn"], "assignee");
 
         let resp = app
             .clone()
@@ -1128,6 +1142,50 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(json_body(resp).await, serde_json::json!([]));
+    }
+
+    /// `GET /workers/{id}` is the one way to positively confirm registration
+    /// — unlike `list_items(topic_scope=)`, this fetches one specific known
+    /// resource by id, so it 404s when that resource doesn't exist (same
+    /// category as `GET /items/{id}`), not a filter that answers "no match"
+    /// with an empty result.
+    #[tokio::test]
+    async fn get_worker_route_200_when_registered_404_when_not() {
+        let app = test_app();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/workers",
+                serde_json::json!({"id": "w1", "topics": ["iyulab"]}),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/workers/w1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let worker = json_body(resp).await;
+        assert_eq!(worker["id"], "w1");
+        assert_eq!(worker["topics"], serde_json::json!(["iyulab"]));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/workers/ghost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

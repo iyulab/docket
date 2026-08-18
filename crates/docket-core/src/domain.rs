@@ -112,9 +112,15 @@ impl Item {
     /// this mapping is defined, so every code path that builds an `Item`
     /// (create/claim/submit/approve/list/search/...) stays consistent by
     /// construction rather than by convention.
+    ///
+    /// `open` reads as the assignee's turn, the same as `claimed` — an open
+    /// item is unclaimed but still squarely waiting on whichever topic owns
+    /// it to look at it and act, which is exactly what "turn" means for
+    /// `claimed` too. Only `closed` is nobody's turn — see the 2026-08-18
+    /// update in [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md).
     pub fn turn_for(state: State) -> Option<Turn> {
         match state {
-            State::Open => None,
+            State::Open => Some(Turn::Assignee),
             State::Claimed => Some(Turn::Assignee),
             State::Resolved => Some(Turn::Requester),
             State::Closed => None,
@@ -198,6 +204,17 @@ mod tests {
         for s in [State::Open, State::Claimed, State::Resolved, State::Closed] {
             assert_eq!(State::parse(s.as_str()), Some(s));
         }
+    }
+
+    /// `open` and `claimed` both read as the assignee's turn — an unclaimed
+    /// item is still waiting on the assignee side to look at it, same as a
+    /// claimed one. Only `closed` is nobody's turn.
+    #[test]
+    fn turn_for_open_and_claimed_is_assignee_resolved_is_requester_closed_is_none() {
+        assert_eq!(Item::turn_for(State::Open), Some(Turn::Assignee));
+        assert_eq!(Item::turn_for(State::Claimed), Some(Turn::Assignee));
+        assert_eq!(Item::turn_for(State::Resolved), Some(Turn::Requester));
+        assert_eq!(Item::turn_for(State::Closed), None);
     }
 
     #[test]

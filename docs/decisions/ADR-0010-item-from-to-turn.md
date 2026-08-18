@@ -117,3 +117,23 @@ here rather than silently edited, so the original reasoning stays visible:
 - **`to`'s display fallback lives in the console, not here.** `docket-console` shows `to`, falling
   back to the item's own `topic` when nobody has claimed it yet, so "who should look at this" always
   has an answer. This is display-only — `Item.to` itself is unchanged, still `null` until `claim`.
+
+## 2026-08-18 update — `turn` also signals `open`, not just `claimed`/`resolved`
+
+The `open -> null` row in `turn`'s mapping above has not held up in practice and is corrected here
+rather than silently edited:
+
+- **`open` is the assignee's turn, not nobody's.** An open item is unclaimed, but it's squarely
+  waiting on whichever topic owns it to look at it and act — exactly the same as `claimed`, just
+  before a specific worker has picked it up. Mapping `open` to `null` conflated "actionable, waiting
+  on someone" with `closed`'s "done, waiting on no one" — precisely the distinction `turn` exists to
+  make, and the one case the "to's display fallback" note above (`assignee ?? topic`, so the console
+  always has *some* answer for "who should look at this") had already worked around for the assignee
+  column but not for `turn` itself.
+- **`Item::turn_for` now maps `open -> Some(Turn::Assignee)`** (`claimed`/`resolved`/`closed`
+  unchanged — only `closed` is still `null`). `assignee` the field is still `null` until `claim`;
+  only the derived `turn` value changed. A caller that wants "is this item unclaimed" still reads
+  `state`, same as before — `turn == null` now means exactly `closed`, not "closed or open".
+- No wire/schema change — same three `Turn` values, same field. Every existing `turn` consumer
+  (console, `docket-mcp`) picks this up automatically since they already render/branch on
+  `assignee`/`requester`/`null` without assuming which state produces which.
