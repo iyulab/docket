@@ -79,7 +79,10 @@ irm https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.ps1 | i
 This installs small launchers as `docket-mcp` and `docket-cc` that check GitHub Releases for
 updates on every run and cache the latest build locally — point your MCP client's `command` at
 `docket-mcp` and your Claude Code hook's `command` at `docket-cc` the same way as the examples
-above and below, no `cargo run` needed. Set `DOCKET_INSTALL_DIR` before running the script to install
+above and below, no `cargo run` needed. "Every run" means every time the launcher process starts,
+which for `docket-mcp` is once per MCP client session — a release that lands mid-session won't
+reach it until the session restarts; see [docs/usage.md](docs/usage.md#2-install-the-clients)
+for the background re-check that mitigates this. Set `DOCKET_INSTALL_DIR` before running the script to install
 somewhere other than the default.
 
 ### As a local file projection
