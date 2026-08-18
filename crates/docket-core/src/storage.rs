@@ -259,8 +259,7 @@ impl Store {
     }
 
     /// Atomically transitions `resolved -> closed` with `resolution = done`
-    /// — the requester's approval. Other resolutions (duplicate/wontfix/
-    /// invalid) are admin operations, not yet exposed (M3).
+    /// — the requester's approval.
     pub fn approve_item(&self, id: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let now = now_millis();
@@ -271,6 +270,43 @@ impl Store {
         )?;
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "approve")?);
+        }
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
+    /// Admin operation: closes an item created by mistake, with
+    /// `resolution = invalid` ([architecture.md](../../../docs/architecture.md)'s
+    /// admin-operation mapping). Unlike `approve_item`, this isn't gated on
+    /// reaching `resolved` first — a mistaken item is caught at any
+    /// pre-closed stage — and it's owner-agnostic, matching `approve_item`.
+    pub fn remove_item(&self, id: &str) -> Result<Item> {
+        self.close_with_resolution(id, Resolution::Invalid, "remove")
+    }
+
+    /// Admin operation: closes an item as a duplicate of another, with
+    /// `resolution = duplicate`. Same any-pre-closed-state, owner-agnostic
+    /// rules as `remove_item` — see its doc comment.
+    pub fn merge_item(&self, id: &str) -> Result<Item> {
+        self.close_with_resolution(id, Resolution::Duplicate, "merge")
+    }
+
+    /// Admin operation: closes an item that's become irrelevant, with
+    /// `resolution = wontfix`. Same any-pre-closed-state, owner-agnostic
+    /// rules as `remove_item` — see its doc comment.
+    pub fn force_close_item(&self, id: &str) -> Result<Item> {
+        self.close_with_resolution(id, Resolution::Wontfix, "force-close")
+    }
+
+    fn close_with_resolution(&self, id: &str, resolution: Resolution, op: &str) -> Result<Item> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let now = now_millis();
+        let affected = conn.execute(
+            "UPDATE items SET state = 'closed', resolution = ?1, updated_at = ?2
+             WHERE id = ?3 AND state != 'closed'",
+            params![resolution.as_str(), now, id],
+        )?;
+        if affected == 0 {
+            return Err(existing_state_conflict(&conn, id, op)?);
         }
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
@@ -590,6 +626,79 @@ mod tests {
         let closed = store.approve_item(&item.id).unwrap();
         assert_eq!(closed.state, State::Closed);
         assert_eq!(closed.resolution, Some(Resolution::Done));
+    }
+
+    #[test]
+    fn remove_item_closes_an_open_item_as_invalid() {
+        let store = open_test_store();
+        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        assert_eq!(item.state, State::Open);
+
+        let closed = store.remove_item(&item.id).unwrap();
+        assert_eq!(closed.state, State::Closed);
+        assert_eq!(closed.resolution, Some(Resolution::Invalid));
+    }
+
+    #[test]
+    fn merge_item_closes_a_claimed_item_as_duplicate() {
+        let store = open_test_store();
+        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+
+        let closed = store.merge_item(&item.id).unwrap();
+        assert_eq!(closed.state, State::Closed);
+        assert_eq!(closed.resolution, Some(Resolution::Duplicate));
+        // owner-agnostic — the claim it interrupted is preserved as history
+        assert_eq!(closed.owner.as_deref(), Some("w1"));
+    }
+
+    #[test]
+    fn force_close_item_closes_a_resolved_item_as_wontfix() {
+        let store = open_test_store();
+        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let closed = store.force_close_item(&item.id).unwrap();
+        assert_eq!(closed.state, State::Closed);
+        assert_eq!(closed.resolution, Some(Resolution::Wontfix));
+    }
+
+    #[test]
+    fn admin_close_ops_reject_an_already_closed_item() {
+        let store = open_test_store();
+        let item = store.create_item("iyulab/docket", "t", None, &[]).unwrap();
+        store.remove_item(&item.id).unwrap();
+
+        assert!(matches!(
+            store.merge_item(&item.id).unwrap_err(),
+            StoreError::Conflict(_)
+        ));
+        assert!(matches!(
+            store.force_close_item(&item.id).unwrap_err(),
+            StoreError::Conflict(_)
+        ));
+        assert!(matches!(
+            store.remove_item(&item.id).unwrap_err(),
+            StoreError::Conflict(_)
+        ));
+    }
+
+    #[test]
+    fn admin_close_ops_report_not_found_for_a_missing_item() {
+        let store = open_test_store();
+        assert!(matches!(
+            store.remove_item("nope").unwrap_err(),
+            StoreError::NotFound
+        ));
+        assert!(matches!(
+            store.merge_item("nope").unwrap_err(),
+            StoreError::NotFound
+        ));
+        assert!(matches!(
+            store.force_close_item("nope").unwrap_err(),
+            StoreError::NotFound
+        ));
     }
 
     #[test]

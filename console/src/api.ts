@@ -96,6 +96,22 @@ export async function approveItem(id: string): Promise<Item> {
   return mutate<Item>(`/api/items/${id}/approve`, { method: 'POST' })
 }
 
+// Admin operations (architecture.md's admin-operation mapping) — close an
+// item before it reaches `resolved` via `approveItem`. Owner-agnostic and
+// valid from any non-closed state, unlike `approveItem`'s `resolved`-only
+// gate: an admin can catch a mistaken/duplicate/irrelevant item at any point.
+export async function removeItem(id: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/remove`, { method: 'POST' })
+}
+
+export async function mergeItem(id: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/merge`, { method: 'POST' })
+}
+
+export async function forceCloseItem(id: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/force-close`, { method: 'POST' })
+}
+
 export async function addItemTags(id: string, tags: string[]): Promise<string[]> {
   return mutate<string[]>(`/api/items/${id}/tags`, {
     method: 'POST',

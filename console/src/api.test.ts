@@ -6,6 +6,9 @@ import {
   fetchComments,
   fetchItems,
   fetchTags,
+  forceCloseItem,
+  mergeItem,
+  removeItem,
   removeItemTags,
   submitItem,
 } from './api'
@@ -141,6 +144,31 @@ describe('approveItem', () => {
 
     expect(result).toEqual(item)
     expect(fetch).toHaveBeenCalledWith('/api/items/i1/approve', expect.objectContaining({ method: 'POST' }))
+  })
+})
+
+describe.each([
+  ['removeItem', removeItem, 'remove'],
+  ['mergeItem', mergeItem, 'merge'],
+  ['forceCloseItem', forceCloseItem, 'force-close'],
+] as const)('%s', (_name, fn, route) => {
+  it('POSTs with no body and returns the updated item', async () => {
+    const item = { id: 'i1', state: 'closed' }
+    mockFetchOnce(item)
+
+    const result = await fn('i1')
+
+    expect(result).toEqual(item)
+    expect(fetch).toHaveBeenCalledWith(
+      `/api/items/i1/${route}`,
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('throws the server error message on conflict', async () => {
+    mockFetchOnce({ error: `cannot ${route}: item is closed` }, false, 409)
+
+    await expect(fn('i1')).rejects.toThrow(`cannot ${route}: item is closed`)
   })
 })
 

@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Comment, Item } from '../api'
-import { addItemTags, approveItem, claimItem, fetchComments, removeItemTags, submitItem } from '../api'
+import {
+  addItemTags,
+  approveItem,
+  claimItem,
+  fetchComments,
+  forceCloseItem,
+  mergeItem,
+  removeItem,
+  removeItemTags,
+  submitItem,
+} from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
 
 // The console is a human looking at a browser tab, not a docket-mcp worker
@@ -148,6 +158,35 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
           </button>
         )}
       </div>
+      {item.state !== 'closed' && (
+        // Admin operations (architecture.md's admin-operation mapping) —
+        // owner-agnostic and valid from any non-closed state, unlike the
+        // claim/submit/approve flow above. Kept visually separate since
+        // these bypass the normal workflow rather than advance it.
+        <div className="item-detail-actions item-detail-admin-actions">
+          <button
+            type="button"
+            disabled={actionPending}
+            onClick={() => void runAction(() => removeItem(item.id))}
+          >
+            Remove
+          </button>
+          <button
+            type="button"
+            disabled={actionPending}
+            onClick={() => void runAction(() => mergeItem(item.id))}
+          >
+            Merge
+          </button>
+          <button
+            type="button"
+            disabled={actionPending}
+            onClick={() => void runAction(() => forceCloseItem(item.id))}
+          >
+            Force-close
+          </button>
+        </div>
+      )}
       {actionError && <p className="banner banner-error">{actionError}</p>}
       <div className="item-detail-tags">
         {item.tags.map((tag) => (

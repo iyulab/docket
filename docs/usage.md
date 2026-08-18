@@ -21,7 +21,7 @@ MCP-capable session, or raw HTTP for anything else (`docket-console`, `curl`, sc
 | `item` | A single unit of work |
 | `claim` | A worker pulling an open item to itself, exclusively |
 | `state` | `open → claimed → resolved → closed` — the workflow stage |
-| `resolution` | Why an item closed: `done` / `duplicate` / `wontfix` / `invalid` (today only `done` is reachable through the API — see §9) |
+| `resolution` | Why an item closed: `done` (requester approval) / `duplicate` (merge) / `wontfix` (force-close) / `invalid` (remove) |
 | `tag` | An opaque, caller-defined string on an item — docket never interprets it |
 | `comment` | An opaque, append-only note on an item — no edit/delete, corrections are new comments |
 
@@ -111,6 +111,17 @@ losing a claim race), never a silent protocol failure.
 equivalent yet — reach it directly if you're a plain HTTP client, or `list_items`/`search_items` and
 filter if you're going through MCP.
 
+Three more HTTP-only admin operations close an item early, bypassing the normal
+`claimed → resolved → closed` path — they're console/admin actions (`docket-console` exposes them as
+buttons), not worker actions, so there's no MCP tool for them. All three are owner-agnostic and valid
+from any state except `closed` (unlike `approve`, they don't require reaching `resolved` first):
+
+| HTTP | resolution | Meaning |
+|---|---|---|
+| `POST /items/{id}/remove` | `invalid` | The item was a mistake — never should have been filed |
+| `POST /items/{id}/merge` | `duplicate` | Consolidated into another item |
+| `POST /items/{id}/force-close` | `wontfix` | No longer relevant, closed without being done |
+
 An `Item` looks like:
 
 ```json
@@ -122,9 +133,10 @@ An `Item` looks like:
 ```
 
 Errors are `{"error": "<message>"}` with `404` (not found), `409` (state conflict — e.g. `"cannot
-claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`approve` call that
-loses a race or targets the wrong state always comes back `409`, never `500` — that's the signal to
-re-`list_items` and try something else rather than treat it as a bug.
+claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`approve`/`remove`/
+`merge`/`force-close` call that loses a race or targets the wrong state always comes back `409`,
+never `500` — that's the signal to re-`list_items` and try something else rather than treat it as a
+bug.
 
 ## 5. The worker loop
 
@@ -202,21 +214,24 @@ connection reports nothing rather than injecting an error into every session's c
 
 ## 8. Console
 
-`docket-console` is a read-only kanban board (`open`/`claimed`/`resolved`/`closed` columns, polling
-every 5s) — a pure HTTP client, no writes, no `docket-cc` involved. In production, `docket-core` itself
-serves the built console at `/` (`DOCKET_CONSOLE_DIR`, default `console/dist`); the same API is
-available at that origin under `/api/*`. For local dev: `cd console && npm install && npm run dev`
-(proxies to `127.0.0.1:8420` by default; override via `.env`'s `VITE_DOCKET_CORE_URL`).
+`docket-console` is a list→detail admin UI (secondary Board/kanban view also available), polling
+every 5s — a pure HTTP client, no `docket-cc` involved. Besides browsing (state/tag/topic filters,
+full-text search across title/body/comments), the detail view can claim/submit/approve an item and
+edit its tags, and — for any item not yet `closed` — remove/merge/force-close it (§4's admin
+operations). Writes are attributed to a fixed `console` worker id; multi-user identity is out of
+scope while docket stays single-owner. In production, `docket-core` itself serves the built console
+at `/` (`DOCKET_CONSOLE_DIR`, default `console/dist`); the same API is available at that origin under
+`/api/*`. For local dev: `cd console && npm install && npm run dev` (proxies to `127.0.0.1:8420` by
+default; override via `.env`'s `VITE_DOCKET_CORE_URL`).
 
 ## 9. Current limitations
 
 - **No authentication.** Anyone who can reach `docket-core`'s port can read and write everything.
   Keep it off untrusted networks until M4.
-- **`approve_item` only ever produces `resolution=done`.** The other resolutions
-  (`duplicate`/`wontfix`/`invalid`) exist in the domain model but aren't reachable through the API yet
-  — they're planned as admin/console operations (M3).
 - **No push/streaming.** Every read is a poll (`list_items`, `docket-console`'s 5s interval,
   `docket-cc hook`'s one-shot sync on session start) — nothing notifies a worker when new work lands.
+- **No reopen.** Once an item reaches `closed` (by any of `approve`/`remove`/`merge`/`force-close`),
+  there's no API to move it back — a mistaken close is permanent.
 
 ## 10. Where to go deeper
 

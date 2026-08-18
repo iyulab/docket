@@ -297,6 +297,11 @@ body {
   opacity: 0.5;
 }
 
+.item-detail-admin-actions button {
+  color: #6b6f76;
+  border-color: #e4e6ea;
+}
+
 .item-detail-tags {
   margin-bottom: 0.75rem;
 }

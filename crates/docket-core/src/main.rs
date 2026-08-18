@@ -58,6 +58,9 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/claim", post(claim_item))
         .route("/items/{id}/submit", post(submit_item))
         .route("/items/{id}/approve", post(approve_item))
+        .route("/items/{id}/remove", post(remove_item))
+        .route("/items/{id}/merge", post(merge_item))
+        .route("/items/{id}/force-close", post(force_close_item))
         .route(
             "/items/{id}/tags",
             post(add_item_tags).delete(remove_item_tags),
@@ -307,6 +310,27 @@ async fn approve_item(
     Ok(Json(store.approve_item(&id)?))
 }
 
+async fn remove_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.remove_item(&id)?))
+}
+
+async fn merge_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.merge_item(&id)?))
+}
+
+async fn force_close_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.force_close_item(&id)?))
+}
+
 #[derive(Deserialize)]
 struct TagsRequest {
     tags: Vec<String>,
@@ -519,6 +543,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn admin_close_routes_set_resolution_and_reject_a_closed_item() {
+        let app = test_app();
+
+        async fn create(app: &Router) -> String {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+                ))
+                .await
+                .unwrap();
+            json_body(resp).await["id"].as_str().unwrap().to_string()
+        }
+
+        async fn close(app: &Router, id: &str, op: &str) -> serde_json::Value {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/items/{id}/{op}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            json_body(resp).await
+        }
+
+        for (op, resolution) in [
+            ("remove", "invalid"),
+            ("merge", "duplicate"),
+            ("force-close", "wontfix"),
+        ] {
+            let id = create(&app).await;
+            let closed = close(&app, &id, op).await;
+            assert_eq!(closed["state"], "closed");
+            assert_eq!(closed["resolution"], resolution);
+
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/items/{id}/{op}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+        }
     }
 
     #[tokio::test]
