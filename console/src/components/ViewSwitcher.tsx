@@ -8,8 +8,10 @@ export function ViewSwitcher({ view, onChange }: ViewSwitcherProps) {
     <div className="view-switcher" role="tablist">
       <button
         type="button"
+        id="view-tab-list"
         role="tab"
         aria-selected={view === 'list'}
+        aria-controls="view-panel"
         className={view === 'list' ? 'view-switcher-btn active' : 'view-switcher-btn'}
         onClick={() => onChange('list')}
       >
@@ -17,8 +19,10 @@ export function ViewSwitcher({ view, onChange }: ViewSwitcherProps) {
       </button>
       <button
         type="button"
+        id="view-tab-board"
         role="tab"
         aria-selected={view === 'board'}
+        aria-controls="view-panel"
         className={view === 'board' ? 'view-switcher-btn active' : 'view-switcher-btn'}
         onClick={() => onChange('board')}
       >

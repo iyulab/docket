@@ -89,7 +89,7 @@ function QueryInput({ query, onChange }: { query: string; onChange: (query: stri
     <input
       type="text"
       value={draft}
-      placeholder="제목·본문·댓글 검색"
+      placeholder="제목·본문·댓글 검색 (Enter로 적용)"
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {

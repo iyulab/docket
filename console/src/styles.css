@@ -7,6 +7,10 @@ body {
 
 .app {
   padding: 1.5rem;
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-header {
@@ -193,6 +197,14 @@ body {
   padding: 0.5rem 0.75rem;
   font-size: 0.85rem;
   border-bottom: 1px solid #ebecf0;
+  vertical-align: middle;
+}
+
+/* `.badge`'s margin-top exists for the Card layout (badge stacked below
+   title text) — inside a table cell there's nothing above it to space away
+   from, so it just throws off vertical centering against sibling cells. */
+.item-list td .badge {
+  margin-top: 0;
 }
 
 .item-row {
@@ -270,6 +282,8 @@ body {
   border-radius: 6px;
   padding: 1rem;
   box-shadow: 0 1px 2px rgba(9, 30, 66, 0.15);
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .item-detail-empty {
@@ -351,6 +365,17 @@ body {
   margin-right: 0.5rem;
 }
 
+.comment-time {
+  color: #6b778c;
+  font-size: 0.75rem;
+}
+
+.comment-body {
+  display: block;
+  white-space: pre-wrap;
+  margin-top: 0.15rem;
+}
+
 .view-switcher {
   display: flex;
   gap: 0.25rem;
@@ -375,5 +400,42 @@ body {
 .app-body {
   display: flex;
   gap: 1rem;
-  align-items: flex-start;
+  flex: 1;
+  min-height: 0;
+}
+
+.app-body-master {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Below this width the board's 4-column grid and a 320px-fixed detail
+   panel no longer fit side by side without both becoming unreadably
+   cramped — stack detail below the master list/board instead. */
+@media (max-width: 900px) {
+  /* Below this width, give up on independent scroll regions (there isn't
+     room for master and detail side by side anyway) and fall back to one
+     normal scrolling page — simpler than fighting nested-flex height math
+     in a stacked layout for a screen size that reads top-to-bottom anyway. */
+  .app {
+    height: auto;
+    overflow-y: visible;
+  }
+
+  .app-body {
+    flex-direction: column;
+  }
+
+  .app-body-master,
+  .item-detail {
+    overflow-y: visible;
+    min-height: 0;
+  }
+
+  .item-detail {
+    width: 100%;
+  }
 }

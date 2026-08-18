@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ItemState } from './api'
 import { fetchTags } from './api'
 import { useItems } from './useItems'
@@ -26,11 +26,19 @@ function serializeQuery(value: string): string | null {
   return trimmed ? trimmed : null
 }
 
+const VALID_STATES: ItemState[] = ['open', 'claimed', 'resolved', 'closed']
+
+// `none` is a sentinel for "every checkbox unchecked" (no state filter,
+// show everything) — distinct from the param being absent, which means the
+// default (open/claimed) applies. Without it, an empty selection serializes
+// to no param at all and a refresh silently reverts to the default.
 function parseStates(raw: string | null): ItemState[] {
-  return raw ? (raw.split(',') as ItemState[]) : ['open', 'claimed']
+  if (raw === null) return ['open', 'claimed']
+  if (raw === 'none') return []
+  return raw.split(',').filter((s): s is ItemState => (VALID_STATES as string[]).includes(s))
 }
 function serializeStates(value: ItemState[]): string | null {
-  return value.length ? value.join(',') : null
+  return value.length ? value.join(',') : 'none'
 }
 
 function parseTags(raw: string | null): string[] {
@@ -73,11 +81,19 @@ export default function App() {
   const { items, connected, loading, refresh } = useItems(query)
   const [availableTags, setAvailableTags] = useState<string[]>([])
 
-  useEffect(() => {
+  // A tag mutation (add_tags with a brand-new tag) can introduce a value
+  // this list doesn't have yet — re-load whenever an item mutation
+  // completes, not just once at mount, so the autocomplete doesn't go stale
+  // until a full page reload.
+  const loadTags = useCallback(() => {
     fetchTags()
       .then((tags) => setAvailableTags(tags.map((t) => t.tag)))
       .catch(() => setAvailableTags([]))
   }, [])
+
+  useEffect(() => {
+    loadTags()
+  }, [loadTags])
 
   const [perspectiveTopic, setPerspectiveTopic] = useUrlState<string | null>(
     'topic',
@@ -144,16 +160,26 @@ export default function App() {
       />
       <ViewSwitcher view={view} onChange={setView} />
       <div className="app-body">
-        {view === 'list' ? (
-          <ItemList items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
-        ) : (
-          <Board items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
-        )}
+        <div
+          id="view-panel"
+          role="tabpanel"
+          aria-labelledby={view === 'list' ? 'view-tab-list' : 'view-tab-board'}
+          className="app-body-master"
+        >
+          {view === 'list' ? (
+            <ItemList items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
+          ) : (
+            <Board items={visibleItems} selectedId={selectedId} onSelect={setSelectedId} />
+          )}
+        </div>
         <ItemDetail
           item={selectedItem}
           loading={loading}
           onClose={() => setSelectedId(null)}
-          onMutated={refresh}
+          onMutated={() => {
+            refresh()
+            loadTags()
+          }}
         />
       </div>
     </div>

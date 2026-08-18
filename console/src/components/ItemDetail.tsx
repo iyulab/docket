@@ -12,6 +12,7 @@ import {
   submitItem,
 } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
+import { formatRelativeTime } from '../time'
 
 // The console is a human looking at a browser tab, not a docket-mcp worker
 // session — multi-user identity is out of scope while docket stays
@@ -179,6 +180,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
         <div className="item-detail-actions item-detail-admin-actions">
           <button
             type="button"
+            title="상태를 invalid로 종료 — 실수로 만든 항목"
             disabled={actionPending}
             onClick={() => void runAction(() => removeItem(item.id))}
           >
@@ -186,6 +188,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
           </button>
           <button
             type="button"
+            title="상태를 duplicate로 종료 — 다른 항목의 중복"
             disabled={actionPending}
             onClick={() => void runAction(() => mergeItem(item.id))}
           >
@@ -193,6 +196,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
           </button>
           <button
             type="button"
+            title="상태를 wontfix로 종료 — 더 이상 무관"
             disabled={actionPending}
             onClick={() => void runAction(() => forceCloseItem(item.id))}
           >
@@ -246,6 +250,7 @@ export function ItemDetail({ item, loading, onClose, onMutated }: ItemDetailProp
             {comments.map((comment) => (
               <li key={comment.id}>
                 <span className="comment-author">{comment.author}</span>
+                <span className="comment-time">{formatRelativeTime(comment.created_at)}</span>
                 <span className="comment-body">{comment.body}</span>
               </li>
             ))}
