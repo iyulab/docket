@@ -61,7 +61,9 @@ Full decision rationale: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
 ## Item from/to/turn
 
 ```
-from: string | null   # who this item is being worked for. Optional, set at creation.
+from: string | null   # who this item is being worked for. Optional, set at creation —
+                        # or after the fact via `PATCH /items/{id} {"from": "…"}` (admin-only,
+                        # no MCP tool, for backfilling items filed before a requester was known).
 to:   string | null   # the current assignee (was `owner`) — set by claim, checked by submit.
 turn: from | to | null   # derived from `state`, never stored — see below.
 ```

@@ -54,7 +54,7 @@ fn api_routes() -> Router<Arc<Store>> {
     Router::new()
         .route("/workers", post(register_worker))
         .route("/items", post(create_item).get(list_items))
-        .route("/items/{id}", get(get_item))
+        .route("/items/{id}", get(get_item).patch(update_item))
         .route("/items/{id}/claim", post(claim_item))
         .route("/items/{id}/submit", post(submit_item))
         .route("/items/{id}/approve", post(approve_item))
@@ -314,6 +314,25 @@ async fn get_item(
     Path(id): Path<String>,
 ) -> Result<Json<Item>, ApiError> {
     Ok(Json(store.get_item(&id)?))
+}
+
+#[derive(Deserialize)]
+struct UpdateItemRequest {
+    /// Sets `from` (the requester) on an existing item — the only field
+    /// this covers so far. `from` is normally set once at creation
+    /// (ADR-0010); this exists for the case an item was filed before a
+    /// requester identity was available and needs it added after the fact.
+    /// Editing `title`/`body`/`topic` post-creation is a separate,
+    /// not-yet-built gap (see ROADMAP.md).
+    from: String,
+}
+
+async fn update_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateItemRequest>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.set_item_from(&id, &req.from)?))
 }
 
 #[derive(Deserialize)]
@@ -725,6 +744,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(json_body(resp).await.as_array().unwrap().len(), 0);
+    }
+
+    /// The one way to give a pre-existing item a `from` after the fact —
+    /// e.g. backfilling items filed before ADR-0010 added the field.
+    #[tokio::test]
+    async fn patch_item_sets_from() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let item = json_body(resp).await;
+        let id = item["id"].as_str().unwrap().to_string();
+        assert_eq!(item["from"], serde_json::Value::Null);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/items/{id}"),
+                serde_json::json!({"from": "backfilled-reporter"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["from"], "backfilled-reporter");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["from"], "backfilled-reporter");
+    }
+
+    #[tokio::test]
+    async fn patch_item_rejects_blank_from() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/items/{id}"),
+                serde_json::json!({"from": "   "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn patch_item_404_for_missing_item() {
+        let app = test_app();
+        let resp = app
+            .oneshot(json_request(
+                "PATCH",
+                "/items/nonexistent-id",
+                serde_json::json!({"from": "reporter-1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

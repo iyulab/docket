@@ -112,6 +112,14 @@ losing a claim race), never a silent protocol failure.
 equivalent yet — reach it directly if you're a plain HTTP client, or `list_items`/`search_items` and
 filter if you're going through MCP.
 
+`PATCH /items/{id} {"from": "…"}` sets `from` on an item that already exists — the only field this
+covers so far, and the only way to give an item a requester after creation (`from` is normally set
+once at creation, ADR-0010). Meant for backfilling items filed before a requester identity was
+available, not routine editing — there's no MCP tool for it (same admin-only reasoning as the three
+close operations below) and no way yet to edit `title`/`body`/`topic` after creation. State-independent
+(works on a closed item too — it corrects metadata, not a workflow transition). Rejects a blank
+`from` with `400`, a missing item with `404`.
+
 Three more HTTP-only admin operations close an item early, bypassing the normal
 `claimed → resolved → closed` path — they're console/admin actions (`docket-console` exposes them as
 buttons), not worker actions, so there's no MCP tool for them. All three are assignee-agnostic and valid
