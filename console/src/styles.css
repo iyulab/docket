@@ -132,11 +132,14 @@ body {
   color: #a4262c;
 }
 
-.badge-turn-assignee,
+.badge-turn-assignee {
+  background: #deebff;
+  color: #0052cc;
+}
+
 .badge-turn-requester {
-  background: transparent;
-  border: 1px solid #6b778c;
-  color: #44546f;
+  background: #ffedd6;
+  color: #b95000;
 }
 
 .badge + .badge {
