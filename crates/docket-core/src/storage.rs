@@ -125,11 +125,14 @@ impl Store {
         // through to `items`, so it always reports every row as present.
         // 'rebuild' is idempotent and cheap at this project's scale.
         conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
-        // Same rationale as items_fts above, applied to comments_fts. No
-        // AFTER DELETE/UPDATE trigger exists for comments_fts because
-        // item_comments is append-only (no edit/delete API, ADR-0009) — an
-        // INSERT-only trigger can never fall out of sync with a table that
-        // never changes existing rows.
+        // Same rationale as items_fts above, applied to comments_fts.
+        // item_comments is still never *edited* (no update API, ADR-0009),
+        // so no AFTER UPDATE trigger is needed — an INSERT-only trigger
+        // can't fall out of sync with rows that never change once written.
+        // Rows can be deleted now, though: delete_item (ADR-0013) cascades
+        // to item_comments, which is exactly why the comments_fts_ad
+        // trigger above exists — it keeps the FTS index in sync when that
+        // happens.
         conn.execute(
             "INSERT INTO comments_fts(comments_fts) VALUES('rebuild')",
             [],
