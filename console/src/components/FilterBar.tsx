@@ -20,6 +20,8 @@ interface FilterBarProps {
   tags: string[]
   onTagsChange: (tags: string[]) => void
   availableTags: string[]
+  archived: boolean
+  onArchivedChange: (archived: boolean) => void
   relation: RelationFilter
   onRelationChange: (relation: RelationFilter) => void
   sortKey: SortKey
@@ -113,6 +115,8 @@ export function FilterBar({
   tags,
   onTagsChange,
   availableTags,
+  archived,
+  onArchivedChange,
   relation,
   onRelationChange,
   sortKey,
@@ -163,6 +167,15 @@ export function FilterBar({
       <label className="filter-field">
         tag
         <TagFilterInput tags={tags} onChange={onTagsChange} availableTags={availableTags} />
+      </label>
+
+      <label className="filter-field filter-archived" title="보관된 항목만 보기 — 기본 목록에서는 항상 제외됨">
+        <input
+          type="checkbox"
+          checked={archived}
+          onChange={(e) => onArchivedChange(e.target.checked)}
+        />
+        archived만 보기
       </label>
 
       <label className="filter-field">

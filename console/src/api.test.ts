@@ -74,6 +74,22 @@ describe('fetchItems', () => {
     expect(fetch).toHaveBeenCalledWith('/api/items?limit=200&q=race+in+claim_item')
   })
 
+  it('appends archived=true only when explicitly requested', async () => {
+    mockFetchOnce([])
+
+    await fetchItems(undefined, true)
+
+    expect(fetch).toHaveBeenCalledWith('/api/items?limit=200&archived=true')
+  })
+
+  it('omits archived when false', async () => {
+    mockFetchOnce([])
+
+    await fetchItems(undefined, false)
+
+    expect(fetch).toHaveBeenCalledWith('/api/items?limit=200')
+  })
+
   it('throws when the request fails', async () => {
     mockFetchOnce({}, false, 500)
 

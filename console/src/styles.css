@@ -190,6 +190,13 @@ body {
   font-size: 0.8rem;
 }
 
+.filter-archived {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
 .item-list {
   flex: 1;
   border-collapse: collapse;

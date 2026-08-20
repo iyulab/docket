@@ -17,11 +17,12 @@ const POLL_INTERVAL_MS = 5000
 // fails — `connected` flips to false so the caller can show a banner,
 // but the board itself never goes blank on a transient failure.
 //
-// `query` is forwarded to every poll, so changing it (via its effect
-// dependency) re-fetches immediately and restarts the interval — same
-// mechanism `intervalMs` already used.
+// `query`/`archived` are forwarded to every poll, so changing either (via
+// the effect dependency) re-fetches immediately and restarts the interval —
+// same mechanism `intervalMs` already used.
 export function useItems(
   query: string = '',
+  archived: boolean = false,
   intervalMs: number = POLL_INTERVAL_MS,
 ): UseItemsResult {
   const [items, setItems] = useState<Item[]>([])
@@ -34,7 +35,7 @@ export function useItems(
 
     async function poll() {
       try {
-        const next = await fetchItems(query)
+        const next = await fetchItems(query, archived)
         if (!cancelled) {
           setItems(next)
           setConnected(true)
@@ -52,7 +53,7 @@ export function useItems(
       cancelled = true
       clearInterval(id)
     }
-  }, [query, intervalMs, refreshNonce])
+  }, [query, archived, intervalMs, refreshNonce])
 
   const refresh = useCallback(() => setRefreshNonce((n) => n + 1), [])
 

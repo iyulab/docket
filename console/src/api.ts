@@ -59,10 +59,15 @@ export interface TagCount {
 // with `MAX_LIST_LIMIT` in `crates/docket-core/src/main.rs` if that changes.
 const FETCH_ITEMS_LIMIT = 200
 
-export async function fetchItems(query?: string): Promise<Item[]> {
+// `archived` mirrors the server's own default-excluded/archive-only split
+// (ADR-0013/0014) rather than folding into the `state` filter — an archived
+// item still has a `state`, the two are orthogonal, so this stays a
+// separate toggle instead of a fifth state checkbox.
+export async function fetchItems(query?: string, archived?: boolean): Promise<Item[]> {
   const trimmed = query?.trim()
   const params = new URLSearchParams({ limit: String(FETCH_ITEMS_LIMIT) })
   if (trimmed) params.set('q', trimmed)
+  if (archived) params.set('archived', 'true')
   const url = `/api/items?${params.toString()}`
   const res = await fetch(url)
   if (!res.ok) {

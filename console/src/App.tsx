@@ -41,6 +41,16 @@ function serializeStates(value: ItemState[]): string | null {
   return value.length ? value.join(',') : 'none'
 }
 
+// Mirrors the server's own default-excluded/archive-only toggle (ADR-0013/
+// 0014) rather than a third `none`-style tri-state — an item is either in
+// the default view or the archive browse, never both at once.
+function parseArchived(raw: string | null): boolean {
+  return raw === 'true'
+}
+function serializeArchived(value: boolean): string | null {
+  return value ? 'true' : null
+}
+
 function parseTags(raw: string | null): string[] {
   return raw ? raw.split(',') : []
 }
@@ -78,7 +88,12 @@ function serializeView(value: 'list' | 'board'): string | null {
 
 export default function App() {
   const [query, setQuery] = useUrlState<string>('q', parseQuery, serializeQuery)
-  const { items, connected, loading, refresh } = useItems(query)
+  const [archived, setArchived] = useUrlState<boolean>(
+    'archived',
+    parseArchived,
+    serializeArchived,
+  )
+  const { items, connected, loading, refresh } = useItems(query, archived)
   const [availableTags, setAvailableTags] = useState<string[]>([])
 
   // A tag mutation (add_tags with a brand-new tag) can introduce a value
@@ -166,6 +181,8 @@ export default function App() {
             tags={tags}
             onTagsChange={setTags}
             availableTags={availableTags}
+            archived={archived}
+            onArchivedChange={setArchived}
             relation={relation}
             onRelationChange={setRelation}
             sortKey={sortKey}
