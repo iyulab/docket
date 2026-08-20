@@ -228,6 +228,44 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
+    /// Sets `archived_at` if not already set. Idempotent — archiving an
+    /// already-archived item is not an error, it just returns the item
+    /// unchanged (matches `add_tags`/`remove_tags`'s existing idempotency
+    /// convention). State-unrestricted: `archived_at` is orthogonal to
+    /// `state` (an old, abandoned `open` item is as plausible a candidate
+    /// as a `closed` one). See ADR-0013.
+    pub fn archive_item(&self, id: &str) -> Result<Item> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        require_item(&conn, id)?;
+        let now = now_millis();
+        conn.execute(
+            "UPDATE items SET archived_at = ?1, updated_at = ?1 WHERE id = ?2 AND archived_at IS NULL",
+            params![now, id],
+        )?;
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
+    /// Hard delete — the item and its tags/comments are gone, not just
+    /// closed. No `author`/`reason`: there is nothing left afterward to
+    /// attach either to. State-unrestricted, same precedent as
+    /// `remove`/`merge`/`force-close`. A caller wanting a *traceable*
+    /// removal should use `remove_item` instead, which keeps a permanent
+    /// `resolution = invalid` record. See ADR-0013.
+    ///
+    /// A dangling free-form tag on some *other* item that happens to
+    /// reference this item's id by convention (e.g. a `related:<id>`-shaped
+    /// tag) is not cleaned up — the core cannot know a tag's string encodes
+    /// a reference (`principles.md` P-1: tags are opaque). Accepted,
+    /// documented consequence, not a bug.
+    pub fn delete_item(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        require_item(&conn, id)?;
+        conn.execute("DELETE FROM item_tags WHERE item_id = ?1", params![id])?;
+        conn.execute("DELETE FROM item_comments WHERE item_id = ?1", params![id])?;
+        conn.execute("DELETE FROM items WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn get_worker(&self, id: &str) -> Result<Worker> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
@@ -1335,6 +1373,118 @@ mod tests {
             store.set_item_requester("nonexistent-id", "reporter-1"),
             Err(StoreError::NotFound)
         ));
+    }
+
+    #[test]
+    fn archive_item_sets_archived_at_regardless_of_state() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        assert_eq!(item.archived_at, None);
+
+        let archived = store.archive_item(&item.id).unwrap();
+        assert!(archived.archived_at.is_some());
+        // archiving does not touch workflow state
+        assert_eq!(archived.state, State::Open);
+    }
+
+    #[test]
+    fn archive_item_is_idempotent() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        let first = store.archive_item(&item.id).unwrap();
+        let second = store.archive_item(&item.id).unwrap();
+        assert_eq!(first.archived_at, second.archived_at);
+    }
+
+    #[test]
+    fn archive_nonexistent_item_is_not_found() {
+        let store = open_test_store();
+        let err = store.archive_item("does-not-exist").unwrap_err();
+        assert!(matches!(err, StoreError::NotFound));
+    }
+
+    #[test]
+    fn delete_item_removes_item_and_cascades_tags_and_comments() {
+        let store = open_test_store();
+        let item = store
+            .create_item(
+                "iyulab/docket",
+                "t",
+                None,
+                &["a".to_string(), "b".to_string()],
+                None,
+            )
+            .unwrap();
+        store.add_comment(&item.id, "author-1", "a comment").unwrap();
+
+        store.delete_item(&item.id).unwrap();
+
+        assert!(matches!(
+            store.get_item(&item.id).unwrap_err(),
+            StoreError::NotFound
+        ));
+        // list_items over the whole store no longer includes it
+        let all = store.list_items(None, None, None).unwrap();
+        assert!(!all.iter().any(|i| i.id == item.id));
+    }
+
+    #[test]
+    fn delete_item_removes_it_from_full_text_search() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "unique-searchable-title", None, &[], None)
+            .unwrap();
+        let found_before = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("unique-searchable-title"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(found_before.len(), 1);
+
+        store.delete_item(&item.id).unwrap();
+
+        let found_after = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("unique-searchable-title"),
+                None,
+            )
+            .unwrap();
+        assert!(found_after.is_empty());
+    }
+
+    #[test]
+    fn delete_item_works_regardless_of_state() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        // still claimed, not closed — delete must still succeed
+        store.delete_item(&item.id).unwrap();
+        assert!(matches!(
+            store.get_item(&item.id).unwrap_err(),
+            StoreError::NotFound
+        ));
+    }
+
+    #[test]
+    fn delete_nonexistent_item_is_not_found() {
+        let store = open_test_store();
+        let err = store.delete_item("does-not-exist").unwrap_err();
+        assert!(matches!(err, StoreError::NotFound));
     }
 
     #[test]
