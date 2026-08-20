@@ -93,6 +93,16 @@ struct ClaimOrSubmitParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ApproveParams {
     item_id: String,
+    #[serde(default)]
+    author: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReasonedParams {
+    item_id: String,
+    #[serde(default)]
+    author: Option<String>,
+    reason: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -141,6 +151,15 @@ struct ItemDto {
     assignee: Option<String>,
     #[serde(default)]
     turn: Option<String>,
+    /// Absent from servers older than ADR-0012. Defaulted for the same
+    /// reason as `tags`/`turn` above. `Option<bool>` rather than a bare
+    /// `bool` with a `false` default: an older server's response genuinely
+    /// doesn't carry this fact at all, and defaulting it to `false` would
+    /// misrepresent every non-closed item from an old server as closed.
+    /// `None` means "server didn't say," distinct from `Some(false)`
+    /// meaning "server said closed."
+    #[serde(default)]
+    open: Option<bool>,
     /// Absent from servers older than the tag feature. Without a default,
     /// every tool response from such a server fails to deserialize, not just
     /// the tag-related ones.
@@ -330,10 +349,59 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ApproveParams>,
     ) -> Result<CallToolResult, McpError> {
+        let mut body = serde_json::json!({});
+        if let Some(author) = p.author {
+            body["author"] = serde_json::Value::String(author);
+        }
         let resp = self
             .http
             .post(format!("{}/items/{}/approve", self.base_url, p.item_id))
-            .json(&serde_json::json!({}))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Reject a resolved item, sending it back to the assignee for rework. \
+            Requires a reason, recorded as a comment atomically with the state change."
+    )]
+    async fn reject_item(
+        &self,
+        Parameters(p): Parameters<ReasonedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut body = serde_json::json!({ "reason": p.reason });
+        if let Some(author) = p.author {
+            body["author"] = serde_json::Value::String(author);
+        }
+        let resp = self
+            .http
+            .post(format!("{}/items/{}/reject", self.base_url, p.item_id))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Reopen a closed item that was closed prematurely or turns out not to be \
+            finished. Sends it back to the assignee and clears resolution. Requires a reason, \
+            recorded as a comment atomically with the state change."
+    )]
+    async fn reopen_item(
+        &self,
+        Parameters(p): Parameters<ReasonedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut body = serde_json::json!({ "reason": p.reason });
+        if let Some(author) = p.author {
+            body["author"] = serde_json::Value::String(author);
+        }
+        let resp = self
+            .http
+            .post(format!("{}/items/{}/reopen", self.base_url, p.item_id))
+            .json(&body)
             .send()
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -528,6 +596,13 @@ mod tests {
             .to_string()
     }
 
+    /// `field()` panics on non-string values (`as_str()` returns `None` for
+    /// bools and `null`), so non-string fields (`open`, and `resolution`
+    /// once it goes back to `null` after a reopen) go through this instead.
+    fn json_value(result: &CallToolResult) -> serde_json::Value {
+        serde_json::from_str(text_of(result)).expect("tool result is JSON")
+    }
+
     /// The M1 lifecycle (open -> claimed -> resolved -> closed), exercised
     /// through the MCP tool functions exactly as an MCP client would call
     /// them (minus the stdio framing) — verifying it holds over the mcp ->
@@ -601,11 +676,97 @@ mod tests {
         let approved = server
             .approve_item(Parameters(ApproveParams {
                 item_id: item_id.clone(),
+                author: None,
             }))
             .await
             .unwrap();
         assert_eq!(field(&approved, "state"), "closed");
         assert_eq!(field(&approved, "resolution"), "done");
+    }
+
+    /// Extends the M1 lifecycle one round further (ADR-0012): a resolved
+    /// item can be rejected back to its assignee (state reverts to claimed,
+    /// item stays open) and a closed item can be reopened (state reverts to
+    /// claimed, resolution clears back to null) — round-tripping through
+    /// both new transitions exactly as an MCP client would call them.
+    #[tokio::test]
+    async fn reject_then_resubmit_then_approve_round_trips() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-reject-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("reject.db");
+        let core = spawn_core(18425, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "t".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("requester-1".to_string()),
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: item_id.clone(),
+                worker_id: "w1".to_string(),
+            }))
+            .await
+            .unwrap();
+        server
+            .submit_item(Parameters(ClaimOrSubmitParams {
+                item_id: item_id.clone(),
+                worker_id: "w1".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let rejected = server
+            .reject_item(Parameters(ReasonedParams {
+                item_id: item_id.clone(),
+                author: Some("requester-1".to_string()),
+                reason: "missing tests".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&rejected, "state"), "claimed");
+        assert_eq!(json_value(&rejected)["open"], serde_json::json!(true));
+
+        server
+            .submit_item(Parameters(ClaimOrSubmitParams {
+                item_id: item_id.clone(),
+                worker_id: "w1".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let approved = server
+            .approve_item(Parameters(ApproveParams {
+                item_id: item_id.clone(),
+                author: Some("requester-1".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&approved, "state"), "closed");
+        assert_eq!(json_value(&approved)["open"], serde_json::json!(false));
+
+        let reopened = server
+            .reopen_item(Parameters(ReasonedParams {
+                item_id: item_id.clone(),
+                author: Some("requester-1".to_string()),
+                reason: "regression found".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&reopened, "state"), "claimed");
+        assert!(json_value(&reopened)["resolution"].is_null());
     }
 
     /// Losing a claim race must come back as a tool-level error the model
