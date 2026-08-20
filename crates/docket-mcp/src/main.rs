@@ -333,6 +333,7 @@ impl DocketMcp {
         let resp = self
             .http
             .post(format!("{}/items/{}/approve", self.base_url, p.item_id))
+            .json(&serde_json::json!({}))
             .send()
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;

@@ -62,6 +62,8 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/remove", post(remove_item))
         .route("/items/{id}/merge", post(merge_item))
         .route("/items/{id}/force-close", post(force_close_item))
+        .route("/items/{id}/reject", post(reject_item))
+        .route("/items/{id}/reopen", post(reopen_item))
         .route(
             "/items/{id}/tags",
             post(add_item_tags).delete(remove_item_tags),
@@ -378,32 +380,65 @@ async fn submit_item(
     Ok(Json(store.submit_item(&id, &req.worker_id)?))
 }
 
+#[derive(Deserialize)]
+struct AuthoredRequest {
+    #[serde(default = "default_comment_author")]
+    author: String,
+}
+
 async fn approve_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
+    Json(req): Json<AuthoredRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.approve_item(&id)?))
+    Ok(Json(store.approve_item(&id, &req.author)?))
 }
 
 async fn remove_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
+    Json(req): Json<AuthoredRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.remove_item(&id)?))
+    Ok(Json(store.remove_item(&id, &req.author)?))
 }
 
 async fn merge_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
+    Json(req): Json<AuthoredRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.merge_item(&id)?))
+    Ok(Json(store.merge_item(&id, &req.author)?))
 }
 
 async fn force_close_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
+    Json(req): Json<AuthoredRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.force_close_item(&id)?))
+    Ok(Json(store.force_close_item(&id, &req.author)?))
+}
+
+#[derive(Deserialize)]
+struct ReasonedRequest {
+    #[serde(default = "default_comment_author")]
+    author: String,
+    reason: String,
+}
+
+async fn reject_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<ReasonedRequest>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.reject_item(&id, &req.author, &req.reason)?))
+}
+
+async fn reopen_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<ReasonedRequest>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.reopen_item(&id, &req.author, &req.reason)?))
 }
 
 #[derive(Deserialize)]
@@ -568,13 +603,11 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/items/{id}/approve"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/approve"),
+                serde_json::json!({}),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -635,13 +668,11 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/items/{id}/approve"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/approve"),
+                serde_json::json!({}),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -907,13 +938,11 @@ mod tests {
         async fn close(app: &Router, id: &str, op: &str) -> serde_json::Value {
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!("/items/{id}/{op}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(json_request(
+                    "POST",
+                    &format!("/items/{id}/{op}"),
+                    serde_json::json!({}),
+                ))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
@@ -932,13 +961,11 @@ mod tests {
 
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!("/items/{id}/{op}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(json_request(
+                    "POST",
+                    &format!("/items/{id}/{op}"),
+                    serde_json::json!({}),
+                ))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::CONFLICT);
