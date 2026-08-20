@@ -305,6 +305,36 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
+    /// Atomically transitions `resolved -> claimed` — the requester sending
+    /// a not-yet-acceptable item back to the assignee for rework. `assignee`
+    /// is unchanged. `reason` is required and recorded as an atomic comment
+    /// (same two-`execute`-under-one-lock pattern as `add_comment` — no
+    /// separate `conn.transaction()` needed, since no other thread can
+    /// interleave while this lock is held). See ADR-0012.
+    pub fn reject_item(&self, id: &str, author: &str, reason: &str) -> Result<Item> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(StoreError::Validation(
+                "reason must not be blank".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let now = now_millis();
+        let affected = conn.execute(
+            "UPDATE items SET state = 'claimed', updated_at = ?1 WHERE id = ?2 AND state = 'resolved'",
+            params![now, id],
+        )?;
+        if affected == 0 {
+            return Err(existing_state_conflict(&conn, id, "reject")?);
+        }
+        let comment_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![comment_id, id, author, reason, now],
+        )?;
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
     /// Atomically transitions `resolved -> closed` with `resolution = done`
     /// — the requester's approval.
     pub fn approve_item(&self, id: &str) -> Result<Item> {
@@ -728,6 +758,57 @@ mod tests {
         assert_eq!(closed.resolution, Some(Resolution::Duplicate));
         // owner-agnostic — the claim it interrupted is preserved as history
         assert_eq!(closed.assignee.as_deref(), Some("w1"));
+    }
+
+    #[test]
+    fn reject_resolved_item_returns_to_claimed_same_assignee() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let rejected = store
+            .reject_item(&item.id, "requester-1", "not done yet, missing tests")
+            .unwrap();
+        assert_eq!(rejected.state, State::Claimed);
+        assert_eq!(rejected.assignee.as_deref(), Some("w1"));
+        assert!(rejected.open);
+        assert_eq!(rejected.turn, Item::turn_for(State::Claimed));
+
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author, "requester-1");
+        assert_eq!(comments[0].body, "not done yet, missing tests");
+    }
+
+    #[test]
+    fn reject_non_resolved_item_conflicts() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        // still open, never claimed/submitted
+        let err = store
+            .reject_item(&item.id, "requester-1", "reason")
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Conflict(_)));
+    }
+
+    #[test]
+    fn reject_with_blank_reason_is_invalid() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let err = store
+            .reject_item(&item.id, "requester-1", "   ")
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Validation(_)));
     }
 
     #[test]
