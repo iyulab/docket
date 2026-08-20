@@ -335,9 +335,40 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
+    /// Atomically transitions `closed -> claimed`, clearing `resolution`
+    /// back to `NULL` (the "closed" reason no longer applies once state
+    /// leaves `closed` — see `architecture.md`'s note that `resolution`
+    /// only means something while `state == closed`). `assignee` is
+    /// unchanged. `reason` is required, recorded as an atomic comment, same
+    /// pattern as `reject_item`. See ADR-0012.
+    pub fn reopen_item(&self, id: &str, author: &str, reason: &str) -> Result<Item> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(StoreError::Validation(
+                "reason must not be blank".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let now = now_millis();
+        let affected = conn.execute(
+            "UPDATE items SET state = 'claimed', resolution = NULL, updated_at = ?1 WHERE id = ?2 AND state = 'closed'",
+            params![now, id],
+        )?;
+        if affected == 0 {
+            return Err(existing_state_conflict(&conn, id, "reopen")?);
+        }
+        let comment_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![comment_id, id, author, reason, now],
+        )?;
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
     /// Atomically transitions `resolved -> closed` with `resolution = done`
-    /// — the requester's approval.
-    pub fn approve_item(&self, id: &str) -> Result<Item> {
+    /// — the requester's approval. `author` is recorded as an atomic
+    /// comment (traceability — see ADR-0012's "author" discussion).
+    pub fn approve_item(&self, id: &str, author: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let now = now_millis();
         let affected = conn.execute(
@@ -348,6 +379,11 @@ impl Store {
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "approve")?);
         }
+        let comment_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![comment_id, id, author, "approved", now],
+        )?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -356,25 +392,31 @@ impl Store {
     /// admin-operation mapping). Unlike `approve_item`, this isn't gated on
     /// reaching `resolved` first — a mistaken item is caught at any
     /// pre-closed stage — and it's assignee-agnostic, matching `approve_item`.
-    pub fn remove_item(&self, id: &str) -> Result<Item> {
-        self.close_with_resolution(id, Resolution::Invalid, "remove")
+    pub fn remove_item(&self, id: &str, author: &str) -> Result<Item> {
+        self.close_with_resolution(id, Resolution::Invalid, "remove", author)
     }
 
     /// Admin operation: closes an item as a duplicate of another, with
     /// `resolution = duplicate`. Same any-pre-closed-state, assignee-agnostic
     /// rules as `remove_item` — see its doc comment.
-    pub fn merge_item(&self, id: &str) -> Result<Item> {
-        self.close_with_resolution(id, Resolution::Duplicate, "merge")
+    pub fn merge_item(&self, id: &str, author: &str) -> Result<Item> {
+        self.close_with_resolution(id, Resolution::Duplicate, "merge", author)
     }
 
     /// Admin operation: closes an item that's become irrelevant, with
     /// `resolution = wontfix`. Same any-pre-closed-state, assignee-agnostic
     /// rules as `remove_item` — see its doc comment.
-    pub fn force_close_item(&self, id: &str) -> Result<Item> {
-        self.close_with_resolution(id, Resolution::Wontfix, "force-close")
+    pub fn force_close_item(&self, id: &str, author: &str) -> Result<Item> {
+        self.close_with_resolution(id, Resolution::Wontfix, "force-close", author)
     }
 
-    fn close_with_resolution(&self, id: &str, resolution: Resolution, op: &str) -> Result<Item> {
+    fn close_with_resolution(
+        &self,
+        id: &str,
+        resolution: Resolution,
+        op: &str,
+        author: &str,
+    ) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let now = now_millis();
         let affected = conn.execute(
@@ -385,6 +427,11 @@ impl Store {
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, op)?);
         }
+        let comment_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![comment_id, id, author, op, now],
+        )?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -727,7 +774,7 @@ mod tests {
         let resolved = store.submit_item(&item.id, "w1").unwrap();
         assert_eq!(resolved.state, State::Resolved);
 
-        let closed = store.approve_item(&item.id).unwrap();
+        let closed = store.approve_item(&item.id, "requester-1").unwrap();
         assert_eq!(closed.state, State::Closed);
         assert_eq!(closed.resolution, Some(Resolution::Done));
     }
@@ -740,7 +787,7 @@ mod tests {
             .unwrap();
         assert_eq!(item.state, State::Open);
 
-        let closed = store.remove_item(&item.id).unwrap();
+        let closed = store.remove_item(&item.id, "admin").unwrap();
         assert_eq!(closed.state, State::Closed);
         assert_eq!(closed.resolution, Some(Resolution::Invalid));
     }
@@ -753,7 +800,7 @@ mod tests {
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
 
-        let closed = store.merge_item(&item.id).unwrap();
+        let closed = store.merge_item(&item.id, "admin").unwrap();
         assert_eq!(closed.state, State::Closed);
         assert_eq!(closed.resolution, Some(Resolution::Duplicate));
         // owner-agnostic — the claim it interrupted is preserved as history
@@ -812,6 +859,60 @@ mod tests {
     }
 
     #[test]
+    fn reopen_closed_item_returns_to_claimed_and_clears_resolution() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+        store.approve_item(&item.id, "requester-1").unwrap();
+
+        let reopened = store
+            .reopen_item(
+                &item.id,
+                "requester-1",
+                "regression found, not actually fixed",
+            )
+            .unwrap();
+        assert_eq!(reopened.state, State::Claimed);
+        assert_eq!(reopened.resolution, None);
+        assert_eq!(reopened.assignee.as_deref(), Some("w1"));
+        assert!(reopened.open);
+
+        let comments = store.list_comments(&item.id).unwrap();
+        // one from approve_item's author record, one from reopen_item's reason
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[1].body, "regression found, not actually fixed");
+    }
+
+    #[test]
+    fn reopen_non_closed_item_conflicts() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        let err = store
+            .reopen_item(&item.id, "requester-1", "reason")
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Conflict(_)));
+    }
+
+    #[test]
+    fn reopen_with_blank_reason_is_invalid() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+        store.approve_item(&item.id, "requester-1").unwrap();
+
+        let err = store.reopen_item(&item.id, "requester-1", "").unwrap_err();
+        assert!(matches!(err, StoreError::Validation(_)));
+    }
+
+    #[test]
     fn force_close_item_closes_a_resolved_item_as_wontfix() {
         let store = open_test_store();
         let item = store
@@ -820,7 +921,7 @@ mod tests {
         store.claim_item(&item.id, "w1").unwrap();
         store.submit_item(&item.id, "w1").unwrap();
 
-        let closed = store.force_close_item(&item.id).unwrap();
+        let closed = store.force_close_item(&item.id, "admin").unwrap();
         assert_eq!(closed.state, State::Closed);
         assert_eq!(closed.resolution, Some(Resolution::Wontfix));
     }
@@ -831,18 +932,18 @@ mod tests {
         let item = store
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
-        store.remove_item(&item.id).unwrap();
+        store.remove_item(&item.id, "admin").unwrap();
 
         assert!(matches!(
-            store.merge_item(&item.id).unwrap_err(),
+            store.merge_item(&item.id, "admin").unwrap_err(),
             StoreError::Conflict(_)
         ));
         assert!(matches!(
-            store.force_close_item(&item.id).unwrap_err(),
+            store.force_close_item(&item.id, "admin").unwrap_err(),
             StoreError::Conflict(_)
         ));
         assert!(matches!(
-            store.remove_item(&item.id).unwrap_err(),
+            store.remove_item(&item.id, "admin").unwrap_err(),
             StoreError::Conflict(_)
         ));
     }
@@ -851,17 +952,36 @@ mod tests {
     fn admin_close_ops_report_not_found_for_a_missing_item() {
         let store = open_test_store();
         assert!(matches!(
-            store.remove_item("nope").unwrap_err(),
+            store.remove_item("nope", "admin").unwrap_err(),
             StoreError::NotFound
         ));
         assert!(matches!(
-            store.merge_item("nope").unwrap_err(),
+            store.merge_item("nope", "admin").unwrap_err(),
             StoreError::NotFound
         ));
         assert!(matches!(
-            store.force_close_item("nope").unwrap_err(),
+            store.force_close_item("nope", "admin").unwrap_err(),
             StoreError::NotFound
         ));
+    }
+
+    #[test]
+    fn approve_remove_merge_force_close_record_author_as_comment() {
+        let store = open_test_store();
+
+        let a = store
+            .create_item("iyulab/docket", "a", None, &[], None)
+            .unwrap();
+        store.claim_item(&a.id, "w1").unwrap();
+        store.submit_item(&a.id, "w1").unwrap();
+        store.approve_item(&a.id, "requester-1").unwrap();
+        assert_eq!(store.list_comments(&a.id).unwrap()[0].author, "requester-1");
+
+        let b = store
+            .create_item("iyulab/docket", "b", None, &[], None)
+            .unwrap();
+        store.remove_item(&b.id, "admin-1").unwrap();
+        assert_eq!(store.list_comments(&b.id).unwrap()[0].author, "admin-1");
     }
 
     #[test]
@@ -1151,7 +1271,7 @@ mod tests {
         let item = store
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
-        store.remove_item(&item.id).unwrap();
+        store.remove_item(&item.id, "admin").unwrap();
 
         let updated = store.set_item_requester(&item.id, "reporter-1").unwrap();
         assert_eq!(updated.state, State::Closed);
