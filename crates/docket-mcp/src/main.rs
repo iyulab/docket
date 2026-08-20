@@ -299,6 +299,17 @@ async fn respond_paginated(resp: reqwest::Response) -> Result<CallToolResult, Mc
     }
 }
 
+/// Adds an `author` field to a request body when the caller supplied one —
+/// every mutation that records authorship (approve/reject/reopen/
+/// add_comment) follows the same optional-author convention, docket-core
+/// defaulting to `"unknown"` when it's omitted.
+fn with_optional_author(mut body: serde_json::Value, author: Option<String>) -> serde_json::Value {
+    if let Some(author) = author {
+        body["author"] = serde_json::Value::String(author);
+    }
+    body
+}
+
 #[tool_router(server_handler)]
 impl DocketMcp {
     #[tool(description = "Register as a worker, reporting which topic prefixes you own")]
@@ -332,7 +343,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, and/or a worker's topic jurisdiction (topic_scope)"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), and/or archived status. Paginated via limit/offset — check the result's total field"
     )]
     async fn list_items(
         &self,
@@ -446,10 +457,7 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ApproveParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mut body = serde_json::json!({});
-        if let Some(author) = p.author {
-            body["author"] = serde_json::Value::String(author);
-        }
+        let body = with_optional_author(serde_json::json!({}), p.author);
         let resp = self
             .http
             .post(format!("{}/items/{}/approve", self.base_url, p.item_id))
@@ -468,10 +476,7 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ReasonedParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mut body = serde_json::json!({ "reason": p.reason });
-        if let Some(author) = p.author {
-            body["author"] = serde_json::Value::String(author);
-        }
+        let body = with_optional_author(serde_json::json!({ "reason": p.reason }), p.author);
         let resp = self
             .http
             .post(format!("{}/items/{}/reject", self.base_url, p.item_id))
@@ -492,10 +497,7 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ReasonedParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mut body = serde_json::json!({ "reason": p.reason });
-        if let Some(author) = p.author {
-            body["author"] = serde_json::Value::String(author);
-        }
+        let body = with_optional_author(serde_json::json!({ "reason": p.reason }), p.author);
         let resp = self
             .http
             .post(format!("{}/items/{}/reopen", self.base_url, p.item_id))
@@ -595,10 +597,7 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<AddCommentParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mut body = serde_json::json!({ "body": p.body });
-        if let Some(author) = p.author {
-            body["author"] = serde_json::Value::String(author);
-        }
+        let body = with_optional_author(serde_json::json!({ "body": p.body }), p.author);
         let resp = self
             .http
             .post(format!("{}/items/{}/comments", self.base_url, p.item_id))

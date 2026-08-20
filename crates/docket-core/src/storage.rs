@@ -270,11 +270,13 @@ impl Store {
     /// a reference (`principles.md` P-1: tags are opaque). Accepted,
     /// documented consequence, not a bug.
     pub fn delete_item(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        require_item(&conn, id)?;
-        conn.execute("DELETE FROM item_tags WHERE item_id = ?1", params![id])?;
-        conn.execute("DELETE FROM item_comments WHERE item_id = ?1", params![id])?;
-        conn.execute("DELETE FROM items WHERE id = ?1", params![id])?;
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        require_item(&tx, id)?;
+        tx.execute("DELETE FROM item_tags WHERE item_id = ?1", params![id])?;
+        tx.execute("DELETE FROM item_comments WHERE item_id = ?1", params![id])?;
+        tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -395,11 +397,7 @@ impl Store {
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "reject")?);
         }
-        let comment_id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![comment_id, id, author, reason, now],
-        )?;
+        insert_lifecycle_comment(&conn, id, author, reason, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -436,11 +434,7 @@ impl Store {
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "reopen")?);
         }
-        let comment_id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![comment_id, id, author, reason, now],
-        )?;
+        insert_lifecycle_comment(&conn, id, author, reason, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -458,11 +452,7 @@ impl Store {
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "approve")?);
         }
-        let comment_id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![comment_id, id, author, "approved", now],
-        )?;
+        insert_lifecycle_comment(&conn, id, author, "approved", now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -506,11 +496,7 @@ impl Store {
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, op)?);
         }
-        let comment_id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![comment_id, id, author, op, now],
-        )?;
+        insert_lifecycle_comment(&conn, id, author, op, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -818,6 +804,26 @@ fn require_item(conn: &Connection, item_id: &str) -> Result<()> {
     )
     .optional()?
     .ok_or(StoreError::NotFound)
+}
+
+/// Records `author`/`body` as an atomic comment on `item_id`, sharing the
+/// same `now` as the state-changing `UPDATE` it's paired with — the four
+/// lifecycle operations that call this write the comment as part of the
+/// same transition, not as separate activity. Shared by
+/// `reject_item`/`reopen_item`/`approve_item`/`close_with_resolution`.
+fn insert_lifecycle_comment(
+    conn: &Connection,
+    item_id: &str,
+    author: &str,
+    body: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let comment_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![comment_id, item_id, author, body, now],
+    )?;
+    Ok(())
 }
 
 fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
@@ -1546,6 +1552,27 @@ mod tests {
         // list_items over the whole store no longer includes it
         let all = store.list_items(None, None, None).unwrap();
         assert!(!all.iter().any(|i| i.id == item.id));
+
+        // The cascade itself, not just what the public API surfaces —
+        // orphaned rows in item_tags/item_comments would be invisible
+        // through get_item/list_items but would still be there.
+        let conn = store.conn.lock().unwrap();
+        let tag_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM item_tags WHERE item_id = ?1",
+                params![item.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_count, 0);
+        let comment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM item_comments WHERE item_id = ?1",
+                params![item.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(comment_count, 0);
     }
 
     #[test]
@@ -1944,6 +1971,33 @@ mod tests {
         assert!(!default_view.iter().any(|i| i.id == hidden.id));
 
         let archive_only = store.list_items(None, None, Some(true)).unwrap();
+        assert!(!archive_only.iter().any(|i| i.id == visible.id));
+        assert!(archive_only.iter().any(|i| i.id == hidden.id));
+    }
+
+    /// `search_items` takes the same `archived` parameter as `list_items`
+    /// (both route through the same trailing `AND i.archived_at ...` clause
+    /// in the SQL this builds) but only `list_items` had a test for it.
+    #[test]
+    fn search_items_archived_true_browses_only_the_archive() {
+        let store = open_test_store();
+        let visible = store
+            .create_item("iyulab/docket", "matching visible", None, &[], None)
+            .unwrap();
+        let hidden = store
+            .create_item("iyulab/docket", "matching hidden", None, &[], None)
+            .unwrap();
+        store.archive_item(&hidden.id).unwrap();
+
+        let default_view = store
+            .search_items(None, None, &[], TagMatch::Any, Some("matching"), None)
+            .unwrap();
+        assert!(default_view.iter().any(|i| i.id == visible.id));
+        assert!(!default_view.iter().any(|i| i.id == hidden.id));
+
+        let archive_only = store
+            .search_items(None, None, &[], TagMatch::Any, Some("matching"), Some(true))
+            .unwrap();
         assert!(!archive_only.iter().any(|i| i.id == visible.id));
         assert!(archive_only.iter().any(|i| i.id == hidden.id));
     }
