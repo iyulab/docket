@@ -45,6 +45,11 @@ What's deliberately not carried over from chat/email tools: no presence requirem
 - **S3. Immediate query** — Session B asks about implementation details in another repository. If no one owns that topic, it fails immediately (this does not persist as an item — see `question` in [glossary.md](glossary.md)).
 - **S4. Cross-machine handoff** — A summary of work in progress on a desktop, plus next steps, gets posted as an item; opening a session on a laptop picks it up.
 - **S5. Human intervention** — An admin notices a stalled item on the console, refines the ambiguous request, and sends it back into flow.
+
+  > **2026-08-20 note**: `reject`/`reopen` ([ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md))
+  > cover a narrower case than this scenario — a bare, reason-carrying bounce-back callable by any
+  > worker, not gated on a human or on editing the request's content. S5's "refine" (console-only,
+  > edits the ambiguous request itself) remains unimplemented.
 - **S6. A different runtime (extension validation)** — an incident event from `aims` becomes an item, and iyulab's own agent picks it up to investigate and resolve.
 
 The definition of success is covered in [goals.md](goals.md).

@@ -20,9 +20,11 @@ MCP-capable session, or raw HTTP for anything else (`docket-console`, `curl`, sc
 | `topic` | A named queue items are filed against — competing consumers, one worker wins each item (Kafka-topic-plus-consumer-group semantics, not pub-sub fan-out) |
 | `item` | A single unit of work |
 | `claim` | A worker pulling an open item to itself, exclusively |
-| `state` | `open → claimed → resolved → closed` — the workflow stage |
+| `state` | `open → claimed → resolved → closed` — the workflow stage. `reject` and `reopen` move an item backward, both landing on `claimed` (§4) |
 | `resolution` | Why an item closed: `done` (requester approval) / `duplicate` (merge) / `wontfix` (force-close) / `invalid` (remove) |
+| `open` | `true` while `state != closed`, else `false` — derived from `state`, not stored, same treatment as `turn`. See [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md) |
 | `requester` / `assignee` / `turn` | `requester` is who the item is for, `assignee` is the current holder (was `owner`), `turn` says whose hand it's in right now — derived from `state`, not stored. See [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) / [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md) |
+| `archived_at` | `null` unless archived, else the epoch-millis timestamp it was archived at — independent of `state`, caller-set, hides an item from default listings. See [ADR-0013](decisions/ADR-0013-item-archive-and-delete.md) |
 | `tag` | An opaque, caller-defined string on an item — docket never interprets it |
 | `comment` | An opaque, append-only note on an item — no edit/delete, corrections are new comments |
 
@@ -105,15 +107,37 @@ losing a claim race), never a silent protocol failure.
 |---|---|---|---|
 | `register_worker` | `id`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5 |
 | `create_item` | `topic`, `title`, `body?`, `tags[]?`, `requester?` | `POST /items` | **Call `search_items` first** to avoid filing a duplicate. `requester` is who this item is being worked for — optional (see [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) / [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md)) |
-| `list_items` | `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?` | `GET /items?topic=&state=&assignee=&requester=&topic_scope=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `assignee`/`requester` match the current assignee/requester exactly |
-| `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=` | `query` full-text matches title+body+comments; `tag_match` is `any` (default) or `all` |
+| `list_items` | `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `archived?` | `GET /items?topic=&state=&assignee=&requester=&topic_scope=&archived=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `assignee`/`requester` match the current assignee/requester exactly. `archived` defaults to `false` (today's behavior); `true` browses only the archive — see §4's archiving note |
+| `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?`, `archived?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=&archived=` | `query` full-text matches title+body+comments; `tag_match` is `any` (default) or `all`; `archived` same as `list_items` |
 | `claim_item` | `item_id`, `worker_id` | `POST /items/{id}/claim {"worker_id"}` | `open → claimed`. Exclusive — loser gets a tool-level error, not a crash |
 | `submit_item` | `item_id`, `worker_id` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current assignee may submit |
-| `approve_item` | `item_id` | `POST /items/{id}/approve` | `resolved → closed`, `resolution=done`. The requester's sign-off |
+| `approve_item` | `item_id`, `author?` | `POST /items/{id}/approve {"author"}` | `resolved → closed`, `resolution=done`. The requester's sign-off. `author` defaults to `"unknown"` if omitted |
+| `reject_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reject {"reason","author"}` | `resolved → claimed`. The requester sending it back for more work — **not** done yet. `reason` is required (recorded as a comment, atomically with the state change) |
+| `reopen_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reopen {"reason","author"}` | `closed → claimed`, clears `resolution` back to `null`. For a close that turns out to have been premature or mistaken. `reason` is required, same as `reject_item` |
+| `archive_item` | `item_id` | `POST /items/{id}/archive` | Hides the item from default `list_items`/`search_items` results (still fully queryable with `archived: true`). Idempotent, no data lost, works from any `state`. No `unarchive` yet |
 | `add_tags` / `remove_tags` | `item_id`, `tags[]` | `POST`/`DELETE /items/{id}/tags {"tags"}` | Idempotent both ways |
 | `list_tags` | `topic?` | `GET /tags?topic=` | **Call before tagging** to reuse existing vocabulary instead of inventing a synonym. Returns `{tag, count}[]`, most-used first |
 | `add_comment` | `item_id`, `body`, `author?` | `POST /items/{id}/comments {"author","body"}` | `author` defaults to `"unknown"` if omitted |
 | `list_comments` | `item_id` | `GET /items/{id}/comments` | Chronological, append-only |
+
+`reject_item`/`reopen_item` both send an item backward to `claimed` and both require a `reason` —
+the difference is only which edge they start from. A round trip through both looks like:
+
+```
+submit_item(item_id, worker_id)              # claimed  -> resolved
+reject_item(item_id, reason="missing the empty-topic case")
+                                              # resolved -> claimed, resolution stays null
+# … assignee does more work …
+submit_item(item_id, worker_id)              # claimed  -> resolved (again)
+approve_item(item_id)                        # resolved -> closed,  resolution = done
+
+reopen_item(item_id, reason="the fix regressed a different case")
+                                              # closed   -> claimed, resolution: done -> null
+```
+
+Neither transition adds a new `state` value — both land back on the ordinary `claimed` state, and
+*why* the item bounced lives in the comment `reason` records, not in `state` itself. See
+[ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md).
 
 `GET /items/{id}` and `GET /workers/{id}` also exist at the HTTP level (fetch one item/worker by id)
 but have no MCP tool equivalent yet — reach them directly if you're a plain HTTP client, or
@@ -124,11 +148,11 @@ way to positively confirm a worker is registered — see the read/write not-foun
 field this covers so far, and the only way to give an item a requester after creation (`requester` is
 normally set once at creation, ADR-0010/ADR-0011). Meant for backfilling items filed before a
 requester identity was available, not routine editing — there's no MCP tool for it (same admin-only
-reasoning as the three close operations below) and no way yet to edit `title`/`body`/`topic` after
+reasoning as the admin operations below) and no way yet to edit `title`/`body`/`topic` after
 creation. State-independent (works on a closed item too — it corrects metadata, not a workflow
 transition). Rejects a blank `requester` with `400`, a missing item with `404`.
 
-Three more HTTP-only admin operations close an item early, bypassing the normal
+Three more HTTP-only operations close an item early, bypassing the normal
 `claimed → resolved → closed` path — they're console/admin actions (`docket-console` exposes them as
 buttons), not worker actions, so there's no MCP tool for them. All three are assignee-agnostic and valid
 from any state except `closed` (unlike `approve`, they don't require reaching `resolved` first):
@@ -139,12 +163,35 @@ from any state except `closed` (unlike `approve`, they don't require reaching `r
 | `POST /items/{id}/merge` | `duplicate` | Consolidated into another item |
 | `POST /items/{id}/force-close` | `wontfix` | No longer relevant, closed without being done |
 
+> **`remove_item` is not `delete_item` — do not confuse the two.**
+>
+> - **`POST /items/{id}/remove`** (table above) *closes* the item: `state → closed`,
+>   `resolution → invalid`. The item, its tags, and its comments all still exist and are still
+>   queryable — this is how you mark "this should never have been filed" while keeping a
+>   permanent, traceable record of that fact.
+> - **`DELETE /items/{id}`** (`delete_item`, HTTP-only, no MCP tool, no `author`/`reason` params —
+>   there is no item left afterward to attach either to) *destroys* the item outright: the row,
+>   its tags, and its comments are all gone. Nothing is left to query. This is for a mistaken or
+>   throwaway item where no trace should remain at all — not for routine cleanup.
+>
+> If you want a record of *why* something went away, use `remove_item`. Reach for `delete_item`
+> only when you specifically want zero record to remain. Full rationale:
+> [ADR-0013](decisions/ADR-0013-item-archive-and-delete.md).
+
+Separately, `archive_item` (`POST /items/{id}/archive`, MCP tool) is not a deletion at all — it
+sets `archived_at` and hides the item from default `list_items`/`search_items` results, but the
+item, its tags, and its comments remain fully intact and reachable with `archived: true`. Archiving
+is routine, low-stakes hygiene a worker can do on its own judgment; deleting is not — see the
+[architecture.md](architecture.md#mcp-exposure-rule) MCP-exposure rule for why one is an MCP tool
+and the other isn't.
+
 An `Item` looks like:
 
 ```json
 {
   "id": "…", "topic": "iyulab/docket", "title": "…", "body": null,
   "state": "open", "resolution": null, "requester": null, "assignee": null, "turn": "assignee",
+  "open": true, "archived_at": null,
   "tags": [], "created_at": 1734000000000, "updated_at": 1734000000000
 }
 ```
@@ -157,11 +204,17 @@ the assignee side to look at it) or `claimed` (the assignee's turn to act), `"re
 [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) /
 [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md).
 
+`open` is `state != closed`, computed the same way as `turn` — never stored, so it can never drift
+out of sync with `state`. `archived_at` is `null` unless the item was archived; it's independent of
+`state` (an item in any workflow state can be archived) and only affects whether default
+`list_items`/`search_items` calls surface the item.
+
 Errors are `{"error": "<message>"}` with `404` (not found), `409` (state conflict — e.g. `"cannot
-claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`approve`/`remove`/
-`merge`/`force-close` call that loses a race or targets the wrong state always comes back `409`,
-never `500` — that's the signal to re-`list_items` and try something else rather than treat it as a
-bug.
+claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`approve`/`reject`/
+`reopen`/`remove`/`merge`/`force-close` call that loses a race or targets the wrong state always
+comes back `409`, never `500` — that's the signal to re-`list_items` and try something else rather
+than treat it as a bug. `archive_item` and `delete_item` are state-unrestricted (valid from any
+state) so this doesn't apply to either.
 
 **A *list/search* filter never 404s on a non-matching or unregistered reference — a call that
 targets one specific known resource by id does.** `list_items`/`search_items`/`list_comments`/
@@ -169,9 +222,10 @@ targets one specific known resource by id does.** `list_items`/`search_items`/`l
 `topic_scope` worker id, or `item_id`) with an empty result, the same way a database query does —
 there is no "does this reference exist" check on a filter. `GET /items/{id}` and
 `GET /workers/{id}`, and every mutate call (`create_item`/`claim_item`/`submit_item`/`approve_item`/
-`add_comment`/`add_tags`/`remove_tags`/the three admin close operations), target one specific item
-or worker by id and 404 when it doesn't exist — fetching or acting on one named thing has nothing
-sensible to do with "no such reference" other than fail. Rely on this instead of treating an empty
+`reject_item`/`reopen_item`/`archive_item`/`add_comment`/`add_tags`/`remove_tags`/`delete_item`/the
+three admin close operations), target one specific item or worker by id and 404 when it doesn't
+exist — fetching or acting on one named thing has nothing sensible to do with "no such reference"
+other than fail. Rely on this instead of treating an empty
 list as ambiguous: it always means "no matches", never "the thing you filtered by doesn't exist" —
 there's nothing else it could mean, since a filter doesn't look that up in the first place.
 `list_items(topic_scope=<id>)` in particular can't tell you whether `<id>` is a registered worker —
@@ -273,8 +327,13 @@ default; override via `.env`'s `VITE_DOCKET_CORE_URL`).
   Keep it off untrusted networks until M4.
 - **No push/streaming.** Every read is a poll (`list_items`, `docket-console`'s 5s interval,
   `docket-cc hook`'s one-shot sync on session start) — nothing notifies a worker when new work lands.
-- **No reopen.** Once an item reaches `closed` (by any of `approve`/`remove`/`merge`/`force-close`),
-  there's no API to move it back — a mistaken close is permanent.
+- **No unarchive.** `archive_item` has no inverse yet — setting `archived_at` back to `null` isn't
+  destructive, so this is a surface-area gap rather than a one-way door, and additive to fix later
+  if the need shows up. (`reopen_item` covers the analogous gap for `state` — see §4 — so this
+  limitation is about the archive axis specifically, not about closed items in general.)
+- **No cap on reject/reopen cycles.** An item can bounce between `claimed` and `resolved`/`closed`
+  indefinitely; there's no loop-detection or count limit. A repeatedly-bounced item just stays in
+  the ordinary `claimed` bucket, which existing stall-detection already covers without new logic.
 
 ## 10. Where to go deeper
 

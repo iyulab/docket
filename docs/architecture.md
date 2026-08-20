@@ -45,6 +45,11 @@ state: open | claimed | resolved | closed
 resolution: null | done | duplicate | wontfix | invalid   # only has a value when closed
 ```
 
+Two additional transitions exist alongside the forward path above, both landing back on
+`claimed`: `reject` (`resolved -> claimed`, requester-initiated, requires a reason) and `reopen`
+(`closed -> claimed`, clears `resolution`, requires a reason). Neither introduces a new `state`
+value — see [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md) for why.
+
 `resolved` marks the point where "the ball is back in the requester's court" — the worker has reported that it handled the item, and the requester confirms and closes it (same meaning as RESOLVED in Bugzilla/Jira). `resolution` is a separate field from `state`, and admin operations map onto it as follows:
 
 | Admin operation | resolution |
@@ -79,6 +84,27 @@ state it describes.
 Full decision rationale: [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) /
 [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md).
 
+`open` is computed the same way: `state != closed`. Same treatment as `turn` — never stored,
+always derived, for the same never-drift reasoning. See
+[ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md).
+
+## Archiving and deletion
+
+```
+archived_at: integer | null   # epoch millis; null unless archived
+```
+
+Independent of `state` — an item in any workflow state can be archived. `list_items`/
+`search_items` exclude archived items by default; pass `archived: true` to browse only the
+archive. No `unarchive` operation exists yet (additive if the need shows up).
+
+`delete_item` (HTTP-only, `DELETE /items/{id}`, no MCP tool) permanently removes an item and its
+tags/comments. Distinct from `remove_item`, which closes an item with `resolution = invalid` but
+keeps a permanent record — `delete_item` leaves no trace at all, and takes no `author`/`reason`
+for that reason.
+
+Full rationale: [ADR-0013](decisions/ADR-0013-item-archive-and-delete.md).
+
 ## Question
 
 Separately from items (`task`), there's a request type with no state machine that fails immediately — if there's no owner, it fails on the spot and never lands on the board. See [vision.md](vision.md) S3. Whether it lives in the core or only at layer 3 is still undecided.
@@ -99,3 +125,13 @@ What the layer split actually opens up.
 - **Human workers** (someone picking up items from a phone) → extend layer 4, core unchanged
 - **Other topic conventions** (systems that aren't repos) → add only an application convention
 - **`aims`** → an incident event becomes an item, its own agent becomes the worker. Core stays as-is
+
+## MCP-exposure rule
+
+Not every `docket-core` HTTP operation becomes a `docket-mcp` tool. An operation is exposed to
+MCP when a worker can safely call it on its own judgment — reversible, or destructive only to
+something disposable (a claim, a tag). An operation stays HTTP/console-only when it is
+irreversible against durable history, or represents an admin/human value judgment about an
+item's disposition: `remove`, `merge`, `force-close`, and `delete` all stay HTTP-only under this
+rule; `claim`/`submit`/`approve`/`reject`/`reopen`/`archive` are all MCP tools. See
+[ADR-0013](decisions/ADR-0013-item-archive-and-delete.md).
