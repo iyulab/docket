@@ -110,8 +110,22 @@ export async function submitItem(id: string, workerId: string): Promise<Item> {
   })
 }
 
+// The four closing operations record who closed the item (ADR-0012). The
+// console has no per-user identity — every write from here is a button click
+// in the single-owner admin UI — so it attributes them to a fixed `console`
+// author rather than leaving the server's `"unknown"` fallback to stand in.
+const CONSOLE_AUTHOR = 'console'
+
+function authoredPost(): RequestInit {
+  return {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ author: CONSOLE_AUTHOR }),
+  }
+}
+
 export async function approveItem(id: string): Promise<Item> {
-  return mutate<Item>(`/api/items/${id}/approve`, { method: 'POST' })
+  return mutate<Item>(`/api/items/${id}/approve`, authoredPost())
 }
 
 // Admin operations (architecture.md's admin-operation mapping) — close an
@@ -119,15 +133,15 @@ export async function approveItem(id: string): Promise<Item> {
 // valid from any non-closed state, unlike `approveItem`'s `resolved`-only
 // gate: an admin can catch a mistaken/duplicate/irrelevant item at any point.
 export async function removeItem(id: string): Promise<Item> {
-  return mutate<Item>(`/api/items/${id}/remove`, { method: 'POST' })
+  return mutate<Item>(`/api/items/${id}/remove`, authoredPost())
 }
 
 export async function mergeItem(id: string): Promise<Item> {
-  return mutate<Item>(`/api/items/${id}/merge`, { method: 'POST' })
+  return mutate<Item>(`/api/items/${id}/merge`, authoredPost())
 }
 
 export async function forceCloseItem(id: string): Promise<Item> {
-  return mutate<Item>(`/api/items/${id}/force-close`, { method: 'POST' })
+  return mutate<Item>(`/api/items/${id}/force-close`, authoredPost())
 }
 
 export async function addItemTags(id: string, tags: string[]): Promise<string[]> {

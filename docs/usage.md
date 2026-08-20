@@ -159,9 +159,13 @@ from any state except `closed` (unlike `approve`, they don't require reaching `r
 
 | HTTP | resolution | Meaning |
 |---|---|---|
-| `POST /items/{id}/remove` | `invalid` | The item was a mistake — never should have been filed |
-| `POST /items/{id}/merge` | `duplicate` | Consolidated into another item |
-| `POST /items/{id}/force-close` | `wontfix` | No longer relevant, closed without being done |
+| `POST /items/{id}/remove {"author"}` | `invalid` | The item was a mistake — never should have been filed |
+| `POST /items/{id}/merge {"author"}` | `duplicate` | Consolidated into another item |
+| `POST /items/{id}/force-close {"author"}` | `wontfix` | No longer relevant, closed without being done |
+
+All three take an optional `author`, recorded as a comment alongside the close, exactly like
+`approve_item` above — it defaults to `"unknown"` if omitted, and the request body itself may be
+omitted entirely (a bodiless `POST` is accepted and takes the same default).
 
 > **`remove_item` is not `delete_item` — do not confuse the two.**
 >
@@ -324,6 +328,8 @@ default; override via `.env`'s `VITE_DOCKET_CORE_URL`).
 ## 9. Current limitations
 
 - **No authentication.** Anyone who can reach `docket-core`'s port can read and write everything.
+  That now includes `DELETE /items/{id}`, which destroys an item, its tags, and its comments with
+  no way to get them back — unlike `reject`/`reopen`/`archive`, every one of which is recoverable.
   Keep it off untrusted networks until M4.
 - **No push/streaming.** Every read is a poll (`list_items`, `docket-console`'s 5s interval,
   `docket-cc hook`'s one-shot sync on session start) — nothing notifies a worker when new work lands.

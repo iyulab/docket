@@ -401,36 +401,49 @@ struct AuthoredRequest {
     author: String,
 }
 
+/// The four closing operations take an optional body: `author` has a serde
+/// default, but `Json<T>` alone rejects a request with no `Content-Type`
+/// header with `415` *before* serde ever runs — which broke every bodiless
+/// caller. `Option<Json<T>>` uses axum's `OptionalFromRequest` impl, which
+/// yields `None` when `Content-Type` is absent entirely (a *wrong*
+/// content-type is still a `415`), so an omitted body lands on the same
+/// `"unknown"` default an omitted `author` field would. See ADR-0012's
+/// "defaults to `"unknown"` if omitted, no hard failure".
+fn authored_by(body: Option<Json<AuthoredRequest>>) -> String {
+    body.map(|Json(req)| req.author)
+        .unwrap_or_else(default_comment_author)
+}
+
 async fn approve_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-    Json(req): Json<AuthoredRequest>,
+    body: Option<Json<AuthoredRequest>>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.approve_item(&id, &req.author)?))
+    Ok(Json(store.approve_item(&id, &authored_by(body))?))
 }
 
 async fn remove_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-    Json(req): Json<AuthoredRequest>,
+    body: Option<Json<AuthoredRequest>>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.remove_item(&id, &req.author)?))
+    Ok(Json(store.remove_item(&id, &authored_by(body))?))
 }
 
 async fn merge_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-    Json(req): Json<AuthoredRequest>,
+    body: Option<Json<AuthoredRequest>>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.merge_item(&id, &req.author)?))
+    Ok(Json(store.merge_item(&id, &authored_by(body))?))
 }
 
 async fn force_close_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-    Json(req): Json<AuthoredRequest>,
+    body: Option<Json<AuthoredRequest>>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.force_close_item(&id, &req.author)?))
+    Ok(Json(store.force_close_item(&id, &authored_by(body))?))
 }
 
 #[derive(Deserialize)]
@@ -1344,7 +1357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approve_route_without_json_body_returns_415_unsupported_media_type() {
+    async fn approve_route_without_json_body_defaults_to_unknown_author() {
         let app = test_app();
 
         // Create and setup an item: open -> claimed -> resolved
@@ -1377,8 +1390,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Send POST with completely empty body and no Content-Type header
+        // Send POST with completely empty body and no Content-Type header —
+        // exactly what a browser `fetch(url, {method: 'POST'})` sends.
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1389,9 +1404,34 @@ mod tests {
             .await
             .unwrap();
 
-        // Axum's Json extractor returns 415 Unsupported Media Type when there's
-        // no Content-Type: application/json header, even with an empty body
-        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // `Option<Json<_>>` treats an absent Content-Type as "no body given",
+        // so the approve succeeds and `author` falls back to the same
+        // "unknown" default an omitted `author` field would get (ADR-0012:
+        // "defaults to `unknown` if omitted, no hard failure").
+        assert_eq!(resp.status(), StatusCode::OK);
+        let approved = json_body(resp).await;
+        assert_eq!(approved["state"], "closed");
+        assert_eq!(approved["resolution"], "done");
+
+        // approve_item records its author as a comment — that's where the
+        // defaulted author is observable.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{id}/comments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let comments = json_body(resp).await;
+        let approve_comment = comments
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["body"] == "approved")
+            .expect("approve recorded a comment");
+        assert_eq!(approve_comment["author"], "unknown");
     }
 
     #[tokio::test]

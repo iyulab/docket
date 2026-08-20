@@ -136,14 +136,21 @@ describe('submitItem', () => {
 })
 
 describe('approveItem', () => {
-  it('POSTs with no body and returns the updated item', async () => {
+  it('POSTs a JSON author body and returns the updated item', async () => {
     const item = { id: 'i1', state: 'closed', resolution: 'done' }
     mockFetchOnce(item)
 
     const result = await approveItem('i1')
 
     expect(result).toEqual(item)
-    expect(fetch).toHaveBeenCalledWith('/api/items/i1/approve', expect.objectContaining({ method: 'POST' }))
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/items/i1/approve',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: 'console' }),
+      }),
+    )
   })
 })
 
@@ -152,7 +159,7 @@ describe.each([
   ['mergeItem', mergeItem, 'merge'],
   ['forceCloseItem', forceCloseItem, 'force-close'],
 ] as const)('%s', (_name, fn, route) => {
-  it('POSTs with no body and returns the updated item', async () => {
+  it('POSTs a JSON author body and returns the updated item', async () => {
     const item = { id: 'i1', state: 'closed' }
     mockFetchOnce(item)
 
@@ -161,7 +168,11 @@ describe.each([
     expect(result).toEqual(item)
     expect(fetch).toHaveBeenCalledWith(
       `/api/items/i1/${route}`,
-      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: 'console' }),
+      }),
     )
   })
 
