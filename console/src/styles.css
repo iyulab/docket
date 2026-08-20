@@ -142,6 +142,11 @@ body {
   color: #b95000;
 }
 
+.badge-archived {
+  background: #ebecf0;
+  color: #5e6c84;
+}
+
 .badge + .badge {
   margin-left: 0.3rem;
 }
@@ -382,6 +387,15 @@ body {
 .item-page-admin-actions button {
   color: #6b6f76;
   border-color: #e4e6ea;
+}
+
+.reason-input {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid #dfe1e6;
+  border-radius: 3px;
+  flex: 1;
+  max-width: 20rem;
 }
 
 .item-page-tags {

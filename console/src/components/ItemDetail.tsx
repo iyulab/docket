@@ -3,11 +3,14 @@ import type { Comment, Item } from '../api'
 import {
   addItemTags,
   approveItem,
+  archiveItem,
   assigneeDisplay,
   claimItem,
   fetchComments,
   forceCloseItem,
   mergeItem,
+  reopenItem,
+  rejectItem,
   removeItem,
   removeItemTags,
   submitItem,
@@ -37,6 +40,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
   const [actionPending, setActionPending] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [tagDraft, setTagDraft] = useState('')
+  const [reasonDraft, setReasonDraft] = useState('')
   // Tracks which item is currently selected so a mutation's response,
   // arriving after the user has already switched to a different item, does
   // not paint its error/pending state onto the wrong item.
@@ -51,6 +55,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     setActionError(null)
     setActionPending(false)
     setTagDraft('')
+    setReasonDraft('')
     if (!item) {
       setComments([])
       setCommentsError(false)
@@ -89,15 +94,27 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     )
   }
 
-  const runAction = async (action: () => Promise<unknown>) => {
+  const runAction = async (action: () => Promise<unknown>, onSuccess?: () => void) => {
     const issuedFor = item.id
     setActionPending(true)
     setActionError(null)
     try {
       await action()
+      // reject/reopen record their reason as a comment (ADR-0012) — refetch
+      // so it shows up without waiting for a re-selection or reload. Cheap
+      // enough to do unconditionally rather than special-case which actions
+      // write a comment.
+      fetchComments(issuedFor)
+        .then((next) => {
+          if (selectedItemIdRef.current === issuedFor) setComments(next)
+        })
+        .catch(() => {
+          if (selectedItemIdRef.current === issuedFor) setCommentsError(true)
+        })
       // Always refresh — a completed mutation should update the list even
       // if the user has since selected a different item.
       onMutated()
+      onSuccess?.()
     } catch (err) {
       if (selectedItemIdRef.current === issuedFor) {
         setActionError(err instanceof Error ? err.message : String(err))
@@ -114,6 +131,22 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     if (!tag) return
     setTagDraft('')
     void runAction(() => addItemTags(item.id, [tag]))
+  }
+
+  // `reject`/`reopen` are mutually exclusive by state (resolved vs. closed),
+  // so one reason input can serve whichever is currently valid (ADR-0012).
+  const reasonAction =
+    item.state === 'resolved'
+      ? { label: 'Reject', title: '다시 작업 필요 — resolved를 claimed로 되돌림', run: rejectItem }
+      : item.state === 'closed'
+        ? { label: 'Reopen', title: 'closed 항목을 다시 염 — open/claimed로 되돌림', run: reopenItem }
+        : null
+
+  const submitReason = () => {
+    const reason = reasonDraft.trim()
+    if (!reason || !reasonAction) return
+    setReasonDraft('')
+    void runAction(() => reasonAction.run(item.id, reason))
   }
 
   return (
@@ -133,6 +166,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
               {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
             </span>
           )}
+          {item.archived_at != null && <span className="badge badge-archived">archived</span>}
         </dd>
         {item.resolution && (
           <>
@@ -187,6 +221,32 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
           </button>
         )}
       </div>
+      {reasonAction && (
+        <div className="item-page-actions item-page-reason-action">
+          <input
+            type="text"
+            className="reason-input"
+            placeholder="사유 (필수)"
+            value={reasonDraft}
+            disabled={actionPending}
+            onChange={(e) => setReasonDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                submitReason()
+              }
+            }}
+          />
+          <button
+            type="button"
+            title={reasonAction.title}
+            disabled={actionPending || !reasonDraft.trim()}
+            onClick={submitReason}
+          >
+            {reasonAction.label}
+          </button>
+        </div>
+      )}
       {item.state !== 'closed' && (
         // Admin operations (architecture.md's admin-operation mapping) —
         // assignee-agnostic and valid from any non-closed state, unlike the
@@ -216,6 +276,26 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
             onClick={() => void runAction(() => forceCloseItem(item.id))}
           >
             Force-close
+          </button>
+        </div>
+      )}
+      {item.archived_at == null && (
+        // Orthogonal to workflow state (ADR-0013) — valid at any point, so
+        // this row is unconditional on `item.state`, unlike the two above.
+        <div className="item-page-actions item-page-lifecycle-actions">
+          <button
+            type="button"
+            title="목록/검색 기본 조회에서 제외 — 되돌리는 기능은 아직 없음"
+            disabled={actionPending}
+            onClick={() =>
+              // Archived items are excluded from the default list (ADR-0013)
+              // — onMutated()'s refresh would otherwise drop this item out
+              // from under the user, leaving a misleading "not found"
+              // placeholder. Navigate back explicitly instead.
+              void runAction(() => archiveItem(item.id), onBack)
+            }
+          >
+            Archive
           </button>
         </div>
       )}

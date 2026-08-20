@@ -17,9 +17,13 @@ export interface Item {
   assignee: string | null
   /** Derived from `state`, not stored — see ADR-0011. */
   turn: Turn | null
+  /** Derived, not stored — `state != 'closed'`. See ADR-0012. */
+  open: boolean
   tags: string[]
   created_at: number
   updated_at: number
+  /** `null` unless archived. Independent of `state`/`open`. See ADR-0013. */
+  archived_at: number | null
 }
 
 // `assignee` is only set once a worker actually claims the item — before
@@ -124,8 +128,30 @@ function authoredPost(): RequestInit {
   }
 }
 
+// `reject`/`reopen` are corrections to a decision someone already made, so —
+// unlike the four ops above — they require a non-blank `reason` alongside
+// the same fixed `author` (ADR-0012).
+function reasonedPost(reason: string): RequestInit {
+  return {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ author: CONSOLE_AUTHOR, reason }),
+  }
+}
+
 export async function approveItem(id: string): Promise<Item> {
   return mutate<Item>(`/api/items/${id}/approve`, authoredPost())
+}
+
+// resolved -> claimed, clears `resolution`. Only valid on a `resolved` item.
+export async function rejectItem(id: string, reason: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/reject`, reasonedPost(reason))
+}
+
+// closed -> open|claimed (depending on whether it was ever claimed), clears
+// `resolution`. Only valid on a `closed` item.
+export async function reopenItem(id: string, reason: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/reopen`, reasonedPost(reason))
 }
 
 // Admin operations (architecture.md's admin-operation mapping) — close an
@@ -142,6 +168,13 @@ export async function mergeItem(id: string): Promise<Item> {
 
 export async function forceCloseItem(id: string): Promise<Item> {
   return mutate<Item>(`/api/items/${id}/force-close`, authoredPost())
+}
+
+// Valid from any state, idempotent, no `author`/`reason` — orthogonal to
+// workflow position (ADR-0013). Hides the item from default list/search
+// views; there is no `unarchive`.
+export async function archiveItem(id: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/archive`, { method: 'POST' })
 }
 
 export async function addItemTags(id: string, tags: string[]): Promise<string[]> {

@@ -13,9 +13,11 @@ function makeItem(overrides: Partial<Item> = {}): Item {
     requester: null,
     assignee: null,
     turn: null,
+    open: true,
     tags: [],
     created_at: 1000,
     updated_at: 1000,
+    archived_at: null,
     ...overrides,
   }
 }

@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   addItemTags,
   approveItem,
+  archiveItem,
   claimItem,
   fetchComments,
   fetchItems,
   fetchTags,
   forceCloseItem,
   mergeItem,
+  reopenItem,
+  rejectItem,
   removeItem,
   removeItemTags,
   submitItem,
@@ -180,6 +183,46 @@ describe.each([
     mockFetchOnce({ error: `cannot ${route}: item is closed` }, false, 409)
 
     await expect(fn('i1')).rejects.toThrow(`cannot ${route}: item is closed`)
+  })
+})
+
+describe.each([
+  ['rejectItem', rejectItem, 'reject'],
+  ['reopenItem', reopenItem, 'reopen'],
+] as const)('%s', (_name, fn, route) => {
+  it('POSTs a JSON author+reason body and returns the updated item', async () => {
+    const item = { id: 'i1', state: 'claimed' }
+    mockFetchOnce(item)
+
+    const result = await fn('i1', 'not ready yet')
+
+    expect(result).toEqual(item)
+    expect(fetch).toHaveBeenCalledWith(
+      `/api/items/i1/${route}`,
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: 'console', reason: 'not ready yet' }),
+      }),
+    )
+  })
+
+  it('throws the server error message on conflict', async () => {
+    mockFetchOnce({ error: `cannot ${route}: item is open` }, false, 409)
+
+    await expect(fn('i1', 'not ready yet')).rejects.toThrow(`cannot ${route}: item is open`)
+  })
+})
+
+describe('archiveItem', () => {
+  it('POSTs with no body and returns the updated item', async () => {
+    const item = { id: 'i1', state: 'closed', archived_at: 1234 }
+    mockFetchOnce(item)
+
+    const result = await archiveItem('i1')
+
+    expect(result).toEqual(item)
+    expect(fetch).toHaveBeenCalledWith('/api/items/i1/archive', { method: 'POST' })
   })
 })
 
