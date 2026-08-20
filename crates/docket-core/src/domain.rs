@@ -102,6 +102,11 @@ pub struct Item {
     pub assignee: Option<String>,
     /// Derived, not stored — see [`Item::turn_for`].
     pub turn: Option<Turn>,
+    /// Derived, not stored — `state != Closed`. Same treatment as `turn`
+    /// (ADR-0010) and for the same reason: fully determined by `state`, so
+    /// storing it separately would be a second source of truth that could
+    /// drift. See ADR-0012.
+    pub open: bool,
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -125,6 +130,13 @@ impl Item {
             State::Resolved => Some(Turn::Requester),
             State::Closed => None,
         }
+    }
+
+    /// Whether the item is still "on the board" — the GitHub-style coarse
+    /// view over the full `state` value. `false` only for `Closed`. See
+    /// ADR-0012.
+    pub fn is_open(state: State) -> bool {
+        state != State::Closed
     }
 }
 
@@ -215,6 +227,14 @@ mod tests {
         assert_eq!(Item::turn_for(State::Claimed), Some(Turn::Assignee));
         assert_eq!(Item::turn_for(State::Resolved), Some(Turn::Requester));
         assert_eq!(Item::turn_for(State::Closed), None);
+    }
+
+    #[test]
+    fn is_open_is_true_except_when_closed() {
+        assert!(Item::is_open(State::Open));
+        assert!(Item::is_open(State::Claimed));
+        assert!(Item::is_open(State::Resolved));
+        assert!(!Item::is_open(State::Closed));
     }
 
     #[test]
