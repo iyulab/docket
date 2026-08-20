@@ -190,6 +190,16 @@ pub struct TagCount {
     pub count: i64,
 }
 
+/// One row of `list_topics` — a topic and how many non-archived items
+/// currently sit under it, so a caller can discover the topic vocabulary
+/// instead of guessing/enumerating candidate names. See
+/// [ADR-0014](../../../docs/decisions/ADR-0014-list-search-pagination-and-list-topics.md).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicCount {
+    pub topic: String,
+    pub count: i64,
+}
+
 /// A single append-only note attached to an item. No edit/delete API by
 /// design — corrections are new comments, matching the project's existing
 /// "history isn't rewritten" convention for issue drafts.

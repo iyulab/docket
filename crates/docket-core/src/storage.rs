@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::domain::{Comment, Item, Resolution, State, TagCount, TagMatch, Worker};
+use crate::domain::{Comment, Item, Resolution, State, TagCount, TagMatch, TopicCount, Worker};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -584,6 +584,23 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// The topic vocabulary, most-populated first — lets a caller discover
+    /// which topics exist instead of enumerating candidate names one at a
+    /// time (ADR-0014). Same `archived_at IS NULL` default as
+    /// `list_items`/`search_items`; unlike those, there is no `archived`
+    /// toggle here — a topic's existence in the vocabulary doesn't depend on
+    /// whether every item under it happens to be archived.
+    pub fn list_topics(&self) -> Result<Vec<TopicCount>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT topic, COUNT(*) FROM items WHERE archived_at IS NULL
+             GROUP BY topic ORDER BY COUNT(*) DESC, topic ASC",
+        )?;
+        let rows = stmt.query_map([], topic_count_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     /// A comment is always new activity (no idempotency to consider, unlike
     /// `add_tags`/`remove_tags`), so this unconditionally bumps the parent
     /// item's `updated_at` — a thread's most recent comment counts as its
@@ -659,12 +676,6 @@ impl Store {
             sql.push_str(" AND i.state = ?");
             args.push(Box::new(s.as_str().to_string()));
         }
-        // FTS5 parses its own query syntax out of the raw string, so ordinary
-        // search terms (`severity:medium`, `awaiting-release`, `@scope/name`)
-        // are syntax errors rather than searches. Wrapping the input in an
-        // FTS5 phrase literal makes the whole thing match as plain text. A
-        // blank query constrains nothing, so it is treated as absent.
-        //
         // Matches against either items_fts (title/body) or comments_fts (a
         // comment's body, joined back to its item via item_id) — a thread's
         // conversation is as searchable as its opening title/body, not just
@@ -675,7 +686,7 @@ impl Store {
                    OR i.id IN (SELECT item_id FROM item_comments WHERE rowid IN
                        (SELECT rowid FROM comments_fts WHERE comments_fts MATCH ?)))",
             );
-            let phrase = format!("\"{}\"", q.replace('"', "\"\""));
+            let phrase = fts5_match_query(q);
             args.push(Box::new(phrase.clone()));
             args.push(Box::new(phrase));
         }
@@ -722,6 +733,31 @@ impl Store {
         let items: Vec<Item> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         attach_tags(&conn, items).map_err(Into::into)
     }
+}
+
+/// Builds an FTS5 `MATCH` argument out of a raw, untrusted search string.
+///
+/// FTS5 parses its own query syntax out of the raw string, so an ordinary
+/// search term (`severity:medium`, `awaiting-release`, `@scope/name`) read
+/// literally is a syntax error, not a search — quoting each word as its own
+/// phrase literal (`"word"`) makes it match as plain text instead.
+///
+/// Quoting is done **per word**, not once around the whole query: a single
+/// phrase literal around a multi-word query (the original shape here) means
+/// "these words, adjacent, in this exact order" — which silently returns
+/// nothing for any multi-word query that isn't already an exact contiguous
+/// substring of the indexed text. Splitting on whitespace and
+/// joining the per-word phrases with FTS5's default (implicit-AND) operator
+/// asks for "all these words, anywhere" instead, which is what a search box
+/// caller actually means. A trailing `*` prefix-matches each word, so a
+/// query word also finds a token carrying a suffix `unicode61` (the default
+/// tokenizer, no CJK segmentation) doesn't split off — e.g. a Korean
+/// particle glued onto the noun the caller searched for.
+fn fts5_match_query(q: &str) -> String {
+    q.split_whitespace()
+        .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Upgrades a database created before [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md):
@@ -844,6 +880,13 @@ fn tags_for_item(conn: &Connection, item_id: &str) -> rusqlite::Result<Vec<Strin
 fn tag_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TagCount> {
     Ok(TagCount {
         tag: row.get(0)?,
+        count: row.get(1)?,
+    })
+}
+
+fn topic_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TopicCount> {
+    Ok(TopicCount {
+        topic: row.get(0)?,
         count: row.get(1)?,
     })
 }
@@ -1711,6 +1754,35 @@ mod tests {
     }
 
     #[test]
+    fn list_topics_counts_and_orders_by_frequency_then_excludes_archived() {
+        let store = open_test_store();
+        store
+            .create_item("iyulab/node-packages", "a", None, &[], None)
+            .unwrap();
+        store
+            .create_item("iyulab/node-packages", "b", None, &[], None)
+            .unwrap();
+        let c = store
+            .create_item("iyulab/router", "c", None, &[], None)
+            .unwrap();
+
+        let topics = store.list_topics().unwrap();
+        assert_eq!(topics.len(), 2);
+        assert_eq!(topics[0].topic, "iyulab/node-packages");
+        assert_eq!(topics[0].count, 2);
+        assert_eq!(topics[1].topic, "iyulab/router");
+        assert_eq!(topics[1].count, 1);
+
+        // Archiving the router topic's only item drops it out of the
+        // vocabulary count entirely — same default convention as
+        // list_items/search_items (ADR-0014).
+        store.archive_item(&c.id).unwrap();
+        let topics = store.list_topics().unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].topic, "iyulab/node-packages");
+    }
+
+    #[test]
     fn search_items_filters_by_tag_match_any_and_all() {
         let store = open_test_store();
         let both = store
@@ -1778,6 +1850,82 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].topic, "iyulab/node-packages");
+    }
+
+    /// Regression test: a query whose words appear in the title but not
+    /// contiguously in that exact order (a natural multi-word search, not
+    /// a copy-pasted phrase) used to return nothing.
+    #[test]
+    fn search_items_query_matches_words_out_of_order() {
+        let store = open_test_store();
+        store
+            .create_item(
+                "iyulab/router",
+                "generic EnumMember(Value=...) support for JsonOptions",
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+
+        let results = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("EnumMember JsonOptions"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    /// Regression test: a Korean multi-word query against a title carrying
+    /// a trailing particle on the second word (`처리량이`, not `처리량`) —
+    /// `unicode61` (the FTS5 default
+    /// tokenizer) does no CJK segmentation, so an exact-token match on
+    /// `처리량` alone would still miss it; this only passes with prefix
+    /// matching per word.
+    #[test]
+    fn search_items_query_matches_korean_words_with_a_trailing_particle() {
+        let store = open_test_store();
+        store
+            .create_item(
+                "iyulab/shell-tunnel",
+                "[shell-tunnel] 전송 처리량이 회선 대비 두 자릿수 낮게 관측됨",
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+
+        let results = store
+            .search_items(None, None, &[], TagMatch::Any, Some("전송 처리량"), None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    /// A query containing a literal `"` used to double-escape into a broken
+    /// phrase that matched nothing, regardless of the rest of the query.
+    #[test]
+    fn search_items_query_with_a_literal_quote_still_matches() {
+        let store = open_test_store();
+        store
+            .create_item("iyulab/docket", "quoted word test", None, &[], None)
+            .unwrap();
+
+        let results = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("\"quoted\" word"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]

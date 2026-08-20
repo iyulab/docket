@@ -69,6 +69,15 @@ struct ListItemsParams {
     /// items (explicit archive browse). See ADR-0013.
     #[serde(default)]
     archived: Option<bool>,
+    /// Max rows returned, applied after every other filter. Server default
+    /// 50, hard-capped at 200 — see ADR-0014. The tool result's `total`
+    /// field reports how many rows matched before this cap, so you know
+    /// whether to page with `offset`.
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Rows to skip before applying `limit`. Defaults to 0.
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -90,6 +99,15 @@ struct SearchItemsParams {
     /// items (explicit archive browse). See ADR-0013.
     #[serde(default)]
     archived: Option<bool>,
+    /// Max rows returned, applied after every other filter. Server default
+    /// 50, hard-capped at 200 — see ADR-0014. The tool result's `total`
+    /// field reports how many rows matched before this cap, so you know
+    /// whether to page with `offset`.
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Rows to skip before applying `limit`. Defaults to 0.
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -196,6 +214,12 @@ struct TagCountDto {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct TopicCountDto {
+    topic: String,
+    count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct CommentDto {
     id: String,
     item_id: String,
@@ -224,6 +248,48 @@ async fn respond<T: Serialize + for<'de> Deserialize<'de>>(
         let value: T = serde_json::from_slice(&bytes)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let block = ContentBlock::json(&value)?;
+        Ok(CallToolResult::success(vec![block]))
+    } else {
+        let message = serde_json::from_slice::<ErrorBody>(&bytes)
+            .map(|b| b.error)
+            .unwrap_or_else(|_| format!("docket-core returned {status}"));
+        Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
+    }
+}
+
+#[derive(Serialize)]
+struct PaginatedItems {
+    items: Vec<ItemDto>,
+    /// Rows matching the filters before `limit`/`offset` were applied — an
+    /// MCP tool result has no header channel (unlike the HTTP response this
+    /// is read from), so this is how a caller learns whether to page with
+    /// `offset` instead of assuming `items` is everything. See ADR-0014.
+    total: usize,
+}
+
+/// Same shape as `respond`, but for `list_items`/`search_items`: reads the
+/// `X-Total-Count` header docket-core's HTTP layer sets (ADR-0014) before
+/// consuming the body, and re-wraps the bare `ItemDto[]` as `{items,
+/// total}` — the one output shape an MCP caller can actually see.
+async fn respond_paginated(resp: reqwest::Response) -> Result<CallToolResult, McpError> {
+    let status = resp.status();
+    let total = resp
+        .headers()
+        .get("X-Total-Count")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    if status.is_success() {
+        let items: Vec<ItemDto> = serde_json::from_slice(&bytes)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Falls back to the page length rather than failing the whole call
+        // if the header is ever missing/malformed — a caller still gets a
+        // correct, if unconfirmed-total, result instead of an opaque error.
+        let total = total.unwrap_or(items.len());
+        let block = ContentBlock::json(&PaginatedItems { items, total })?;
         Ok(CallToolResult::success(vec![block]))
     } else {
         let message = serde_json::from_slice::<ErrorBody>(&bytes)
@@ -273,6 +339,8 @@ impl DocketMcp {
         Parameters(p): Parameters<ListItemsParams>,
     ) -> Result<CallToolResult, McpError> {
         let archived = p.archived.map(|a| a.to_string());
+        let limit = p.limit.map(|l| l.to_string());
+        let offset = p.offset.map(|o| o.to_string());
         let resp = self
             .http
             .get(format!("{}/items", self.base_url))
@@ -283,11 +351,13 @@ impl DocketMcp {
                 ("requester", p.requester.as_deref()),
                 ("topic_scope", p.topic_scope.as_deref()),
                 ("archived", archived.as_deref()),
+                ("limit", limit.as_deref()),
+                ("offset", offset.as_deref()),
             ])
             .send()
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        respond::<Vec<ItemDto>>(resp).await
+        respond_paginated(resp).await
     }
 
     #[tool(
@@ -317,6 +387,14 @@ impl DocketMcp {
         if let Some(a) = archived.as_deref() {
             query_pairs.push(("archived", a));
         }
+        let limit = p.limit.map(|l| l.to_string());
+        if let Some(l) = limit.as_deref() {
+            query_pairs.push(("limit", l));
+        }
+        let offset = p.offset.map(|o| o.to_string());
+        if let Some(o) = offset.as_deref() {
+            query_pairs.push(("offset", o));
+        }
         let resp = self
             .http
             .get(format!("{}/items", self.base_url))
@@ -324,7 +402,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        respond::<Vec<ItemDto>>(resp).await
+        respond_paginated(resp).await
     }
 
     #[tool(
@@ -495,6 +573,19 @@ impl DocketMcp {
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         respond::<Vec<TagCountDto>>(resp).await
+    }
+
+    #[tool(
+        description = "List existing topics and how many non-archived items sit under each, most-populated first — call this before list_items/search_items to discover topic names instead of guessing"
+    )]
+    async fn list_topics(&self) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .get(format!("{}/topics", self.base_url))
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<Vec<TopicCountDto>>(resp).await
     }
 
     #[tool(
@@ -686,12 +777,15 @@ mod tests {
                 requester: None,
                 topic_scope: Some("w1".to_string()),
                 archived: None,
+                limit: None,
+                offset: None,
             }))
             .await
             .unwrap();
         assert_ne!(listed.is_error, Some(true));
         let listed_value: serde_json::Value = serde_json::from_str(text_of(&listed)).unwrap();
-        assert_eq!(listed_value.as_array().unwrap().len(), 1);
+        assert_eq!(listed_value["total"], 1);
+        assert_eq!(listed_value["items"].as_array().unwrap().len(), 1);
 
         let claimed = server
             .claim_item(Parameters(ClaimOrSubmitParams {
@@ -966,11 +1060,14 @@ mod tests {
                 topic: None,
                 state: None,
                 archived: None,
+                limit: None,
+                offset: None,
             }))
             .await
             .unwrap();
         let found_value: serde_json::Value = serde_json::from_str(text_of(&found)).unwrap();
-        assert_eq!(found_value.as_array().unwrap().len(), 1);
+        assert_eq!(found_value["total"], 1);
+        assert_eq!(found_value["items"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1057,11 +1154,13 @@ mod tests {
                 requester: None,
                 topic_scope: None,
                 archived: None,
+                limit: None,
+                offset: None,
             }))
             .await
             .unwrap();
         assert!(
-            !json_value(&default_list)
+            !json_value(&default_list)["items"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -1076,15 +1175,98 @@ mod tests {
                 requester: None,
                 topic_scope: None,
                 archived: Some(true),
+                limit: None,
+                offset: None,
             }))
             .await
             .unwrap();
         assert!(
-            json_value(&archive_view)
+            json_value(&archive_view)["items"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["id"] == item_id)
         );
+    }
+
+    #[tokio::test]
+    async fn list_topics_returns_counts_by_topic() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-topics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("topics.db");
+        let core = spawn_core(18427, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        for _ in 0..2 {
+            server
+                .create_item(Parameters(CreateItemParams {
+                    topic: "iyulab/docket".to_string(),
+                    title: "t".to_string(),
+                    body: None,
+                    tags: vec![],
+                    requester: None,
+                }))
+                .await
+                .unwrap();
+        }
+
+        let topics = server.list_topics().await.unwrap();
+        assert_ne!(topics.is_error, Some(true));
+        let topics_value = json_value(&topics);
+        let list = topics_value.as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["topic"], "iyulab/docket");
+        assert_eq!(list[0]["count"], 2);
+    }
+
+    /// A caller can page through a filtered result and trust `total`
+    /// against the unpaged count — the regression this guards is
+    /// `limit`/`offset` being dropped somewhere between the MCP params and
+    /// the HTTP query string.
+    #[tokio::test]
+    async fn list_items_limit_and_offset_are_forwarded_and_total_reflects_the_unpaged_count() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-paging-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("paging.db");
+        let core = spawn_core(18428, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        for i in 0..5 {
+            server
+                .create_item(Parameters(CreateItemParams {
+                    topic: "iyulab/docket".to_string(),
+                    title: format!("item-{i}"),
+                    body: None,
+                    tags: vec![],
+                    requester: None,
+                }))
+                .await
+                .unwrap();
+        }
+
+        let page = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                archived: None,
+                limit: Some(2),
+                offset: Some(1),
+            }))
+            .await
+            .unwrap();
+        let page_value = json_value(&page);
+        assert_eq!(page_value["total"], 5);
+        assert_eq!(page_value["items"].as_array().unwrap().len(), 2);
     }
 }

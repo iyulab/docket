@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use axum::Extension;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -74,6 +74,7 @@ fn api_routes() -> Router<Arc<Store>> {
         )
         .route("/items/{id}/comments", post(add_comment).get(list_comments))
         .route("/tags", get(list_tags))
+        .route("/topics", get(list_topics))
         .fallback(api_not_found)
 }
 
@@ -281,7 +282,23 @@ struct ListItemsQuery {
     tag: Vec<String>,
     #[serde(default)]
     tag_match: Option<String>,
+    /// Max rows returned, applied after every filter above. Defaults to
+    /// `DEFAULT_LIST_LIMIT`, clamped to `[1, MAX_LIST_LIMIT]` regardless of
+    /// what the caller passes — see ADR-0014.
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Rows to skip before applying `limit`. Defaults to 0.
+    #[serde(default)]
+    offset: Option<usize>,
 }
+
+/// See ADR-0014: keeps a single-topic or unfiltered query well under the
+/// MCP tool-output token cap that motivated this without a caller having to
+/// know to ask for a bound.
+const DEFAULT_LIST_LIMIT: usize = 50;
+/// However large a caller's explicit `limit` is, the response still can't
+/// reproduce the original unbounded-response failure by accident.
+const MAX_LIST_LIMIT: usize = 200;
 
 /// Uses `axum_extra`'s `Query` rather than `axum::extract::Query`: only the
 /// former decodes repeated keys (`?tag=a&tag=b`) into a `Vec`, which the
@@ -289,7 +306,12 @@ struct ListItemsQuery {
 async fn list_items(
     State(store): State<Arc<Store>>,
     ExtraQuery(q): ExtraQuery<ListItemsQuery>,
-) -> Result<Json<Vec<Item>>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let offset = q.offset.unwrap_or(0);
     let state = q.state.as_deref().and_then(ItemState::parse);
     let items = if q.q.is_some() || !q.tag.is_empty() {
         let tag_match = q
@@ -338,14 +360,24 @@ async fn list_items(
             .collect(),
         None => items,
     };
-    let items = match q.requester {
+    let items: Vec<Item> = match q.requester {
         Some(requester) => items
             .into_iter()
             .filter(|item| item.requester.as_deref() == Some(requester.as_str()))
             .collect(),
         None => items,
     };
-    Ok(Json(items))
+    // Applied last, after every filter above — a SQL-level LIMIT would be
+    // computed against the pre-filter row set and could under-fill or empty
+    // a page even when more matching rows exist (ADR-0014).
+    let total = items.len();
+    let items: Vec<Item> = items.into_iter().skip(offset).take(limit).collect();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "X-Total-Count",
+        HeaderValue::from_str(&total.to_string()).expect("a decimal count is always ASCII"),
+    );
+    Ok((headers, Json(items)))
 }
 
 async fn get_item(
@@ -515,6 +547,12 @@ async fn list_tags(
     Query(q): Query<ListTagsQuery>,
 ) -> Result<Json<Vec<docket_core::domain::TagCount>>, ApiError> {
     Ok(Json(store.list_tags(q.topic.as_deref())?))
+}
+
+async fn list_topics(
+    State(store): State<Arc<Store>>,
+) -> Result<Json<Vec<docket_core::domain::TopicCount>>, ApiError> {
+    Ok(Json(store.list_topics()?))
 }
 
 #[derive(Deserialize)]
@@ -1611,6 +1649,137 @@ mod tests {
         let tags = json_body(resp).await;
         assert_eq!(tags[0]["tag"], "blocked");
         assert_eq!(tags[0]["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn list_topics_route_counts_and_orders_by_frequency() {
+        let app = test_app();
+        for topic in ["iyulab/docket", "iyulab/docket", "iyulab/router"] {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": topic, "title": "t"}),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/topics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let topics = json_body(resp).await;
+        assert_eq!(topics[0]["topic"], "iyulab/docket");
+        assert_eq!(topics[0]["count"], 2);
+        assert_eq!(topics[1]["topic"], "iyulab/router");
+        assert_eq!(topics[1]["count"], 1);
+    }
+
+    /// ADR-0014: a caller that asks for nothing gets `DEFAULT_LIST_LIMIT`
+    /// rows, not an unbounded response — and can still discover the true
+    /// total via the `X-Total-Count` header.
+    #[tokio::test]
+    async fn list_items_defaults_to_a_bounded_page_with_a_total_count_header() {
+        let app = test_app();
+        for i in 0..(DEFAULT_LIST_LIMIT + 5) {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": "iyulab/docket", "title": format!("item-{i}")}),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let total_header = resp
+            .headers()
+            .get("X-Total-Count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok());
+        assert_eq!(total_header, Some(DEFAULT_LIST_LIMIT + 5));
+        let items = json_body(resp).await;
+        assert_eq!(items.as_array().unwrap().len(), DEFAULT_LIST_LIMIT);
+    }
+
+    /// `limit`/`offset` apply after every other filter (topic/state/tag/
+    /// assignee/requester/topic_scope) — this exercises that combination,
+    /// not just the bare unfiltered case above.
+    #[tokio::test]
+    async fn list_items_limit_and_offset_page_through_a_filtered_result() {
+        let app = test_app();
+        for i in 0..5 {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": "iyulab/docket", "title": format!("item-{i}")}),
+                ))
+                .await
+                .unwrap();
+        }
+        // A different topic must not count toward the paged total.
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/router", "title": "elsewhere"}),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket&limit=2&offset=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let total_header = resp
+            .headers()
+            .get("X-Total-Count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok());
+        assert_eq!(total_header, Some(5));
+        let items = json_body(resp).await;
+        assert_eq!(items.as_array().unwrap().len(), 2);
+
+        // An explicit limit past the cap is clamped, not honored verbatim.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/items?topic=iyulab/docket&limit={}",
+                        MAX_LIST_LIMIT + 50
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let items = json_body(resp).await;
+        assert_eq!(items.as_array().unwrap().len(), 5);
     }
 
     /// A read filter never errors on a non-matching or unregistered

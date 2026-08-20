@@ -50,20 +50,20 @@ describe('fetchComments', () => {
 })
 
 describe('fetchItems', () => {
-  it('fetches without a query param when called with no argument', async () => {
+  it('always sends the server-cap limit, with no q param when called with no argument', async () => {
     mockFetchOnce([])
 
     await fetchItems()
 
-    expect(fetch).toHaveBeenCalledWith('/api/items')
+    expect(fetch).toHaveBeenCalledWith('/api/items?limit=200')
   })
 
-  it('fetches without a query param when the query is whitespace-only', async () => {
+  it('omits q when the query is whitespace-only', async () => {
     mockFetchOnce([])
 
     await fetchItems('   ')
 
-    expect(fetch).toHaveBeenCalledWith('/api/items')
+    expect(fetch).toHaveBeenCalledWith('/api/items?limit=200')
   })
 
   it('appends an encoded q param when a query is given', async () => {
@@ -71,7 +71,7 @@ describe('fetchItems', () => {
 
     await fetchItems('race in claim_item')
 
-    expect(fetch).toHaveBeenCalledWith('/api/items?q=race%20in%20claim_item')
+    expect(fetch).toHaveBeenCalledWith('/api/items?limit=200&q=race+in+claim_item')
   })
 
   it('throws when the request fails', async () => {

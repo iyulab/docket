@@ -51,9 +51,19 @@ export interface TagCount {
   count: number
 }
 
+// `docket-core` now defaults `/items` to a bounded page (ADR-0014) instead
+// of the previously-unbounded response this poll relied on — the console
+// still has no pagination UI of its own (visibleItems filters client-side
+// over the full fetched set), so it asks for the server's hard cap instead
+// of the default, to avoid silently truncating the board. Keep this in sync
+// with `MAX_LIST_LIMIT` in `crates/docket-core/src/main.rs` if that changes.
+const FETCH_ITEMS_LIMIT = 200
+
 export async function fetchItems(query?: string): Promise<Item[]> {
   const trimmed = query?.trim()
-  const url = trimmed ? `/api/items?q=${encodeURIComponent(trimmed)}` : '/api/items'
+  const params = new URLSearchParams({ limit: String(FETCH_ITEMS_LIMIT) })
+  if (trimmed) params.set('q', trimmed)
+  const url = `/api/items?${params.toString()}`
   const res = await fetch(url)
   if (!res.ok) {
     throw new Error(`GET /api/items failed: ${res.status}`)
