@@ -68,7 +68,6 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_items_topic ON items(topic);
             CREATE INDEX IF NOT EXISTS idx_items_state ON items(state);
-            CREATE INDEX IF NOT EXISTS idx_items_archived_at ON items(archived_at);
             CREATE TABLE IF NOT EXISTS item_tags (
                 item_id TEXT NOT NULL REFERENCES items(id),
                 tag     TEXT NOT NULL,
@@ -108,6 +107,16 @@ impl Store {
         )?;
         migrate_owner_to_requester_assignee(&conn)?;
         migrate_add_archived_at(&conn)?;
+        // Must run after migrate_add_archived_at: on a database that
+        // predates archived_at, the CREATE TABLE IF NOT EXISTS above is a
+        // no-op (the table already exists), so the column doesn't exist
+        // until the migration adds it. Indexing it any earlier would fail
+        // with "no such column: archived_at" on exactly the legacy
+        // databases this migration exists to upgrade.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_archived_at ON items(archived_at)",
+            [],
+        )?;
         // Resyncs the external-content index against `items` on every open:
         // rows written before this virtual table existed are never covered by
         // the AFTER INSERT trigger, and an un-indexed row makes the AFTER
@@ -285,34 +294,45 @@ impl Store {
     }
 
     /// Lists items, most recently updated first, optionally filtered by
-    /// topic (exact match — prefix matching is a worker-side concern, see
-    /// [`crate::domain::topic_matches`]) and/or state.
-    pub fn list_items(&self, topic: Option<&str>, state: Option<State>) -> Result<Vec<Item>> {
+    /// topic (exact match), state, and archived status. `archived: None`
+    /// or `Some(false)` excludes archived items (today's default
+    /// behavior, unaffected by this parameter's addition); `Some(true)`
+    /// returns *only* archived items — the explicit archive-only browse
+    /// ADR-0013 sets out. See [`crate::domain::topic_matches`] for prefix
+    /// matching, a worker-side concern this method doesn't do.
+    pub fn list_items(
+        &self,
+        topic: Option<&str>,
+        state: Option<State>,
+        archived: Option<bool>,
+    ) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
-            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at FROM items WHERE 1=1",
+            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at FROM items WHERE 1=1",
         );
-        if topic.is_some() {
-            sql.push_str(" AND topic = ?1");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(t) = topic {
+            sql.push_str(" AND topic = ?");
+            args.push(Box::new(t.to_string()));
         }
-        if state.is_some() {
-            sql.push_str(if topic.is_some() {
-                " AND state = ?2"
-            } else {
-                " AND state = ?1"
-            });
+        if let Some(s) = state {
+            sql.push_str(" AND state = ?");
+            args.push(Box::new(s.as_str().to_string()));
+        }
+        if archived.unwrap_or(false) {
+            sql.push_str(" AND archived_at IS NOT NULL");
+        } else {
+            sql.push_str(" AND archived_at IS NULL");
         }
         sql.push_str(" ORDER BY updated_at DESC");
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = match (topic, state) {
-            (Some(t), Some(s)) => {
-                stmt.query_map(params![t, s.as_str()], item_from_row_without_tags)?
-            }
-            (Some(t), None) => stmt.query_map(params![t], item_from_row_without_tags)?,
-            (None, Some(s)) => stmt.query_map(params![s.as_str()], item_from_row_without_tags)?,
-            (None, None) => stmt.query_map(params![], item_from_row_without_tags)?,
-        };
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(param_refs),
+            item_from_row_without_tags,
+        )?;
         let items: Vec<Item> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         attach_tags(&conn, items).map_err(Into::into)
     }
@@ -608,10 +628,11 @@ impl Store {
         tags: &[String],
         tag_match: TagMatch,
         query: Option<&str>,
+        archived: Option<bool>,
     ) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
-            "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.requester, i.assignee, i.created_at, i.updated_at
+            "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.requester, i.assignee, i.created_at, i.updated_at, i.archived_at
              FROM items i WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -670,6 +691,11 @@ impl Store {
             for tag in tags {
                 args.push(Box::new(tag.clone()));
             }
+        }
+        if archived.unwrap_or(false) {
+            sql.push_str(" AND i.archived_at IS NOT NULL");
+        } else {
+            sql.push_str(" AND i.archived_at IS NULL");
         }
         sql.push_str(" ORDER BY i.updated_at DESC");
 
@@ -747,7 +773,7 @@ fn require_item(conn: &Connection, item_id: &str) -> Result<()> {
 fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
     let item = conn
         .query_row(
-            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at
+            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at
              FROM items WHERE id = ?1",
             params![id],
             item_from_row_without_tags,
@@ -1208,7 +1234,7 @@ mod tests {
         let store = Store::open(db_path.to_str().unwrap()).unwrap();
 
         let found = store
-            .search_items(None, None, &[], TagMatch::Any, Some("hydration"))
+            .search_items(None, None, &[], TagMatch::Any, Some("hydration"), None)
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "legacy-1");
@@ -1419,7 +1445,9 @@ mod tests {
                 None,
             )
             .unwrap();
-        store.add_comment(&item.id, "author-1", "a comment").unwrap();
+        store
+            .add_comment(&item.id, "author-1", "a comment")
+            .unwrap();
 
         store.delete_item(&item.id).unwrap();
 
@@ -1660,6 +1688,7 @@ mod tests {
                 &["a".to_string(), "b".to_string()],
                 TagMatch::Any,
                 None,
+                None,
             )
             .unwrap();
         let mut any_ids: Vec<_> = any_match.iter().map(|i| i.id.clone()).collect();
@@ -1674,6 +1703,7 @@ mod tests {
                 None,
                 &["a".to_string(), "b".to_string()],
                 TagMatch::All,
+                None,
                 None,
             )
             .unwrap();
@@ -1698,10 +1728,31 @@ mod tests {
                 &[],
                 TagMatch::Any,
                 Some("form"),
+                None,
             )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].topic, "iyulab/node-packages");
+    }
+
+    #[test]
+    fn list_items_excludes_archived_by_default() {
+        let store = open_test_store();
+        let visible = store
+            .create_item("iyulab/docket", "visible", None, &[], None)
+            .unwrap();
+        let hidden = store
+            .create_item("iyulab/docket", "hidden", None, &[], None)
+            .unwrap();
+        store.archive_item(&hidden.id).unwrap();
+
+        let default_view = store.list_items(None, None, None).unwrap();
+        assert!(default_view.iter().any(|i| i.id == visible.id));
+        assert!(!default_view.iter().any(|i| i.id == hidden.id));
+
+        let archive_only = store.list_items(None, None, Some(true)).unwrap();
+        assert!(!archive_only.iter().any(|i| i.id == visible.id));
+        assert!(archive_only.iter().any(|i| i.id == hidden.id));
     }
 
     #[test]
@@ -1775,7 +1826,14 @@ mod tests {
             .unwrap();
 
         let results = store
-            .search_items(None, None, &[], TagMatch::Any, Some("race in claim_item"))
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("race in claim_item"),
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, matching.id);
@@ -1835,7 +1893,14 @@ mod tests {
         let store = Store::open(db_path.to_str().unwrap()).unwrap();
 
         let found = store
-            .search_items(None, None, &[], TagMatch::Any, Some("race in claim_item"))
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("race in claim_item"),
+                None,
+            )
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "legacy-1");
@@ -1846,7 +1911,14 @@ mod tests {
             .add_comment("legacy-1", "requester", "thanks for the fix")
             .unwrap();
         let found2 = store
-            .search_items(None, None, &[], TagMatch::Any, Some("thanks for the fix"))
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("thanks for the fix"),
+                None,
+            )
             .unwrap();
         assert_eq!(found2.len(), 1);
 
