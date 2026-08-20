@@ -51,6 +51,11 @@ export interface TagCount {
   count: number
 }
 
+export interface TopicCount {
+  topic: string
+  count: number
+}
+
 // `docket-core` now defaults `/items` to a bounded page (ADR-0014) instead
 // of the previously-unbounded response this poll relied on — the console
 // still has no pagination UI of its own (visibleItems filters client-side
@@ -90,6 +95,14 @@ export async function fetchTags(): Promise<TagCount[]> {
     throw new Error(`GET /api/tags failed: ${res.status}`)
   }
   return res.json() as Promise<TagCount[]>
+}
+
+export async function fetchTopics(): Promise<TopicCount[]> {
+  const res = await fetch('/api/topics')
+  if (!res.ok) {
+    throw new Error(`GET /api/topics failed: ${res.status}`)
+  }
+  return res.json() as Promise<TopicCount[]>
 }
 
 // docket-core reports a conflict (e.g. "cannot claim: item is claimed") as

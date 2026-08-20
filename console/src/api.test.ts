@@ -7,6 +7,7 @@ import {
   fetchComments,
   fetchItems,
   fetchTags,
+  fetchTopics,
   forceCloseItem,
   mergeItem,
   reopenItem,
@@ -319,5 +320,23 @@ describe('fetchTags', () => {
     mockFetchOnce({}, false, 500)
 
     await expect(fetchTags()).rejects.toThrow('GET /api/tags failed: 500')
+  })
+})
+
+describe('fetchTopics', () => {
+  it('returns the topic vocabulary on success', async () => {
+    const topics = [{ topic: 'iyulab/docket', count: 5 }]
+    mockFetchOnce(topics)
+
+    const result = await fetchTopics()
+
+    expect(result).toEqual(topics)
+    expect(fetch).toHaveBeenCalledWith('/api/topics')
+  })
+
+  it('throws when the request fails', async () => {
+    mockFetchOnce({}, false, 500)
+
+    await expect(fetchTopics()).rejects.toThrow('GET /api/topics failed: 500')
   })
 })

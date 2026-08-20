@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ItemState } from './api'
-import { fetchTags } from './api'
+import { fetchTags, fetchTopics } from './api'
 import { useItems } from './useItems'
 import { useUrlState } from './useUrlState'
 import { deriveTopics, matchesFilters, sortItems } from './filters'
@@ -95,6 +95,7 @@ export default function App() {
   )
   const { items, connected, loading, refresh } = useItems(query, archived)
   const [availableTags, setAvailableTags] = useState<string[]>([])
+  const [serverTopics, setServerTopics] = useState<string[]>([])
 
   // A tag mutation (add_tags with a brand-new tag) can introduce a value
   // this list doesn't have yet — re-load whenever an item mutation
@@ -106,9 +107,24 @@ export default function App() {
       .catch(() => setAvailableTags([]))
   }, [])
 
+  // `list_topics` (ADR-0014) counts every non-archived item's `topic`
+  // regardless of the console's own `limit`/`offset` page — a topic whose
+  // items all fall outside the currently-fetched page would otherwise be
+  // invisible to `deriveTopics(items)` below. Merged with, not swapped for,
+  // the item-derived set: `deriveTopics` also surfaces `requester` and
+  // `found-in:`-tagged identities (relationOf's "from" side, see
+  // filters.ts), which aren't `item.topic` values and `list_topics` has no
+  // way to know about.
+  const loadTopics = useCallback(() => {
+    fetchTopics()
+      .then((topics) => setServerTopics(topics.map((t) => t.topic)))
+      .catch(() => setServerTopics([]))
+  }, [])
+
   useEffect(() => {
     loadTags()
-  }, [loadTags])
+    loadTopics()
+  }, [loadTags, loadTopics])
 
   const [perspectiveTopic, setPerspectiveTopic] = useUrlState<string | null>(
     'topic',
@@ -131,7 +147,10 @@ export default function App() {
   )
   const [view, setView] = useUrlState<'list' | 'board'>('view', parseView, serializeView)
 
-  const topics = useMemo(() => deriveTopics(items), [items])
+  const topics = useMemo(
+    () => [...new Set([...serverTopics, ...deriveTopics(items)])].sort(),
+    [serverTopics, items],
+  )
 
   const filters = useMemo(
     () => ({ states, tags, perspectiveTopic, relation }),
@@ -166,6 +185,7 @@ export default function App() {
           onMutated={() => {
             refresh()
             loadTags()
+            loadTopics()
           }}
         />
       ) : (
