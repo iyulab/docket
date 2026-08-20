@@ -1,4 +1,5 @@
 import type { Item, Resolution } from '../api'
+import { formatRelativeTime } from '../time'
 
 const RESOLUTION_LABEL: Record<Resolution, string> = {
   done: 'done',
@@ -22,6 +23,7 @@ export function Card({ item, selected, onSelect }: CardProps) {
       <div className="card-title">{item.title}</div>
       <div className="card-topic">{item.topic}</div>
       <div className="card-id">{item.id.slice(0, 8)}</div>
+      <div className="card-updated">{formatRelativeTime(item.updated_at)}</div>
       {item.turn && (
         <span className={`badge badge-turn-${item.turn}`}>
           {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
