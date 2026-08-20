@@ -63,10 +63,12 @@ impl Store {
                 requester TEXT,
                 assignee TEXT,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                archived_at INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_items_topic ON items(topic);
             CREATE INDEX IF NOT EXISTS idx_items_state ON items(state);
+            CREATE INDEX IF NOT EXISTS idx_items_archived_at ON items(archived_at);
             CREATE TABLE IF NOT EXISTS item_tags (
                 item_id TEXT NOT NULL REFERENCES items(id),
                 tag     TEXT NOT NULL,
@@ -99,9 +101,13 @@ impl Store {
             );
             CREATE TRIGGER IF NOT EXISTS comments_fts_ai AFTER INSERT ON item_comments BEGIN
                 INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
+            END;
+            CREATE TRIGGER IF NOT EXISTS comments_fts_ad AFTER DELETE ON item_comments BEGIN
+                INSERT INTO comments_fts(comments_fts, rowid, body) VALUES('delete', old.rowid, old.body);
             END;",
         )?;
         migrate_owner_to_requester_assignee(&conn)?;
+        migrate_add_archived_at(&conn)?;
         // Resyncs the external-content index against `items` on every open:
         // rows written before this virtual table existed are never covered by
         // the AFTER INSERT trigger, and an un-indexed row makes the AFTER
@@ -190,6 +196,7 @@ impl Store {
             tags: tags.to_vec(),
             created_at: now,
             updated_at: now,
+            archived_at: None,
         })
     }
 
@@ -660,6 +667,21 @@ fn migrate_owner_to_requester_assignee(conn: &Connection) -> rusqlite::Result<()
     Ok(())
 }
 
+/// Upgrades a database created before [ADR-0013](../../../docs/decisions/ADR-0013-item-archive-and-delete.md):
+/// adds the nullable `items.archived_at` column. `CREATE TABLE IF NOT EXISTS` above already
+/// gives a fresh database this column directly, so this only fires for a database that
+/// predates it — checked via `pragma_table_info`, same pattern as
+/// `migrate_owner_to_requester_assignee`. Idempotent.
+fn migrate_add_archived_at(conn: &Connection) -> rusqlite::Result<()> {
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'archived_at'")?
+        .exists([])?;
+    if !has_column {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN archived_at INTEGER;")?;
+    }
+    Ok(())
+}
+
 fn existing_state_conflict(conn: &Connection, id: &str, op: &str) -> Result<StoreError> {
     match row_to_item(conn, id)? {
         Some(item) => Ok(StoreError::Conflict(format!(
@@ -702,7 +724,7 @@ fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
 /// Reads every non-tag column. Safe to use inside `query_map` closures
 /// because it never re-borrows `conn`. Expects the column order every SQL
 /// string in this module uses: `id, topic, title, body, state, resolution,
-/// requester, assignee, created_at, updated_at`.
+/// requester, assignee, created_at, updated_at, archived_at`.
 fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
     let state_str: String = row.get(4)?;
     let resolution_str: Option<String> = row.get(5)?;
@@ -721,6 +743,7 @@ fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
         tags: Vec::new(),
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        archived_at: row.get(10)?,
     })
 }
 
@@ -1208,6 +1231,26 @@ mod tests {
         Store::open(db_path.to_str().unwrap()).unwrap();
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_database_has_archived_at_column() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        assert_eq!(item.archived_at, None);
+    }
+
+    #[test]
+    fn migrate_add_archived_at_is_idempotent_on_a_fresh_database() {
+        // Calling the migration a second time against an already-migrated
+        // (or freshly created) database must not error.
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch("CREATE TABLE items (id TEXT PRIMARY KEY, archived_at INTEGER);")
+            .unwrap();
+        migrate_add_archived_at(&conn).unwrap();
+        migrate_add_archived_at(&conn).unwrap();
     }
 
     #[test]

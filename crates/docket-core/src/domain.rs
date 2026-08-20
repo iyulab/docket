@@ -110,6 +110,9 @@ pub struct Item {
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// `None` unless archived. Independent of `state`/`open` — an
+    /// archived item can be any workflow state. See ADR-0013.
+    pub archived_at: Option<i64>,
 }
 
 impl Item {
