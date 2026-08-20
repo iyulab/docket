@@ -158,3 +158,27 @@ convenient as a filter"), revisit the rejected `rejected`/`reopened`-state optio
 above. If reject/reopen loops turn out to need a cap or an automatic stall policy,
 that is scoped to the project's existing stall-detection work, not a re-open of this
 ADR.
+
+## 2026-08-20 update — `reopen` lands on `open`, not `claimed`, for a never-claimed item
+
+The `closed --reopen--> claimed` edge above has not held up for every closed item and is
+corrected here rather than silently edited:
+
+- **A never-claimed item has no assignee to be sent back to.** The three admin close operations
+  are valid from *any* pre-closed state, including `open` — so an item can reach `closed` with
+  `assignee` still null, which is exactly the "closed by mistake before anyone worked it"
+  scenario in this ADR's own Context. Reopening one of those to `claimed` produced an item in
+  `state=claimed, assignee=null`: a position no operation could leave, since `claim` requires
+  `open`, `submit` requires a matching `assignee`, and `reject` requires `resolved`. The only
+  ways out were closing or deleting it again — the same dead end this ADR was written to remove,
+  relocated one state over.
+- **`reopen` now targets `open` when `assignee` is null, `claimed` otherwise.** Both map to
+  `Turn::Assignee` via `turn_for` (`open` since
+  [ADR-0010](ADR-0010-item-from-to-turn.md)'s 2026-08-18 update), so this changes which
+  re-enterable `state` value the item lands on, not whose turn it is. `resolution` still clears
+  to null either way, and `reason` is still required.
+- No wire or schema change — no new `state` or `resolution` value, no migration, and no change
+  to the `resolved --reject--> claimed` edge, whose item always has an assignee by construction.
+
+Found during the final review of the implementing branch, before merge — the transition was
+never released in its original form.

@@ -403,12 +403,19 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
-    /// Atomically transitions `closed -> claimed`, clearing `resolution`
-    /// back to `NULL` (the "closed" reason no longer applies once state
-    /// leaves `closed` — see `architecture.md`'s note that `resolution`
-    /// only means something while `state == closed`). `assignee` is
-    /// unchanged. `reason` is required, recorded as an atomic comment, same
-    /// pattern as `reject_item`. See ADR-0012.
+    /// Atomically leaves `closed`, clearing `resolution` back to `NULL` (the
+    /// "closed" reason no longer applies once state leaves `closed` — see
+    /// `architecture.md`'s note that `resolution` only means something while
+    /// `state == closed`). `assignee` is unchanged, and it decides the target
+    /// state: `closed -> claimed` for an item that has one, `closed -> open`
+    /// for one that never got claimed (closed straight from `open` by
+    /// `remove`/`merge`/`force-close`). Landing the latter on `claimed` would
+    /// strand it — `claimed` with a `NULL` assignee is a state nothing can
+    /// leave, since `claim_item` needs `open`, `submit_item` needs a matching
+    /// `assignee`, and `reject_item` needs `resolved`. Both targets are the
+    /// assignee's turn per `turn_for`, so this picks a re-enterable state
+    /// value without changing turn semantics. `reason` is required, recorded
+    /// as an atomic comment, same pattern as `reject_item`. See ADR-0012.
     pub fn reopen_item(&self, id: &str, author: &str, reason: &str) -> Result<Item> {
         let reason = reason.trim();
         if reason.is_empty() {
@@ -419,7 +426,11 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let now = now_millis();
         let affected = conn.execute(
-            "UPDATE items SET state = 'claimed', resolution = NULL, updated_at = ?1 WHERE id = ?2 AND state = 'closed'",
+            "UPDATE items SET
+                 state = CASE WHEN assignee IS NULL THEN 'open' ELSE 'claimed' END,
+                 resolution = NULL,
+                 updated_at = ?1
+             WHERE id = ?2 AND state = 'closed'",
             params![now, id],
         )?;
         if affected == 0 {
@@ -974,6 +985,37 @@ mod tests {
         // one from approve_item's author record, one from reopen_item's reason
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[1].body, "regression found, not actually fixed");
+    }
+
+    /// An item closed straight from `open` was never claimed, so it has no
+    /// assignee to send it back to — reopening it must land on `open`, not
+    /// `claimed`. `claimed` with a `NULL` assignee is unrecoverable: nothing
+    /// can claim it (needs `open`), submit it (needs a matching `assignee`),
+    /// or reject it (needs `resolved`). See ADR-0012's 2026-08-20 update.
+    #[test]
+    fn reopen_never_claimed_item_returns_to_open_not_claimed() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        // Closed while still `open` — nobody ever claimed it.
+        let closed = store.force_close_item(&item.id, "admin").unwrap();
+        assert_eq!(closed.state, State::Closed);
+        assert_eq!(closed.assignee, None);
+
+        let reopened = store
+            .reopen_item(&item.id, "requester-1", "closed prematurely")
+            .unwrap();
+        assert_eq!(reopened.state, State::Open);
+        assert_eq!(reopened.assignee, None);
+        assert_eq!(reopened.resolution, None);
+        assert!(reopened.open);
+
+        // And the state it landed on is actually re-enterable — the whole
+        // point of the fix.
+        let claimed = store.claim_item(&item.id, "w1").unwrap();
+        assert_eq!(claimed.state, State::Claimed);
+        assert_eq!(claimed.assignee.as_deref(), Some("w1"));
     }
 
     #[test]

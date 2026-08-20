@@ -406,8 +406,9 @@ impl DocketMcp {
 
     #[tool(
         description = "Reopen a closed item that was closed prematurely or turns out not to be \
-            finished. Sends it back to the assignee and clears resolution. Requires a reason, \
-            recorded as a comment atomically with the state change."
+            finished. Puts it back in front of the assignee side and clears resolution — back to \
+            claimed if it still has an assignee, back to open if it never had one. Requires a \
+            reason, recorded as a comment atomically with the state change."
     )]
     async fn reopen_item(
         &self,

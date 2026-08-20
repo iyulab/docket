@@ -20,7 +20,7 @@ MCP-capable session, or raw HTTP for anything else (`docket-console`, `curl`, sc
 | `topic` | A named queue items are filed against — competing consumers, one worker wins each item (Kafka-topic-plus-consumer-group semantics, not pub-sub fan-out) |
 | `item` | A single unit of work |
 | `claim` | A worker pulling an open item to itself, exclusively |
-| `state` | `open → claimed → resolved → closed` — the workflow stage. `reject` and `reopen` move an item backward, both landing on `claimed` (§4) |
+| `state` | `open → claimed → resolved → closed` — the workflow stage. `reject` and `reopen` move an item backward — onto `claimed`, or onto `open` when `reopen` hits an item nobody ever claimed (§4) |
 | `resolution` | Why an item closed: `done` (requester approval) / `duplicate` (merge) / `wontfix` (force-close) / `invalid` (remove) |
 | `open` | `true` while `state != closed`, else `false` — derived from `state`, not stored, same treatment as `turn`. See [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md) |
 | `requester` / `assignee` / `turn` | `requester` is who the item is for, `assignee` is the current holder (was `owner`), `turn` says whose hand it's in right now — derived from `state`, not stored. See [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) / [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md) |
@@ -113,15 +113,18 @@ losing a claim race), never a silent protocol failure.
 | `submit_item` | `item_id`, `worker_id` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current assignee may submit |
 | `approve_item` | `item_id`, `author?` | `POST /items/{id}/approve {"author"}` | `resolved → closed`, `resolution=done`. The requester's sign-off. `author` defaults to `"unknown"` if omitted |
 | `reject_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reject {"reason","author"}` | `resolved → claimed`. The requester sending it back for more work — **not** done yet. `reason` is required (recorded as a comment, atomically with the state change) |
-| `reopen_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reopen {"reason","author"}` | `closed → claimed`, clears `resolution` back to `null`. For a close that turns out to have been premature or mistaken. `reason` is required, same as `reject_item` |
+| `reopen_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reopen {"reason","author"}` | `closed → claimed` (or `→ open`, if the item was closed before anyone ever claimed it), clears `resolution` back to `null`. For a close that turns out to have been premature or mistaken. `reason` is required, same as `reject_item` |
 | `archive_item` | `item_id` | `POST /items/{id}/archive` | Hides the item from default `list_items`/`search_items` results (still fully queryable with `archived: true`). Idempotent, no data lost, works from any `state`. No `unarchive` yet |
 | `add_tags` / `remove_tags` | `item_id`, `tags[]` | `POST`/`DELETE /items/{id}/tags {"tags"}` | Idempotent both ways |
 | `list_tags` | `topic?` | `GET /tags?topic=` | **Call before tagging** to reuse existing vocabulary instead of inventing a synonym. Returns `{tag, count}[]`, most-used first |
 | `add_comment` | `item_id`, `body`, `author?` | `POST /items/{id}/comments {"author","body"}` | `author` defaults to `"unknown"` if omitted |
 | `list_comments` | `item_id` | `GET /items/{id}/comments` | Chronological, append-only |
 
-`reject_item`/`reopen_item` both send an item backward to `claimed` and both require a `reason` —
-the difference is only which edge they start from. A round trip through both looks like:
+`reject_item`/`reopen_item` both send an item backward into the assignee's hands and both require a
+`reason` — the difference is only which edge they start from. Normally both land on `claimed`; the
+one exception is reopening an item that was closed before anyone claimed it, which lands on `open`
+instead, since there is no assignee to hand it back to (it's the assignee's turn either way — see
+`turn` below). A round trip through both looks like:
 
 ```
 submit_item(item_id, worker_id)              # claimed  -> resolved
@@ -135,7 +138,7 @@ reopen_item(item_id, reason="the fix regressed a different case")
                                               # closed   -> claimed, resolution: done -> null
 ```
 
-Neither transition adds a new `state` value — both land back on the ordinary `claimed` state, and
+Neither transition adds a new `state` value — both land back on an ordinary existing one, and
 *why* the item bounced lives in the comment `reason` records, not in `state` itself. See
 [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md).
 

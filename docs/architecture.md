@@ -45,10 +45,12 @@ state: open | claimed | resolved | closed
 resolution: null | done | duplicate | wontfix | invalid   # only has a value when closed
 ```
 
-Two additional transitions exist alongside the forward path above, both landing back on
-`claimed`: `reject` (`resolved -> claimed`, requester-initiated, requires a reason) and `reopen`
-(`closed -> claimed`, clears `resolution`, requires a reason). Neither introduces a new `state`
-value — see [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md) for why.
+Two additional transitions exist alongside the forward path above, both moving an item backward
+into the assignee's hands: `reject` (`resolved -> claimed`, requester-initiated, requires a
+reason) and `reopen` (`closed -> claimed`, clears `resolution`, requires a reason — or
+`closed -> open` when the item was closed before anyone ever claimed it, since there is no
+assignee to hand it back to). Neither introduces a new `state` value — see
+[ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md) for why.
 
 `resolved` marks the point where "the ball is back in the requester's court" — the worker has reported that it handled the item, and the requester confirms and closes it (same meaning as RESOLVED in Bugzilla/Jira). `resolution` is a separate field from `state`, and admin operations map onto it as follows:
 
