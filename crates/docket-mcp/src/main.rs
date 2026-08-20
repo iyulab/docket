@@ -65,6 +65,10 @@ struct ListItemsParams {
     /// topic-jurisdiction filter, not an ownership filter.
     #[serde(default)]
     topic_scope: Option<String>,
+    /// Excludes archived items by default; `true` returns only archived
+    /// items (explicit archive browse). See ADR-0013.
+    #[serde(default)]
+    archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -82,6 +86,10 @@ struct SearchItemsParams {
     topic: Option<String>,
     #[serde(default)]
     state: Option<String>,
+    /// Excludes archived items by default; `true` returns only archived
+    /// items (explicit archive browse). See ADR-0013.
+    #[serde(default)]
+    archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -160,6 +168,11 @@ struct ItemDto {
     /// meaning "server said closed."
     #[serde(default)]
     open: Option<bool>,
+    /// `None` means either "not archived" or "server predates ADR-0013" —
+    /// indistinguishable from this DTO alone, matching `turn`/`open`'s
+    /// existing older-server-defaulting convention.
+    #[serde(default)]
+    archived_at: Option<i64>,
     /// Absent from servers older than the tag feature. Without a default,
     /// every tool response from such a server fails to deserialize, not just
     /// the tag-related ones.
@@ -259,6 +272,7 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ListItemsParams>,
     ) -> Result<CallToolResult, McpError> {
+        let archived = p.archived.map(|a| a.to_string());
         let resp = self
             .http
             .get(format!("{}/items", self.base_url))
@@ -268,6 +282,7 @@ impl DocketMcp {
                 ("assignee", p.assignee.as_deref()),
                 ("requester", p.requester.as_deref()),
                 ("topic_scope", p.topic_scope.as_deref()),
+                ("archived", archived.as_deref()),
             ])
             .send()
             .await
@@ -297,6 +312,10 @@ impl DocketMcp {
         }
         if let Some(s) = p.state.as_deref() {
             query_pairs.push(("state", s));
+        }
+        let archived = p.archived.map(|a| a.to_string());
+        if let Some(a) = archived.as_deref() {
+            query_pairs.push(("archived", a));
         }
         let resp = self
             .http
@@ -402,6 +421,24 @@ impl DocketMcp {
             .http
             .post(format!("{}/items/{}/reopen", self.base_url, p.item_id))
             .json(&body)
+            .send()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Archive an item — hides it from default list_items/search_items results \
+            (still fully queryable with archived=true). Idempotent. Does not lose any data; \
+            there is currently no unarchive operation."
+    )]
+    async fn archive_item(
+        &self,
+        Parameters(p): Parameters<ListCommentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .post(format!("{}/items/{}/archive", self.base_url, p.item_id))
             .send()
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -647,6 +684,7 @@ mod tests {
                 assignee: None,
                 requester: None,
                 topic_scope: Some("w1".to_string()),
+                archived: None,
             }))
             .await
             .unwrap();
@@ -926,6 +964,7 @@ mod tests {
                 tag_match: None,
                 topic: None,
                 state: None,
+                archived: None,
             }))
             .await
             .unwrap();
@@ -976,5 +1015,75 @@ mod tests {
         let listed_value: serde_json::Value = serde_json::from_str(text_of(&listed)).unwrap();
         assert_eq!(listed_value.as_array().unwrap().len(), 1);
         assert_eq!(listed_value[0]["author"], "maintainer");
+    }
+
+    #[tokio::test]
+    async fn archive_item_hides_from_default_list_items_tool() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("archive.db");
+        let core = spawn_core(18426, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "archive-me".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        server
+            .archive_item(Parameters(ListCommentsParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+
+        let default_list = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                archived: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !json_value(&default_list)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == item_id)
+        );
+
+        let archive_view = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                archived: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&archive_view)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == item_id)
+        );
     }
 }
