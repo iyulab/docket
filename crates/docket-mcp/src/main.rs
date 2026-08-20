@@ -88,6 +88,11 @@ struct ListItemsParams {
     /// Rows to skip before applying `limit`. Defaults to 0.
     #[serde(default)]
     offset: Option<usize>,
+    /// When `true`, every returned item's `body` is omitted — set this once
+    /// you only need enough of each row to decide which item (if any) to
+    /// fetch in full next. See ADR-0014.
+    #[serde(default)]
+    summary: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -119,6 +124,11 @@ struct SearchItemsParams {
     /// Rows to skip before applying `limit`. Defaults to 0.
     #[serde(default)]
     offset: Option<usize>,
+    /// When `true`, every returned item's `body` is omitted — set this once
+    /// you only need enough of each row to decide which item (if any) to
+    /// fetch in full next. See ADR-0014.
+    #[serde(default)]
+    summary: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -369,7 +379,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), and/or archived status. Paginated via limit/offset — check the result's total field"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
     )]
     async fn list_items(
         &self,
@@ -378,6 +388,7 @@ impl DocketMcp {
         let archived = p.archived.map(|a| a.to_string());
         let limit = p.limit.map(|l| l.to_string());
         let offset = p.offset.map(|o| o.to_string());
+        let summary = p.summary.map(|s| s.to_string());
         let resp = self
             .http
             .get(format!("{}/items", self.base_url))
@@ -390,6 +401,7 @@ impl DocketMcp {
                 ("archived", archived.as_deref()),
                 ("limit", limit.as_deref()),
                 ("offset", offset.as_deref()),
+                ("summary", summary.as_deref()),
             ])
             .send()
             .await
@@ -398,7 +410,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
     )]
     async fn search_items(
         &self,
@@ -431,6 +443,10 @@ impl DocketMcp {
         let offset = p.offset.map(|o| o.to_string());
         if let Some(o) = offset.as_deref() {
             query_pairs.push(("offset", o));
+        }
+        let summary = p.summary.map(|s| s.to_string());
+        if let Some(s) = summary.as_deref() {
+            query_pairs.push(("summary", s));
         }
         let resp = self
             .http
@@ -804,6 +820,7 @@ mod tests {
                 archived: None,
                 limit: None,
                 offset: None,
+                summary: None,
             }))
             .await
             .unwrap();
@@ -1104,6 +1121,7 @@ mod tests {
                 archived: None,
                 limit: None,
                 offset: None,
+                summary: None,
             }))
             .await
             .unwrap();
@@ -1198,6 +1216,7 @@ mod tests {
                 archived: None,
                 limit: None,
                 offset: None,
+                summary: None,
             }))
             .await
             .unwrap();
@@ -1219,6 +1238,7 @@ mod tests {
                 archived: Some(true),
                 limit: None,
                 offset: None,
+                summary: None,
             }))
             .await
             .unwrap();
@@ -1304,11 +1324,54 @@ mod tests {
                 archived: None,
                 limit: Some(2),
                 offset: Some(1),
+                summary: None,
             }))
             .await
             .unwrap();
         let page_value = json_value(&page);
         assert_eq!(page_value["total"], 5);
         assert_eq!(page_value["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_items_summary_true_omits_body() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-summary-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("summary.db");
+        let core = spawn_core(18429, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "t".to_string(),
+                body: Some("long body text".to_string()),
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: Some(true),
+            }))
+            .await
+            .unwrap();
+        let value = json_value(&result);
+        assert_eq!(value["items"][0]["body"], serde_json::Value::Null);
+        assert_eq!(value["items"][0]["title"], "t");
     }
 }

@@ -134,3 +134,16 @@ finding, or a `body`-heavy response still exceeding the token cap at `limit=50`)
 additive follow-up (a `fields`/`summary` query param excluding `body`), not a re-open of this ADR's
 reasoning. If cursor-based pagination becomes a real need (an actual infinite-scroll UI, not just
 avoiding a token cap), revisit the "reject — cursor/keyset" option above with real usage evidence.
+
+## 2026-08-20 update — `summary` implemented, exactly as scoped above
+
+`list_items`/`search_items` gained `summary: bool` (default `false`): `true` nulls every returned
+item's `body` post-slice (after every filter and the `limit`/`offset` cut, same ordering as the
+rest of this ADR), regardless of what's stored. `get_item`/`GET /items/{id}` are unaffected — a
+caller that decides it needs one item's full body fetches it there, unbounded by this flag.
+`docket-console`'s poll (the ADR's own cited motivating case) does **not** use it yet: the console's
+`ItemDetail` view reads `body` from the same shared array `App.tsx` polls for the list/board, so
+switching that poll to `summary=true` would blank the detail view — wiring the console needs it to
+fetch a selected item's full body separately first, which is a small but distinct follow-up, not
+folded into this update. `summary` on its own directly serves the MCP/HTTP caller case this ADR was
+written for (a listing/search call that only needs enough per row to pick what to fetch next).

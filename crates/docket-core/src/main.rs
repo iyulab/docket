@@ -290,6 +290,13 @@ struct ListItemsQuery {
     /// Rows to skip before applying `limit`. Defaults to 0.
     #[serde(default)]
     offset: Option<usize>,
+    /// When `true`, every returned item's `body` is `null` regardless of
+    /// what's stored — a listing/search caller often doesn't need the full
+    /// body of every row, only enough to decide which item (if any) to
+    /// fetch in full next via `GET /items/{id}` (unaffected by this flag).
+    /// See ADR-0014's "summary mode" re-open trigger.
+    #[serde(default)]
+    summary: Option<bool>,
 }
 
 /// See ADR-0014: keeps a single-topic or unfiltered query well under the
@@ -371,7 +378,12 @@ async fn list_items(
     // computed against the pre-filter row set and could under-fill or empty
     // a page even when more matching rows exist (ADR-0014).
     let total = items.len();
-    let items: Vec<Item> = items.into_iter().skip(offset).take(limit).collect();
+    let mut items: Vec<Item> = items.into_iter().skip(offset).take(limit).collect();
+    if q.summary.unwrap_or(false) {
+        for item in &mut items {
+            item.body = None;
+        }
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         "X-Total-Count",
@@ -1870,6 +1882,49 @@ mod tests {
             .unwrap();
         let items = json_body(resp).await;
         assert_eq!(items.as_array().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn summary_true_nulls_body_without_affecting_other_fields() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t", "body": "long body"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["body"], "long body");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket&summary=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let items = json_body(resp).await;
+        let item = &items.as_array().unwrap()[0];
+        assert_eq!(item["body"], serde_json::Value::Null);
+        assert_eq!(item["title"], "t");
+
+        // Unaffected without the flag.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let items = json_body(resp).await;
+        assert_eq!(items.as_array().unwrap()[0]["body"], "long body");
     }
 
     /// A read filter never errors on a non-matching or unregistered
