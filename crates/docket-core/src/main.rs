@@ -55,7 +55,10 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/workers", post(register_worker))
         .route("/workers/{id}", get(get_worker))
         .route("/items", post(create_item).get(list_items))
-        .route("/items/{id}", get(get_item).patch(update_item))
+        .route(
+            "/items/{id}",
+            get(get_item).patch(update_item).delete(delete_item),
+        )
         .route("/items/{id}/claim", post(claim_item))
         .route("/items/{id}/submit", post(submit_item))
         .route("/items/{id}/approve", post(approve_item))
@@ -64,6 +67,7 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/force-close", post(force_close_item))
         .route("/items/{id}/reject", post(reject_item))
         .route("/items/{id}/reopen", post(reopen_item))
+        .route("/items/{id}/archive", post(archive_item))
         .route(
             "/items/{id}/tags",
             post(add_item_tags).delete(remove_item_tags),
@@ -264,6 +268,10 @@ struct ListItemsQuery {
     /// `assignee`, above). This is the "discover it via list" step of the M1
     /// completion criteria. Was `owned_by`, split and renamed by ADR-0010.
     topic_scope: Option<String>,
+    /// Excludes archived items by default (`None`/`Some(false)`); `Some(true)`
+    /// returns only archived items. See ADR-0013.
+    #[serde(default)]
+    archived: Option<bool>,
     /// Full-text match against title+body. Presence of `q` and/or `tag`
     /// routes this request through `Store::search_items` instead of
     /// `Store::list_items` — see the branch below.
@@ -289,9 +297,16 @@ async fn list_items(
             .as_deref()
             .and_then(docket_core::domain::TagMatch::parse)
             .unwrap_or(docket_core::domain::TagMatch::Any);
-        store.search_items(q.topic.as_deref(), state, &q.tag, tag_match, q.q.as_deref())?
+        store.search_items(
+            q.topic.as_deref(),
+            state,
+            &q.tag,
+            tag_match,
+            q.q.as_deref(),
+            q.archived,
+        )?
     } else {
-        store.list_items(q.topic.as_deref(), state)?
+        store.list_items(q.topic.as_deref(), state, q.archived)?
     };
     let items = match q.topic_scope {
         Some(worker_id) => {
@@ -439,6 +454,21 @@ async fn reopen_item(
     Json(req): Json<ReasonedRequest>,
 ) -> Result<Json<Item>, ApiError> {
     Ok(Json(store.reopen_item(&id, &req.author, &req.reason)?))
+}
+
+async fn archive_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.archive_item(&id)?))
+}
+
+async fn delete_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    store.delete_item(&id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -1937,5 +1967,230 @@ mod tests {
             idle_after < idle_before,
             "a request other than /status must reset the idle clock: before={idle_before}, after={idle_after}"
         );
+    }
+
+    /// DELETE /items/{id} deletes an item and returns 204 No Content.
+    /// GET /items/{id} after deletion returns 404.
+    #[tokio::test]
+    async fn delete_item_removes_and_returns_204() {
+        let app = test_app();
+
+        // Create an item
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "to-delete"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let item = json_body(resp).await;
+        let id = item["id"].as_str().unwrap().to_string();
+
+        // Delete it
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/items/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify it's gone with 404
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// POST /items/{id}/archive archives an item and returns the updated item
+    /// with archived_at set to a non-null timestamp.
+    #[tokio::test]
+    async fn archive_item_sets_archived_at() {
+        let app = test_app();
+
+        // Create an item
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "to-archive"}),
+            ))
+            .await
+            .unwrap();
+        let item = json_body(resp).await;
+        let id = item["id"].as_str().unwrap().to_string();
+        assert_eq!(item["archived_at"], serde_json::Value::Null);
+
+        // Archive it
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/archive"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let archived = json_body(resp).await;
+        assert!(
+            archived["archived_at"].is_u64(),
+            "archived_at must be a timestamp (u64)"
+        );
+    }
+
+    /// POST /items/{id}/archive is idempotent — archiving twice doesn't error.
+    #[tokio::test]
+    async fn archive_item_is_idempotent() {
+        let app = test_app();
+
+        // Create an item
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "idempotent-archive"}),
+            ))
+            .await
+            .unwrap();
+        let item = json_body(resp).await;
+        let id = item["id"].as_str().unwrap().to_string();
+
+        // Archive it once
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/archive"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first_archived = json_body(resp).await;
+        let first_timestamp = first_archived["archived_at"].as_u64().unwrap();
+
+        // Archive it again
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/archive"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let second_archived = json_body(resp).await;
+        // The timestamp should remain the same (idempotent)
+        assert_eq!(
+            second_archived["archived_at"].as_u64().unwrap(),
+            first_timestamp
+        );
+    }
+
+    /// GET /items with no `archived` param excludes archived items by default.
+    /// GET /items?archived=true returns only archived items.
+    /// GET /items?archived=false returns only non-archived items (same as default).
+    #[tokio::test]
+    async fn archived_query_param_filters_correctly() {
+        let app = test_app();
+
+        // Create a normal item
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "normal"}),
+            ))
+            .await
+            .unwrap();
+        let normal_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        // Create and archive another item
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "archived-one"}),
+            ))
+            .await
+            .unwrap();
+        let archive_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{archive_id}/archive"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        // GET /items (no param) — should return only the normal item
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let listed = json_body(resp).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], normal_id);
+
+        // GET /items?archived=true — should return only the archived item
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?archived=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let archived_list = json_body(resp).await;
+        assert_eq!(archived_list.as_array().unwrap().len(), 1);
+        assert_eq!(archived_list[0]["id"], archive_id);
+
+        // GET /items?archived=false — should return only the normal item (same as default)
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?archived=false")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let non_archived = json_body(resp).await;
+        assert_eq!(non_archived.as_array().unwrap().len(), 1);
+        assert_eq!(non_archived[0]["id"], normal_id);
     }
 }
