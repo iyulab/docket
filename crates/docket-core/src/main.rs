@@ -973,6 +973,398 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reject_and_reopen_routes_exist_and_require_json_body() {
+        let app = test_app();
+
+        // Create and setup an item: open -> claimed -> resolved -> closed
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/approve"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Test reopen with explicit author and reason on a closed item
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/reopen"),
+                serde_json::json!({"author": "requester-1", "reason": "please reconsider"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reopened = json_body(resp).await;
+        assert_eq!(reopened["state"], "claimed");
+
+        // Now test reject on a resolved item (after resubmitting)
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Test reject with explicit author and reason
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/reject"),
+                serde_json::json!({"author": "reviewer-1", "reason": "needs more work"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rejected = json_body(resp).await;
+        assert_eq!(rejected["state"], "claimed");
+        assert_eq!(rejected["resolution"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn reject_with_omitted_author_defaults_to_unknown() {
+        let app = test_app();
+
+        // Setup: open -> claimed -> resolved
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        // Reject without providing author in body
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/reject"),
+                serde_json::json!({"reason": "no good"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rejected = json_body(resp).await;
+        assert_eq!(rejected["state"], "claimed");
+
+        // Verify the default author "unknown" was recorded in a comment
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{id}/comments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let comments = json_body(resp).await;
+        let reject_comment = comments
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["body"].as_str().unwrap().contains("no good"));
+        assert!(reject_comment.is_some());
+        assert_eq!(reject_comment.unwrap()["author"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn reject_with_blank_reason_returns_error() {
+        let app = test_app();
+
+        // Setup: open -> claimed -> resolved
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        // Try to reject with blank reason
+        let resp = app
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/reject"),
+                serde_json::json!({"author": "reviewer", "reason": "   "}),
+            ))
+            .await
+            .unwrap();
+        // Should return BAD_REQUEST for validation error (blank reason)
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn reopen_with_omitted_author_defaults_to_unknown() {
+        let app = test_app();
+
+        // Setup: open -> claimed -> submitted -> approved (closed)
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/approve"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        // Reopen without providing author in body
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/reopen"),
+                serde_json::json!({"reason": "found an issue"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reopened = json_body(resp).await;
+        assert_eq!(reopened["state"], "claimed");
+
+        // Verify the default author "unknown" was recorded
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{id}/comments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let comments = json_body(resp).await;
+        let reopen_comment = comments
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["body"].as_str().unwrap().contains("found an issue"));
+        assert!(reopen_comment.is_some());
+        assert_eq!(reopen_comment.unwrap()["author"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn reopen_with_blank_reason_returns_error() {
+        let app = test_app();
+
+        // Setup: open -> claimed -> submitted -> approved (closed)
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/approve"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        // Try to reopen with blank reason
+        let resp = app
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/reopen"),
+                serde_json::json!({"author": "requester", "reason": ""}),
+            ))
+            .await
+            .unwrap();
+        // Should return BAD_REQUEST for validation error (blank reason)
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn approve_route_without_json_body_returns_415_unsupported_media_type() {
+        let app = test_app();
+
+        // Create and setup an item: open -> claimed -> resolved
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/submit"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        // Send POST with completely empty body and no Content-Type header
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/items/{id}/approve"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Axum's Json extractor returns 415 Unsupported Media Type when there's
+        // no Content-Type: application/json header, even with an empty body
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
     async fn create_item_accepts_tags_and_search_finds_by_query() {
         let app = test_app();
         let resp = app
