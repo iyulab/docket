@@ -17,7 +17,15 @@ struct DocketMcp {
     base_url: String,
 }
 
+// Every tool-parameter struct below denies unknown fields — a caller
+// guessing a stale or misremembered field name (e.g. `owned_by`, the
+// pre-ADR-0010 name for what's now `assignee`/`requester`/`topic_scope`)
+// otherwise deserializes successfully with that field silently dropped,
+// which for a filter parameter reads as "no matching items" rather than
+// "you misspelled the filter". A rejected-field error is far more
+// actionable than a quietly-empty result.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RegisterWorkerParams {
     /// Unique id for this worker.
     id: String,
@@ -27,6 +35,7 @@ struct RegisterWorkerParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CreateItemParams {
     /// The topic this item is filed in front of.
     topic: String,
@@ -45,6 +54,7 @@ struct CreateItemParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListItemsParams {
     /// Exact-match topic filter.
     #[serde(default)]
@@ -81,6 +91,7 @@ struct ListItemsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SearchItemsParams {
     /// Full-text match against title+body.
     #[serde(default)]
@@ -111,12 +122,14 @@ struct SearchItemsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ClaimOrSubmitParams {
     item_id: String,
     worker_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ApproveParams {
     item_id: String,
     #[serde(default)]
@@ -124,6 +137,7 @@ struct ApproveParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ReasonedParams {
     item_id: String,
     #[serde(default)]
@@ -132,12 +146,14 @@ struct ReasonedParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TagsParams {
     item_id: String,
     tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListTagsParams {
     /// Scope the vocabulary to items under this exact-match topic.
     #[serde(default)]
@@ -145,6 +161,7 @@ struct ListTagsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AddCommentParams {
     item_id: String,
     #[serde(default)]
@@ -153,6 +170,7 @@ struct AddCommentParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListCommentsParams {
     item_id: String,
 }
@@ -233,6 +251,20 @@ struct ErrorBody {
     error: String,
 }
 
+/// A transport-level failure (`docket-core` unreachable, connection reset
+/// mid-response, DNS failure, timeout, ...) previously surfaced as
+/// reqwest's raw wire-level error text verbatim — an opaque string that
+/// doesn't distinguish "the server rejected this" from "the server was
+/// never reached", which matters to a caller (often an LLM) deciding
+/// whether retrying makes sense. Named and phrased as retry-worthy here
+/// instead.
+fn unreachable_error(e: reqwest::Error) -> McpError {
+    McpError::internal_error(
+        format!("could not reach docket-core (transient — retrying may help): {e}"),
+        None,
+    )
+}
+
 /// Turns a `docket-core` HTTP response into a tool result: a non-2xx status
 /// becomes a tool-level error (the model sees it and can react — e.g. retry
 /// `list_items` after losing a claim race) rather than a protocol error.
@@ -240,10 +272,7 @@ async fn respond<T: Serialize + for<'de> Deserialize<'de>>(
     resp: reqwest::Response,
 ) -> Result<CallToolResult, McpError> {
     let status = resp.status();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    let bytes = resp.bytes().await.map_err(unreachable_error)?;
     if status.is_success() {
         let value: T = serde_json::from_slice(&bytes)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -278,10 +307,7 @@ async fn respond_paginated(resp: reqwest::Response) -> Result<CallToolResult, Mc
         .get("X-Total-Count")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    let bytes = resp.bytes().await.map_err(unreachable_error)?;
     if status.is_success() {
         let items: Vec<ItemDto> = serde_json::from_slice(&bytes)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -323,7 +349,7 @@ impl DocketMcp {
             .json(&p)
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<WorkerDto>(resp).await
     }
 
@@ -338,7 +364,7 @@ impl DocketMcp {
             .json(&p)
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<ItemDto>(resp).await
     }
 
@@ -367,7 +393,7 @@ impl DocketMcp {
             ])
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond_paginated(resp).await
     }
 
@@ -412,7 +438,7 @@ impl DocketMcp {
             .query(&query_pairs)
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond_paginated(resp).await
     }
 
@@ -429,7 +455,7 @@ impl DocketMcp {
             .json(&serde_json::json!({ "worker_id": p.worker_id }))
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<ItemDto>(resp).await
     }
 
@@ -446,7 +472,7 @@ impl DocketMcp {
             .json(&serde_json::json!({ "worker_id": p.worker_id }))
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<ItemDto>(resp).await
     }
 
@@ -464,7 +490,7 @@ impl DocketMcp {
             .json(&body)
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<ItemDto>(resp).await
     }
 
@@ -483,7 +509,7 @@ impl DocketMcp {
             .json(&body)
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<ItemDto>(resp).await
     }
 
@@ -504,7 +530,7 @@ impl DocketMcp {
             .json(&body)
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<ItemDto>(resp).await
     }
 
@@ -522,7 +548,7 @@ impl DocketMcp {
             .post(format!("{}/items/{}/archive", self.base_url, p.item_id))
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<ItemDto>(resp).await
     }
 
@@ -539,7 +565,7 @@ impl DocketMcp {
             .json(&serde_json::json!({ "tags": p.tags }))
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<Vec<String>>(resp).await
     }
 
@@ -556,7 +582,7 @@ impl DocketMcp {
             .json(&serde_json::json!({ "tags": p.tags }))
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<Vec<String>>(resp).await
     }
 
@@ -573,7 +599,7 @@ impl DocketMcp {
             .query(&[("topic", p.topic.as_deref())])
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<Vec<TagCountDto>>(resp).await
     }
 
@@ -586,7 +612,7 @@ impl DocketMcp {
             .get(format!("{}/topics", self.base_url))
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<Vec<TopicCountDto>>(resp).await
     }
 
@@ -604,7 +630,7 @@ impl DocketMcp {
             .json(&body)
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<CommentDto>(resp).await
     }
 
@@ -618,7 +644,7 @@ impl DocketMcp {
             .get(format!("{}/items/{}/comments", self.base_url, p.item_id))
             .send()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(unreachable_error)?;
         respond::<Vec<CommentDto>>(resp).await
     }
 }
@@ -956,7 +982,7 @@ mod tests {
             http: http_client(),
             base_url: "http://127.0.0.1:1".to_string(),
         };
-        let result = server
+        let err = server
             .create_item(Parameters(CreateItemParams {
                 topic: "iyulab/docket".to_string(),
                 title: "t".to_string(),
@@ -964,8 +990,25 @@ mod tests {
                 tags: vec![],
                 requester: None,
             }))
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap_err();
+        // A clear, retry-worthy message instead of a bare reqwest error
+        // string — see `unreachable_error`.
+        assert!(err.message.contains("could not reach docket-core"));
+    }
+
+    /// A stale/misremembered field name (e.g. `owned_by`, the pre-ADR-0010
+    /// name for what's now `assignee`/`requester`/`topic_scope`) used to
+    /// deserialize successfully with the field silently dropped — a filter
+    /// caller couldn't tell "no matches" from "you misspelled the filter".
+    /// `deny_unknown_fields` on every params struct turns that into a
+    /// visible error.
+    #[test]
+    fn list_items_params_rejects_an_unknown_field() {
+        let err =
+            serde_json::from_value::<ListItemsParams>(serde_json::json!({ "owned_by": null }))
+                .unwrap_err();
+        assert!(err.to_string().contains("owned_by"));
     }
 
     #[tokio::test]
