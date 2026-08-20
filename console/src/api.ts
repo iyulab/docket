@@ -172,8 +172,15 @@ export async function removeItem(id: string): Promise<Item> {
   return mutate<Item>(`/api/items/${id}/remove`, authoredPost())
 }
 
-export async function mergeItem(id: string): Promise<Item> {
-  return mutate<Item>(`/api/items/${id}/merge`, authoredPost())
+// Requires `duplicateOfId` — resolution=duplicate alone can't say duplicate
+// of what, so the server atomically tags the item `duplicate-of:<id>` (a
+// free-form-tag reference, not a schema column — see ADR-0015).
+export async function mergeItem(id: string, duplicateOfId: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/merge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ author: CONSOLE_AUTHOR, duplicate_of_id: duplicateOfId }),
+  })
 }
 
 export async function forceCloseItem(id: string): Promise<Item> {

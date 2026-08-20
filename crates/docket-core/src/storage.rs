@@ -467,9 +467,42 @@ impl Store {
 
     /// Admin operation: closes an item as a duplicate of another, with
     /// `resolution = duplicate`. Same any-pre-closed-state, assignee-agnostic
-    /// rules as `remove_item` — see its doc comment.
-    pub fn merge_item(&self, id: &str, author: &str) -> Result<Item> {
-        self.close_with_resolution(id, Resolution::Duplicate, "merge", author)
+    /// rules as `remove_item` — see its doc comment — but unlike
+    /// `remove_item`/`force_close_item` it doesn't go through
+    /// `close_with_resolution`: `resolution = duplicate` alone can't say
+    /// *duplicate of what*, so this also requires `duplicate_of_id` and
+    /// atomically tags the item `duplicate-of:<id>` — a free-form-tag
+    /// reference, not a new schema column, matching how tags stay opaque,
+    /// caller-defined strings to the store (`principles.md` P-1). No
+    /// referential check that `duplicate_of_id` names a real item — same
+    /// accepted-consequence precedent as a dangling `related:<id>` tag
+    /// surviving `delete_item`. See ADR-0015.
+    pub fn merge_item(&self, id: &str, duplicate_of_id: &str, author: &str) -> Result<Item> {
+        let duplicate_of_id = duplicate_of_id.trim();
+        if duplicate_of_id.is_empty() {
+            return Err(StoreError::Validation(
+                "duplicate_of_id must not be blank".to_string(),
+            ));
+        }
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let now = now_millis();
+        let affected = tx.execute(
+            "UPDATE items SET state = 'closed', resolution = 'duplicate', updated_at = ?1
+             WHERE id = ?2 AND state != 'closed'",
+            params![now, id],
+        )?;
+        if affected == 0 {
+            return Err(existing_state_conflict(&tx, id, "merge")?);
+        }
+        insert_lifecycle_comment(&tx, id, author, "merge", now)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?1, ?2)",
+            params![id, format!("duplicate-of:{duplicate_of_id}")],
+        )?;
+        let item = row_to_item(&tx, id)?.ok_or(StoreError::NotFound)?;
+        tx.commit()?;
+        Ok(item)
     }
 
     /// Admin operation: closes an item that's become irrelevant, with
@@ -950,11 +983,33 @@ mod tests {
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
 
-        let closed = store.merge_item(&item.id, "admin").unwrap();
+        let closed = store
+            .merge_item(&item.id, "original-item-id", "admin")
+            .unwrap();
         assert_eq!(closed.state, State::Closed);
         assert_eq!(closed.resolution, Some(Resolution::Duplicate));
         // owner-agnostic — the claim it interrupted is preserved as history
         assert_eq!(closed.assignee.as_deref(), Some("w1"));
+        assert!(
+            closed
+                .tags
+                .iter()
+                .any(|t| t == "duplicate-of:original-item-id")
+        );
+    }
+
+    #[test]
+    fn merge_item_rejects_blank_duplicate_of_id() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+
+        let err = store.merge_item(&item.id, "   ", "admin").unwrap_err();
+        assert!(matches!(err, StoreError::Validation(_)));
+        // Rejected before the state-changing UPDATE runs — the item is
+        // untouched, not left half-transitioned.
+        assert_eq!(store.get_item(&item.id).unwrap().state, State::Open);
     }
 
     #[test]
@@ -1116,7 +1171,9 @@ mod tests {
         store.remove_item(&item.id, "admin").unwrap();
 
         assert!(matches!(
-            store.merge_item(&item.id, "admin").unwrap_err(),
+            store
+                .merge_item(&item.id, "original-item-id", "admin")
+                .unwrap_err(),
             StoreError::Conflict(_)
         ));
         assert!(matches!(
@@ -1137,7 +1194,9 @@ mod tests {
             StoreError::NotFound
         ));
         assert!(matches!(
-            store.merge_item("nope", "admin").unwrap_err(),
+            store
+                .merge_item("nope", "original-item-id", "admin")
+                .unwrap_err(),
             StoreError::NotFound
         ));
         assert!(matches!(

@@ -164,12 +164,17 @@ from any state except `closed` (unlike `approve`, they don't require reaching `r
 | HTTP | resolution | Meaning |
 |---|---|---|
 | `POST /items/{id}/remove {"author"}` | `invalid` | The item was a mistake — never should have been filed |
-| `POST /items/{id}/merge {"author"}` | `duplicate` | Consolidated into another item |
+| `POST /items/{id}/merge {"duplicate_of_id", "author"}` | `duplicate` | Consolidated into another item |
 | `POST /items/{id}/force-close {"author"}` | `wontfix` | No longer relevant, closed without being done |
 
 All three take an optional `author`, recorded as a comment alongside the close, exactly like
-`approve_item` above — it defaults to `"unknown"` if omitted, and the request body itself may be
-omitted entirely (a bodiless `POST` is accepted and takes the same default).
+`approve_item` above — it defaults to `"unknown"` if omitted, and the request body (for
+`remove`/`force-close`) may be omitted entirely (a bodiless `POST` is accepted and takes the same
+default). `merge` is the one exception: `duplicate_of_id` is **required, non-blank** — `resolution =
+duplicate` alone can't say duplicate of what, so `merge` also atomically tags the item
+`duplicate-of:<id>` (a free-form-tag reference, not a schema column — see
+[ADR-0015](decisions/ADR-0015-merge-duplicate-of-reference.md)). No referential check that
+`duplicate_of_id` names a real item — tags stay opaque, caller-defined strings to the store.
 
 > **`remove_item` is not `delete_item` — do not confuse the two.**
 >

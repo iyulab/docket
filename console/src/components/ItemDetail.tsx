@@ -41,6 +41,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
   const [actionError, setActionError] = useState<string | null>(null)
   const [tagDraft, setTagDraft] = useState('')
   const [reasonDraft, setReasonDraft] = useState('')
+  const [duplicateOfDraft, setDuplicateOfDraft] = useState('')
   // Tracks which item is currently selected so a mutation's response,
   // arriving after the user has already switched to a different item, does
   // not paint its error/pending state onto the wrong item.
@@ -56,6 +57,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     setActionPending(false)
     setTagDraft('')
     setReasonDraft('')
+    setDuplicateOfDraft('')
     if (!item) {
       setComments([])
       setCommentsError(false)
@@ -147,6 +149,15 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     if (!reason || !reasonAction) return
     setReasonDraft('')
     void runAction(() => reasonAction.run(item.id, reason))
+  }
+
+  // `merge` requires a target (ADR-0015) — unlike Remove/Force-close, which
+  // stay plain one-click buttons.
+  const submitMerge = () => {
+    const duplicateOfId = duplicateOfDraft.trim()
+    if (!duplicateOfId) return
+    setDuplicateOfDraft('')
+    void runAction(() => mergeItem(item.id, duplicateOfId))
   }
 
   return (
@@ -263,19 +274,37 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
           </button>
           <button
             type="button"
-            title="상태를 duplicate로 종료 — 다른 항목의 중복"
-            disabled={actionPending}
-            onClick={() => void runAction(() => mergeItem(item.id))}
-          >
-            Merge
-          </button>
-          <button
-            type="button"
             title="상태를 wontfix로 종료 — 더 이상 무관"
             disabled={actionPending}
             onClick={() => void runAction(() => forceCloseItem(item.id))}
           >
             Force-close
+          </button>
+        </div>
+      )}
+      {item.state !== 'closed' && (
+        <div className="item-page-actions item-page-admin-actions">
+          <input
+            type="text"
+            className="reason-input"
+            placeholder="중복 원본 item id (필수)"
+            value={duplicateOfDraft}
+            disabled={actionPending}
+            onChange={(e) => setDuplicateOfDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                submitMerge()
+              }
+            }}
+          />
+          <button
+            type="button"
+            title="상태를 duplicate로 종료 — 다른 항목의 중복, duplicate-of:<id> 태그 자동 부착"
+            disabled={actionPending || !duplicateOfDraft.trim()}
+            onClick={submitMerge}
+          >
+            Merge
           </button>
         </div>
       )}

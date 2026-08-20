@@ -159,7 +159,6 @@ describe('approveItem', () => {
 
 describe.each([
   ['removeItem', removeItem, 'remove'],
-  ['mergeItem', mergeItem, 'merge'],
   ['forceCloseItem', forceCloseItem, 'force-close'],
 ] as const)('%s', (_name, fn, route) => {
   it('POSTs a JSON author body and returns the updated item', async () => {
@@ -183,6 +182,33 @@ describe.each([
     mockFetchOnce({ error: `cannot ${route}: item is closed` }, false, 409)
 
     await expect(fn('i1')).rejects.toThrow(`cannot ${route}: item is closed`)
+  })
+})
+
+describe('mergeItem', () => {
+  it('POSTs a JSON author+duplicate_of_id body and returns the updated item', async () => {
+    const item = { id: 'i1', state: 'closed', resolution: 'duplicate' }
+    mockFetchOnce(item)
+
+    const result = await mergeItem('i1', 'original-item-id')
+
+    expect(result).toEqual(item)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/items/i1/merge',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: 'console', duplicate_of_id: 'original-item-id' }),
+      }),
+    )
+  })
+
+  it('throws the server error message on conflict', async () => {
+    mockFetchOnce({ error: 'cannot merge: item is closed' }, false, 409)
+
+    await expect(mergeItem('i1', 'original-item-id')).rejects.toThrow(
+      'cannot merge: item is closed',
+    )
   })
 })
 

@@ -462,12 +462,27 @@ async fn remove_item(
     Ok(Json(store.remove_item(&id, &authored_by(body))?))
 }
 
+/// Unlike the other three admin closes, `merge` has a required field — a
+/// `resolution = duplicate` with no reference to what it duplicates is
+/// exactly the traceability gap this exists to close, so this can't be
+/// bodiless the way `AuthoredRequest`-based ops are. See ADR-0015.
+#[derive(Deserialize)]
+struct MergeRequest {
+    duplicate_of_id: String,
+    #[serde(default = "default_comment_author")]
+    author: String,
+}
+
 async fn merge_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-    body: Option<Json<AuthoredRequest>>,
+    Json(req): Json<MergeRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.merge_item(&id, &authored_by(body))?))
+    Ok(Json(store.merge_item(
+        &id,
+        &req.duplicate_of_id,
+        &req.author,
+    )?))
 }
 
 async fn force_close_item(
@@ -1030,11 +1045,7 @@ mod tests {
             json_body(resp).await
         }
 
-        for (op, resolution) in [
-            ("remove", "invalid"),
-            ("merge", "duplicate"),
-            ("force-close", "wontfix"),
-        ] {
+        for (op, resolution) in [("remove", "invalid"), ("force-close", "wontfix")] {
             let id = create(&app).await;
             let closed = close(&app, &id, op).await;
             assert_eq!(closed["state"], "closed");
@@ -1051,6 +1062,85 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::CONFLICT);
         }
+    }
+
+    /// `merge` diverges from `remove`/`force-close` (ADR-0012's other two
+    /// state-unrestricted admin closes): it requires `duplicate_of_id`, and
+    /// atomically tags the item `duplicate-of:<id>` — the traceability gap
+    /// this closes is "resolution=duplicate alone can't say duplicate of
+    /// what".
+    #[tokio::test]
+    async fn merge_requires_duplicate_of_id_and_tags_the_item() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        // A bare-object request is rejected at the JSON-schema level (axum's
+        // `Json` extractor, missing required field) — unlike remove/
+        // force-close, merge has no bodiless path.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/merge"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Blank duplicate_of_id is a validation error, same as reject/
+        // reopen's blank `reason`.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/merge"),
+                serde_json::json!({"duplicate_of_id": "   "}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/merge"),
+                serde_json::json!({"duplicate_of_id": "original-item-id", "author": "reviewer"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let merged = json_body(resp).await;
+        assert_eq!(merged["state"], "closed");
+        assert_eq!(merged["resolution"], "duplicate");
+        assert!(
+            merged["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "duplicate-of:original-item-id")
+        );
+
+        // Already closed — same conflict behavior as the other admin ops.
+        let resp = app
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/merge"),
+                serde_json::json!({"duplicate_of_id": "original-item-id"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
