@@ -43,7 +43,30 @@ const BINARY_EXT: &str = "";
 /// instead — no cache lookup, no network request, no checksum check.
 pub async fn resolve_and_run(worker_name: &str, args: &[&str]) -> anyhow::Result<i32> {
     let local_bin_override = std::env::var(LOCAL_BIN_ENV_VAR).ok();
-    resolve_and_run_inner(worker_name, args, local_bin_override.as_deref()).await
+    resolve_and_run_inner(worker_name, args, local_bin_override.as_deref(), false).await
+}
+
+/// Same as `resolve_and_run`, but when this call is the one that just
+/// downloaded a new release (a cache miss, not a cache hit or a
+/// fallback-to-cache), the exec'd worker is given
+/// `DOCKET_LAUNCHER_RELEASE_UPDATED=<version>` in its environment.
+///
+/// A launcher-per-invocation worker like `docket-cc` re-resolves on every
+/// `SessionStart`, so a cache miss here means the release that just became
+/// current was not yet current the last time any launcher on this machine
+/// checked — in particular, any already-running long-lived worker (e.g. a
+/// `docket-mcp` server spawned earlier this session or an older one) is now
+/// behind. `resolve_and_run` (used by that long-lived `docket-mcp` launcher
+/// itself) intentionally does not set this — it must never touch the
+/// worker's stdio-carried protocol, and its own single per-session spawn
+/// isn't the moment a user is in a position to notice a printed notice
+/// anyway.
+pub async fn resolve_and_run_notifying_updates(
+    worker_name: &str,
+    args: &[&str],
+) -> anyhow::Result<i32> {
+    let local_bin_override = std::env::var(LOCAL_BIN_ENV_VAR).ok();
+    resolve_and_run_inner(worker_name, args, local_bin_override.as_deref(), true).await
 }
 
 /// `resolve_and_run`'s logic with the env var already read — split out so
@@ -54,6 +77,7 @@ async fn resolve_and_run_inner(
     worker_name: &str,
     args: &[&str],
     local_bin_override: Option<&str>,
+    notify_update: bool,
 ) -> anyhow::Result<i32> {
     if let Some(local_bin) = local_bin_override {
         return delegate::run(Path::new(local_bin), args);
@@ -68,7 +92,7 @@ async fn resolve_and_run_inner(
         )
     })?;
 
-    let binary_path = resolve_worker_binary(
+    let (binary_path, freshly_downloaded) = resolve_worker_binary(
         &cache_root,
         worker_name,
         &asset_name,
@@ -82,11 +106,12 @@ async fn resolve_and_run_inner(
     // path that can produce `binary_path` (fresh download, cache hit, or
     // fallback-to-cache) — reading it back out avoids threading a second
     // "which version did we actually resolve" value through all three.
-    if let Some(version) = binary_path
+    let version = binary_path
         .parent()
         .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-    {
+        .and_then(|s| s.to_str());
+
+    if let Some(version) = version {
         staleness::spawn_watcher(
             worker_name.to_string(),
             version.to_string(),
@@ -94,6 +119,17 @@ async fn resolve_and_run_inner(
             OWNER.to_string(),
             REPO.to_string(),
             STALENESS_CHECK_INTERVAL,
+        );
+    }
+
+    if notify_update
+        && freshly_downloaded
+        && let Some(version) = version
+    {
+        return delegate::run_with_env(
+            &binary_path,
+            args,
+            &[("DOCKET_LAUNCHER_RELEASE_UPDATED", version)],
         );
     }
 
@@ -106,13 +142,19 @@ async fn resolve_and_run_inner(
 /// fetch, checksums.txt fetch, or a checksum mismatch), fall back to the
 /// newest cached version instead of failing outright — only a hard error
 /// when there's nothing cached at all.
+///
+/// The returned `bool` is `true` only on the path that actually just
+/// downloaded a new version (a genuine cache miss resolved successfully) —
+/// `false` for a cache hit *and* for every fallback-to-cache path, since
+/// those don't establish that a newer release exists (a fallback can't tell
+/// "no update" from "GitHub unreachable").
 async fn resolve_worker_binary(
     cache_root: &Path,
     worker_name: &str,
     asset_name: &str,
     binary_ext: &str,
     api_base: &str,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<(PathBuf, bool)> {
     // `pool_max_idle_per_host(0)`: this function makes 1-3 requests total,
     // at most once per launch — connection reuse buys nothing here, and
     // disabling it keeps behavior deterministic for tests using a one-shot
@@ -132,7 +174,7 @@ async fn resolve_worker_binary(
             let version = &release.tag_name;
             let cached = cache::cached_binary_path(cache_root, version, binary_ext, worker_name);
             if cached.exists() {
-                return Ok(cached);
+                return Ok((cached, false));
             }
 
             match download_and_store(
@@ -145,9 +187,10 @@ async fn resolve_worker_binary(
             )
             .await
             {
-                Ok(path) => Ok(path),
+                Ok(path) => Ok((path, true)),
                 Err(e) => {
                     fall_back_to_cache(cache_root, binary_ext, worker_name, "download failed", e)
+                        .map(|path| (path, false))
                 }
             }
         }
@@ -157,7 +200,8 @@ async fn resolve_worker_binary(
             worker_name,
             "update check failed",
             e,
-        ),
+        )
+        .map(|path| (path, false)),
     }
 }
 
@@ -298,7 +342,7 @@ mod tests {
         #[cfg(not(windows))]
         let (bin, args): (&str, &[&str]) = ("sh", &["-c", "exit 7"]);
 
-        let code = resolve_and_run_inner("docket-mcp", args, Some(bin))
+        let code = resolve_and_run_inner("docket-mcp", args, Some(bin), false)
             .await
             .unwrap();
         assert_eq!(code, 7);
@@ -330,10 +374,12 @@ mod tests {
         spawn_serving(listener, routes);
 
         let cache_root = temp_cache_root("new-version");
-        let path = resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
-            .await
-            .unwrap();
+        let (path, freshly_downloaded) =
+            resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
+                .await
+                .unwrap();
 
+        assert!(freshly_downloaded, "a genuine cache miss must report true");
         assert_eq!(std::fs::read(&path).unwrap(), worker_bytes);
         assert_eq!(
             path,
@@ -423,11 +469,13 @@ mod tests {
         )
         .unwrap();
 
-        let result = resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
-            .await
-            .unwrap();
+        let (path, freshly_downloaded) =
+            resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
+                .await
+                .unwrap();
+        assert!(!freshly_downloaded, "a fallback-to-cache must report false");
         assert_eq!(
-            result,
+            path,
             cache::cached_binary_path(&cache_root, "v0.1.0", "", "docket-mcp")
         );
         // The bad download must never have been cached under the new version.
@@ -464,11 +512,13 @@ mod tests {
         );
         spawn_serving(listener, routes);
 
-        let result = resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
-            .await
-            .unwrap();
+        let (path, freshly_downloaded) =
+            resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
+                .await
+                .unwrap();
+        assert!(!freshly_downloaded, "a fallback-to-cache must report false");
         assert_eq!(
-            result,
+            path,
             cache::cached_binary_path(&cache_root, "v0.1.0", "", "docket-mcp")
         );
 
@@ -541,9 +591,11 @@ mod tests {
             }
         });
 
-        let path = resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
-            .await
-            .unwrap();
+        let (path, freshly_downloaded) =
+            resolve_worker_binary(&cache_root, "docket-mcp", asset_name, "", &base)
+                .await
+                .unwrap();
+        assert!(!freshly_downloaded, "a cache hit must report false");
         assert_eq!(std::fs::read(&path).unwrap(), b"already here");
         assert_eq!(
             extra_connections.load(Ordering::SeqCst),
@@ -570,16 +622,18 @@ mod tests {
 
         // Port 1 refuses connections immediately (same trick docket-mcp's
         // own tests use for "unreachable").
-        let result = resolve_worker_binary(
+        let (path, freshly_downloaded) = resolve_worker_binary(
             &cache_root,
             "docket-mcp",
             asset_name,
             "",
             "http://127.0.0.1:1",
         )
-        .await;
+        .await
+        .unwrap();
+        assert!(!freshly_downloaded, "a fallback-to-cache must report false");
         assert_eq!(
-            result.unwrap(),
+            path,
             cache::cached_binary_path(&cache_root, "v0.1.0", "", "docket-mcp")
         );
 

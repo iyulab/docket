@@ -245,6 +245,28 @@ fn format_hook_summary(items: &[ItemDto]) -> String {
     out
 }
 
+/// A one-line notice for when `updated_version` (the
+/// `DOCKET_LAUNCHER_RELEASE_UPDATED` env var, if set) says this run's
+/// `docket-cc-launcher` just downloaded a release it hadn't seen cached
+/// before (Issue #14 Option B) — empty otherwise, so a session with nothing
+/// to report stays silent same as `format_hook_summary`. Takes the value
+/// already read rather than reading the env var itself, so callers can
+/// inject it in tests instead of mutating real process state.
+///
+/// `docket-mcp` is a long-lived per-session process that can't reliably
+/// notice a release that appears mid-session; this launcher re-resolves on
+/// every `SessionStart`, so it is the first process in a position to say
+/// "one appeared" and the only one whose stdout a `SessionStart` hook
+/// actually surfaces to the user.
+fn release_update_notice(updated_version: Option<&str>) -> String {
+    match updated_version {
+        Some(version) if !version.is_empty() => format!(
+            "docket {version} was just released — restart any other open docket-mcp/docket-cc sessions to pick it up.\n"
+        ),
+        _ => String::new(),
+    }
+}
+
 /// `sync`s and formats the result for a `SessionStart` hook. Never returns
 /// an error — a hook's output goes straight into context, so a sync
 /// failure (core unreachable, worker not registered, ...) is reported to
@@ -303,10 +325,10 @@ async fn main() -> anyhow::Result<()> {
     // (see the module doc) — bare invocation (no args) keeps the original
     // `sync` behavior so existing setups (README "Running it") don't break.
     if std::env::args().nth(1).as_deref() == Some("hook") {
-        print!(
-            "{}",
-            hook_summary(&client, &base_url, &worker_id, &root).await
-        );
+        let mut out = hook_summary(&client, &base_url, &worker_id, &root).await;
+        let updated_version = std::env::var("DOCKET_LAUNCHER_RELEASE_UPDATED").ok();
+        out.push_str(&release_update_notice(updated_version.as_deref()));
+        print!("{out}");
         return Ok(());
     }
 
@@ -395,6 +417,18 @@ mod tests {
         assert!(rendered.contains("resolution: null\n"));
         assert!(rendered.contains("# fix the thing"));
         assert!(rendered.contains("some detail"));
+    }
+
+    #[test]
+    fn release_update_notice_is_empty_without_an_update() {
+        assert_eq!(release_update_notice(None), "");
+    }
+
+    #[test]
+    fn release_update_notice_reports_the_version_when_set() {
+        let notice = release_update_notice(Some("v0.8.0"));
+        assert!(notice.contains("v0.8.0"));
+        assert!(notice.contains("restart"));
     }
 
     #[test]

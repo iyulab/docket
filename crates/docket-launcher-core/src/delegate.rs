@@ -14,7 +14,24 @@ use std::process::Command;
 /// returns its exit code (or 1 if it was killed by a signal on Unix, which
 /// has no exit code — matches conventional shell behavior).
 pub fn run(binary: &Path, args: &[&str]) -> anyhow::Result<i32> {
-    let status = Command::new(binary).args(args).status()?;
+    run_with_env(binary, args, &[])
+}
+
+/// Same as `run`, but with `extra_env` set on the child in addition to this
+/// process's own inherited environment — used to hand a launcher-only signal
+/// (e.g. "a newer release was just cached") to the worker it is about to
+/// exec without touching `run`'s existing callers.
+pub fn run_with_env(
+    binary: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> anyhow::Result<i32> {
+    let mut command = Command::new(binary);
+    command.args(args);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let status = command.status()?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -42,5 +59,28 @@ mod tests {
 
         let code = run(Path::new(bin), args).unwrap();
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn extra_env_reaches_the_child() {
+        #[cfg(windows)]
+        let (bin, args): (&str, &[&str]) = (
+            "cmd.exe",
+            &[
+                "/c",
+                "if \"%DOCKET_TEST_VAR%\"==\"present\" (exit 5) else (exit 6)",
+            ],
+        );
+        #[cfg(not(windows))]
+        let (bin, args): (&str, &[&str]) = (
+            "sh",
+            &[
+                "-c",
+                "[ \"$DOCKET_TEST_VAR\" = present ] && exit 5 || exit 6",
+            ],
+        );
+
+        let code = run_with_env(Path::new(bin), args, &[("DOCKET_TEST_VAR", "present")]).unwrap();
+        assert_eq!(code, 5);
     }
 }

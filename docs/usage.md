@@ -66,6 +66,13 @@ launcher also re-checks once an hour in the background for as long as the sessio
 prints a one-line warning to stderr the first time it finds a newer release than the one the session
 started with — restart the session (or the MCP connection) to pick it up.
 
+`docket-cc`, by contrast, is invoked fresh on every `SessionStart` (§7) rather than staying up for
+the whole session, so its launcher's release check is never stale by more than one session start. When
+that check is the one that *just* downloaded a release no launcher on the machine had cached before,
+`docket-cc hook`'s own output — which a `SessionStart` hook does surface to you, unlike an
+already-running `docket-mcp` server's stderr — adds a line naming the new version and prompting you to
+restart any other open sessions to pick it up.
+
 ## 3. Register `docket-mcp` with an MCP client
 
 Claude Code:
