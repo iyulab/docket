@@ -164,6 +164,14 @@ struct TagsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SetRequesterParams {
+    item_id: String,
+    /// The corrected requester identity. Must not be blank.
+    requester: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListTagsParams {
     /// Scope the vocabulary to items under this exact-match topic.
     #[serde(default)]
@@ -562,6 +570,27 @@ impl DocketMcp {
         let resp = self
             .http
             .post(format!("{}/items/{}/archive", self.base_url, p.item_id))
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Set requester on an item that doesn't have one yet — the one way to \
+            correct an item filed before a requester identity was available, or one a \
+            migration left blank. State-independent (works on a closed item too — this \
+            corrects metadata, it isn't a workflow transition). Does not cover assignee/turn \
+            or title/body/topic; those have no edit path yet."
+    )]
+    async fn set_item_requester(
+        &self,
+        Parameters(p): Parameters<SetRequesterParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .patch(format!("{}/items/{}", self.base_url, p.item_id))
+            .json(&serde_json::json!({ "requester": p.requester }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -1373,5 +1402,73 @@ mod tests {
         let value = json_value(&result);
         assert_eq!(value["items"][0]["body"], serde_json::Value::Null);
         assert_eq!(value["items"][0]["title"], "t");
+    }
+
+    #[tokio::test]
+    async fn set_item_requester_backfills_a_blank_requester() {
+        let dir = std::env::temp_dir().join(format!(
+            "docket-mcp-test-set-requester-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("set-requester.db");
+        let core = spawn_core(18430, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "filed without a requester".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+        assert_eq!(json_value(&created)["requester"], serde_json::Value::Null);
+
+        let updated = server
+            .set_item_requester(Parameters(SetRequesterParams {
+                item_id: item_id.clone(),
+                requester: "backfilled-reporter".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(json_value(&updated)["requester"], "backfilled-reporter");
+
+        let refetched = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: Some("backfilled-reporter".to_string()),
+                topic_scope: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&refetched)["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == item_id)
+        );
+
+        let rejected = server
+            .set_item_requester(Parameters(SetRequesterParams {
+                item_id,
+                requester: "   ".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(rejected.is_error, Some(true));
     }
 }
