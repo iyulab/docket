@@ -273,7 +273,17 @@ async fn main() -> anyhow::Result<()> {
     // registered to get an answer.
     if std::env::args().nth(1).as_deref() == Some("topic") {
         let cwd = std::env::current_dir()?;
-        println!("{}", topic::derive_topic(&cwd));
+        if std::env::args().nth(2).as_deref() == Some("--all") {
+            // One topic per line — pastes directly into `register_worker`'s
+            // `topics[]` (or a `docket-mcp` `topics: [...]` call) without
+            // the caller having to enumerate `.gitmodules` by hand. See the
+            // "docket-cc topic이 엄브렐러+서브모듈..." issue.
+            for t in topic::derive_all_topics(&cwd) {
+                println!("{t}");
+            }
+        } else {
+            println!("{}", topic::derive_topic(&cwd));
+        }
         return Ok(());
     }
 

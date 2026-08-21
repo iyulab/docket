@@ -22,6 +22,7 @@
 //! the intended way to opt a specific directory into a finer-grained topic
 //! than the repo-level default.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// The public entry point. Never fails — a directory with no `.git`
@@ -39,6 +40,69 @@ pub fn derive_topic(start: &Path) -> String {
             .unwrap_or_else(|| folder_name(&root)),
         None => folder_name(start),
     }
+}
+
+/// `derive_topic`'s upward walk stops at the nearest `.git`, deliberately —
+/// a submodule never inherits its umbrella's identity (see the module doc).
+/// This is the other direction: `start`'s own topic, plus the topic of
+/// every submodule nested anywhere underneath its repository root, read
+/// straight from `.gitmodules` (recursing into a submodule's own
+/// `.gitmodules` for an umbrella-of-umbrellas). A caller working across an
+/// umbrella and its submodules — this repository's own `docket-works`/
+/// `docket` pair included — otherwise has to enumerate and register every
+/// sibling topic by hand, and a missed one goes silently unnoticed (a
+/// `topic_scope`/`mine` filter just returns fewer rows, no error). Order:
+/// `start`'s own topic first, then each submodule in `.gitmodules`
+/// declaration order, depth-first. Deduplicated, so an override that
+/// happens to collide with a submodule's derived topic isn't listed twice.
+pub fn derive_all_topics(start: &Path) -> Vec<String> {
+    let mut topics = vec![derive_topic(start)];
+    if let Some((root, _)) = find_repo_root(start) {
+        collect_submodule_topics(&root, &mut topics);
+    }
+    let mut seen = HashSet::new();
+    topics.retain(|t| seen.insert(t.clone()));
+    topics
+}
+
+/// Reads `repo_root/.gitmodules` (absent → no submodules, not an error) and
+/// appends each listed submodule's topic, recursing into any submodule that
+/// is itself an umbrella. A submodule directory that doesn't actually exist
+/// or isn't checked out (`.gitmodules` lists it, but `git submodule update`
+/// was never run) is skipped rather than falling back to a folder-name
+/// topic — an uninitialized submodule has no `origin` remote to derive from
+/// and reporting a bare directory name here would be more misleading than
+/// silence.
+fn collect_submodule_topics(repo_root: &Path, topics: &mut Vec<String>) {
+    let Ok(content) = std::fs::read_to_string(repo_root.join(".gitmodules")) else {
+        return;
+    };
+    for path in gitmodule_paths(&content) {
+        let submodule_dir = repo_root.join(&path);
+        if submodule_dir.join(".git").exists() {
+            topics.push(derive_topic(&submodule_dir));
+            collect_submodule_topics(&submodule_dir, topics);
+        }
+    }
+}
+
+/// A deliberately minimal `.gitmodules` reader — same "one thing, no
+/// general-purpose config library" rationale as `parse_remote_origin_url`
+/// below. Extracts every `path = ...` value regardless of which
+/// `[submodule "name"]` section it sits under, since only the checkout path
+/// (not the section name) is needed to locate each submodule on disk.
+fn gitmodule_paths(content: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if let Some(rest) = line.strip_prefix("path") {
+            let rest = rest.trim_start();
+            if let Some(value) = rest.strip_prefix('=') {
+                paths.push(value.trim().to_string());
+            }
+        }
+    }
+    paths
 }
 
 fn folder_name(path: &Path) -> String {
@@ -319,6 +383,125 @@ mod tests {
         .unwrap();
 
         assert_eq!(derive_topic(&root), folder_name(&root));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The umbrella+submodule shape this repository itself is in — walking
+    /// from the umbrella root must list both the umbrella's own topic and
+    /// the submodule's, in `.gitmodules` order, exactly the gap the
+    /// "docket-cc topic이 엄브렐러+서브모듈..." issue reported.
+    #[test]
+    fn derive_all_topics_lists_the_umbrella_and_its_submodule() {
+        let umbrella = temp_dir("all-topics-umbrella");
+        write_config_with_origin(
+            &umbrella.join(".git"),
+            "https://github.com/iyulab/docket-works.git",
+        );
+        std::fs::write(
+            umbrella.join(".gitmodules"),
+            "[submodule \"docket\"]\n\tpath = docket\n\turl = https://github.com/iyulab/docket.git\n",
+        )
+        .unwrap();
+        let submodule_dir = umbrella.join("docket");
+        std::fs::create_dir_all(&submodule_dir).unwrap();
+        std::fs::write(
+            submodule_dir.join(".git"),
+            "gitdir: ../.git/modules/docket\n",
+        )
+        .unwrap();
+        write_config_with_origin(
+            &umbrella.join(".git").join("modules").join("docket"),
+            "https://github.com/iyulab/docket.git",
+        );
+
+        assert_eq!(
+            derive_all_topics(&umbrella),
+            vec![
+                "iyulab/docket-works".to_string(),
+                "iyulab/docket".to_string(),
+            ]
+        );
+
+        std::fs::remove_dir_all(&umbrella).unwrap();
+    }
+
+    /// A submodule listed in `.gitmodules` but never actually checked out
+    /// (no `git submodule update`) has nothing to derive a topic from —
+    /// must be skipped, not reported under a misleading folder-name
+    /// fallback.
+    #[test]
+    fn derive_all_topics_skips_an_uninitialized_submodule() {
+        let umbrella = temp_dir("all-topics-uninit");
+        write_config_with_origin(
+            &umbrella.join(".git"),
+            "https://github.com/iyulab/docket-works.git",
+        );
+        std::fs::write(
+            umbrella.join(".gitmodules"),
+            "[submodule \"docket\"]\n\tpath = docket\n\turl = https://github.com/iyulab/docket.git\n",
+        )
+        .unwrap();
+        // Note: no `docket/` directory created at all — an uninitialized
+        // submodule reference with nothing checked out on disk.
+
+        assert_eq!(
+            derive_all_topics(&umbrella),
+            vec!["iyulab/docket-works".to_string()]
+        );
+
+        std::fs::remove_dir_all(&umbrella).unwrap();
+    }
+
+    /// Nested umbrellas (a submodule that is itself an umbrella) must
+    /// recurse — the whole point of walking `.gitmodules` rather than
+    /// listing only the immediate children.
+    #[test]
+    fn derive_all_topics_recurses_into_a_nested_umbrella() {
+        let root = temp_dir("all-topics-nested");
+        write_config_with_origin(&root.join(".git"), "https://github.com/org/root.git");
+        std::fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"mid\"]\n\tpath = mid\n\turl = https://github.com/org/mid.git\n",
+        )
+        .unwrap();
+        let mid_dir = root.join("mid");
+        std::fs::create_dir_all(&mid_dir).unwrap();
+        std::fs::write(mid_dir.join(".git"), "gitdir: ../.git/modules/mid\n").unwrap();
+        write_config_with_origin(
+            &root.join(".git").join("modules").join("mid"),
+            "https://github.com/org/mid.git",
+        );
+        std::fs::write(
+            mid_dir.join(".gitmodules"),
+            "[submodule \"leaf\"]\n\tpath = leaf\n\turl = https://github.com/org/leaf.git\n",
+        )
+        .unwrap();
+        let leaf_dir = mid_dir.join("leaf");
+        std::fs::create_dir_all(&leaf_dir).unwrap();
+        std::fs::write(
+            leaf_dir.join(".git"),
+            "gitdir: ../../.git/modules/mid/modules/leaf\n",
+        )
+        .unwrap();
+        write_config_with_origin(
+            &root
+                .join(".git")
+                .join("modules")
+                .join("mid")
+                .join("modules")
+                .join("leaf"),
+            "https://github.com/org/leaf.git",
+        );
+
+        assert_eq!(
+            derive_all_topics(&root),
+            vec![
+                "org/root".to_string(),
+                "org/mid".to_string(),
+                "org/leaf".to_string(),
+            ]
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
