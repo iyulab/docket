@@ -269,6 +269,17 @@ struct ListItemsQuery {
     /// `assignee`, above). This is the "discover it via list" step of the M1
     /// completion criteria. Was `owned_by`, split and renamed by ADR-0010.
     topic_scope: Option<String>,
+    /// A worker id — narrows the list to items that worker actually holds a
+    /// live stake in right now: either it currently holds the item
+    /// (`assignee` match) or it filed the item and the item is sitting in
+    /// `resolved` waiting on that requester's approval. Combines two
+    /// single-field filters (`assignee`, `requester`) that a caller
+    /// otherwise has to know to run separately and merge themselves — see
+    /// the "docket-mcp에 '내가 지금 쥐고 있는 것'..." issue. Deliberately excludes
+    /// `topic_scope`: jurisdiction over a topic isn't holding an item.
+    /// ANDs with every other filter on this struct, same as `assignee`/
+    /// `requester` do individually.
+    mine: Option<String>,
     /// Excludes archived items by default (`None`/`Some(false)`); `Some(true)`
     /// returns only archived items. See ADR-0013.
     #[serde(default)]
@@ -371,6 +382,17 @@ async fn list_items(
         Some(requester) => items
             .into_iter()
             .filter(|item| item.requester.as_deref() == Some(requester.as_str()))
+            .collect(),
+        None => items,
+    };
+    let items: Vec<Item> = match q.mine {
+        Some(worker_id) => items
+            .into_iter()
+            .filter(|item| {
+                item.assignee.as_deref() == Some(worker_id.as_str())
+                    || (item.requester.as_deref() == Some(worker_id.as_str())
+                        && item.state == ItemState::Resolved)
+            })
             .collect(),
         None => items,
     };
@@ -905,6 +927,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(json_body(resp).await.as_array().unwrap().len(), 0);
+    }
+
+    /// `mine` ORs `assignee` and (`requester` + `resolved`) — a worker that
+    /// currently holds an item matches, and so does a requester whose filed
+    /// item is sitting in `resolved` waiting on their approval, but a
+    /// requester whose item is still `claimed` does not (nothing to approve
+    /// yet). See the "docket-mcp에 '내가 지금 쥐고 있는 것'..." issue.
+    #[tokio::test]
+    async fn mine_filter_ors_assignee_and_pending_approval_requester() {
+        let app = test_app();
+
+        // Held by w1 (assignee), filed by someone else — matches mine=w1.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "held"}),
+            ))
+            .await
+            .unwrap();
+        let held_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{held_id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            ))
+            .await
+            .unwrap();
+
+        // Filed by r1, claimed+submitted by w2 — now resolved, waiting on
+        // r1's approval — matches mine=r1.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "pending-approval", "requester": "r1"}),
+            ))
+            .await
+            .unwrap();
+        let pending_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{pending_id}/claim"),
+                serde_json::json!({"worker_id": "w2"}),
+            ))
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{pending_id}/submit"),
+                serde_json::json!({"worker_id": "w2"}),
+            ))
+            .await
+            .unwrap();
+
+        // Filed by r1, still claimed (not yet submitted) — must NOT match
+        // mine=r1 — there's nothing for r1 to act on yet.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "still-in-progress", "requester": "r1"}),
+            ))
+            .await
+            .unwrap();
+        let in_progress_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{in_progress_id}/claim"),
+                serde_json::json!({"worker_id": "w2"}),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?mine=w1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed = json_body(resp).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], held_id);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items?mine=r1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let listed = json_body(resp).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], pending_id);
+        let _ = in_progress_id; // asserted absent by the length checks above
     }
 
     /// The one way to give a pre-existing item a `requester` after the fact —

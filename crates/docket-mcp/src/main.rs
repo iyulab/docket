@@ -34,6 +34,13 @@ struct RegisterWorkerParams {
     topics: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GetWorkerParams {
+    /// The worker id to look up.
+    id: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CreateItemParams {
@@ -75,6 +82,14 @@ struct ListItemsParams {
     /// topic-jurisdiction filter, not an ownership filter.
     #[serde(default)]
     topic_scope: Option<String>,
+    /// A worker id — the one-shot "what do I currently hold" filter: matches
+    /// items this worker is the `assignee` of, OR items this worker filed
+    /// (`requester`) that are now `resolved` and waiting on its approval.
+    /// ANDs with every other filter here, same as `assignee`/`requester`
+    /// individually. Prefer this over manually combining `assignee` and
+    /// `requester`+`state=resolved` yourself.
+    #[serde(default)]
+    mine: Option<String>,
     /// Excludes archived items by default; `true` returns only archived
     /// items (explicit archive browse). See ADR-0013.
     #[serde(default)]
@@ -111,6 +126,23 @@ struct SearchItemsParams {
     topic: Option<String>,
     #[serde(default)]
     state: Option<String>,
+    /// A worker id — narrows results to items whose `assignee` (current
+    /// holder) is exactly this worker. Same semantics as `list_items`'s
+    /// field of the same name.
+    #[serde(default)]
+    assignee: Option<String>,
+    /// Exact-match on `requester` — symmetric to `assignee`, above.
+    #[serde(default)]
+    requester: Option<String>,
+    /// A registered worker id — narrows results to items under any topic
+    /// that worker is registered for (prefix match). Same semantics as
+    /// `list_items`'s field of the same name.
+    #[serde(default)]
+    topic_scope: Option<String>,
+    /// A worker id — the one-shot "what do I currently hold" filter. Same
+    /// semantics as `list_items`'s field of the same name.
+    #[serde(default)]
+    mine: Option<String>,
     /// Excludes archived items by default; `true` returns only archived
     /// items (explicit archive browse). See ADR-0013.
     #[serde(default)]
@@ -371,6 +403,22 @@ impl DocketMcp {
         respond::<WorkerDto>(resp).await
     }
 
+    #[tool(
+        description = "Fetch a worker's own registration — its topics and online status. The only way to positively confirm what you're currently registered as (topic_scope/mine treat an unknown worker id the same as one with no matching topics: an empty result, not an error)"
+    )]
+    async fn get_worker(
+        &self,
+        Parameters(p): Parameters<GetWorkerParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .get(format!("{}/workers/{}", self.base_url, p.id))
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<WorkerDto>(resp).await
+    }
+
     #[tool(description = "File a new item in front of a topic")]
     async fn create_item(
         &self,
@@ -387,7 +435,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker currently holds a live stake in (mine — assignee OR resolved-and-awaiting-my-approval), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
     )]
     async fn list_items(
         &self,
@@ -406,6 +454,7 @@ impl DocketMcp {
                 ("assignee", p.assignee.as_deref()),
                 ("requester", p.requester.as_deref()),
                 ("topic_scope", p.topic_scope.as_deref()),
+                ("mine", p.mine.as_deref()),
                 ("archived", archived.as_deref()),
                 ("limit", limit.as_deref()),
                 ("offset", offset.as_deref()),
@@ -418,7 +467,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
     )]
     async fn search_items(
         &self,
@@ -439,6 +488,18 @@ impl DocketMcp {
         }
         if let Some(s) = p.state.as_deref() {
             query_pairs.push(("state", s));
+        }
+        if let Some(a) = p.assignee.as_deref() {
+            query_pairs.push(("assignee", a));
+        }
+        if let Some(r) = p.requester.as_deref() {
+            query_pairs.push(("requester", r));
+        }
+        if let Some(t) = p.topic_scope.as_deref() {
+            query_pairs.push(("topic_scope", t));
+        }
+        if let Some(m) = p.mine.as_deref() {
+            query_pairs.push(("mine", m));
         }
         let archived = p.archived.map(|a| a.to_string());
         if let Some(a) = archived.as_deref() {
@@ -846,6 +907,7 @@ mod tests {
                 assignee: None,
                 requester: None,
                 topic_scope: Some("w1".to_string()),
+                mine: None,
                 archived: None,
                 limit: None,
                 offset: None,
@@ -1147,6 +1209,10 @@ mod tests {
                 tag_match: None,
                 topic: None,
                 state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
                 archived: None,
                 limit: None,
                 offset: None,
@@ -1242,6 +1308,7 @@ mod tests {
                 assignee: None,
                 requester: None,
                 topic_scope: None,
+                mine: None,
                 archived: None,
                 limit: None,
                 offset: None,
@@ -1264,6 +1331,7 @@ mod tests {
                 assignee: None,
                 requester: None,
                 topic_scope: None,
+                mine: None,
                 archived: Some(true),
                 limit: None,
                 offset: None,
@@ -1350,6 +1418,7 @@ mod tests {
                 assignee: None,
                 requester: None,
                 topic_scope: None,
+                mine: None,
                 archived: None,
                 limit: Some(2),
                 offset: Some(1),
@@ -1392,6 +1461,7 @@ mod tests {
                 assignee: None,
                 requester: None,
                 topic_scope: None,
+                mine: None,
                 archived: None,
                 limit: None,
                 offset: None,
@@ -1447,6 +1517,7 @@ mod tests {
                 assignee: None,
                 requester: Some("backfilled-reporter".to_string()),
                 topic_scope: None,
+                mine: None,
                 archived: None,
                 limit: None,
                 offset: None,
@@ -1470,5 +1541,135 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejected.is_error, Some(true));
+    }
+
+    /// `get_worker` is the only positive-confirmation path for registration
+    /// — round-trips a real registration and 404s a never-registered id,
+    /// per docs/usage.md's read/write not-found asymmetry.
+    #[tokio::test]
+    async fn get_worker_confirms_registration_and_404s_when_unknown() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-get-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("get-worker.db");
+        let core = spawn_core(18431, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: "w1".to_string(),
+                topics: vec!["iyulab".to_string()],
+            }))
+            .await
+            .unwrap();
+
+        let found = server
+            .get_worker(Parameters(GetWorkerParams {
+                id: "w1".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(found.is_error, Some(true));
+        assert_eq!(json_value(&found)["id"], "w1");
+        assert_eq!(json_value(&found)["topics"][0], "iyulab");
+
+        let missing = server
+            .get_worker(Parameters(GetWorkerParams {
+                id: "never-registered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+    }
+
+    /// `mine` ORs assignee and pending-approval-requester — verifies the
+    /// filter is actually forwarded end to end through both `list_items`
+    /// and `search_items` (docket-core's own test already covers the OR
+    /// logic itself; this is a thin-wrapper parity check, same as every
+    /// other filter in this file).
+    #[tokio::test]
+    async fn mine_filter_is_forwarded_through_list_items_and_search_items() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-mine-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("mine.db");
+        let core = spawn_core(18432, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let held = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "held by w1".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let held_id = field(&held, "id");
+        server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: held_id.clone(),
+                worker_id: "w1".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "held by someone else".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let listed = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: Some("w1".to_string()),
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+            }))
+            .await
+            .unwrap();
+        let listed_items = json_value(&listed)["items"].as_array().unwrap().clone();
+        assert_eq!(listed_items.len(), 1);
+        assert_eq!(listed_items[0]["id"], held_id);
+
+        let searched = server
+            .search_items(Parameters(SearchItemsParams {
+                query: None,
+                tags: vec![],
+                tag_match: None,
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: Some("w1".to_string()),
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+            }))
+            .await
+            .unwrap();
+        let searched_items = json_value(&searched)["items"].as_array().unwrap().clone();
+        assert_eq!(searched_items.len(), 1);
+        assert_eq!(searched_items[0]["id"], held_id);
     }
 }
