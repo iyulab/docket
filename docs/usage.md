@@ -106,10 +106,11 @@ losing a claim race), never a silent protocol failure.
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5 |
+| `get_worker` | `id` | `GET /workers/{id}` | The only way to positively confirm a worker is registered — see the read/write not-found note below. 404s on an unregistered id |
 | `create_item` | `topic`, `title`, `body?`, `tags[]?`, `requester?` | `POST /items` | **Call `search_items` first** to avoid filing a duplicate. `requester` is who this item is being worked for — optional (see [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) / [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md)) |
 | `set_item_requester` | `item_id`, `requester` | `PATCH /items/{id} {"requester"}` | Backfills `requester` on an item that doesn't have one yet — the one way to correct an item filed before a requester identity was available, or one a migration left blank. State-unrestricted (works on a closed item too — this corrects metadata, not a workflow transition). `requester` must not be blank. Does not cover `assignee`/`turn` or `title`/`body`/`topic` — those have no edit path yet |
-| `list_items` | `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `archived?`, `limit?`, `offset?`, `summary?` | `GET /items?topic=&state=&assignee=&requester=&topic_scope=&archived=&limit=&offset=&summary=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `assignee`/`requester` match the current assignee/requester exactly. `archived` defaults to `false` (today's behavior); `true` browses only the archive — see §4's archiving note. **Tool result is `{items, total}`, not a bare array** — `limit` defaults to 50, capped at 200; `total` is the row count before that cap, so a `total` above `items.length` means page further with `offset` ([ADR-0014](decisions/ADR-0014-list-search-pagination-and-list-topics.md)). Over HTTP the body stays a bare `Item[]`; `total` comes back as the `X-Total-Count` header instead. `summary=true` nulls every returned item's `body` — use it when you only need enough of each row to decide which item (if any) to fetch in full next via `get_item`/`GET /items/{id}`, which is unaffected |
-| `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?`, `archived?`, `limit?`, `offset?`, `summary?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=&archived=&limit=&offset=&summary=` | `query` full-text matches title+body+comments — matched word-by-word (each word independently, not as one exact adjacent phrase), so word order doesn't matter and a query word also prefix-matches a token carrying a suffix it doesn't have (e.g. a stemmed or CJK-particle-suffixed form). `tag_match` is `any` (default) or `all`; `archived`/`limit`/`offset`/`summary`/response shape same as `list_items` above |
+| `list_items` | `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `mine?`, `archived?`, `limit?`, `offset?`, `summary?` | `GET /items?topic=&state=&assignee=&requester=&topic_scope=&mine=&archived=&limit=&offset=&summary=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `assignee`/`requester` match the current assignee/requester exactly. `mine=<worker id>` is the one-shot "what do I currently hold" filter — `assignee=<id>` OR (`requester=<id>` AND `state=resolved`), so you don't have to know to run and merge those two yourself; ANDs with every other filter here, same as `assignee`/`requester` individually — see §5. `archived` defaults to `false` (today's behavior); `true` browses only the archive — see §4's archiving note. **Tool result is `{items, total}`, not a bare array** — `limit` defaults to 50, capped at 200; `total` is the row count before that cap, so a `total` above `items.length` means page further with `offset` ([ADR-0014](decisions/ADR-0014-list-search-pagination-and-list-topics.md)). Over HTTP the body stays a bare `Item[]`; `total` comes back as the `X-Total-Count` header instead. `summary=true` nulls every returned item's `body` — use it when you only need enough of each row to decide which item (if any) to fetch in full next via `get_item`/`GET /items/{id}`, which is unaffected |
+| `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `mine?`, `archived?`, `limit?`, `offset?`, `summary?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=&assignee=&requester=&topic_scope=&mine=&archived=&limit=&offset=&summary=` | `query` full-text matches title+body+comments — matched word-by-word (each word independently, not as one exact adjacent phrase), so word order doesn't matter and a query word also prefix-matches a token carrying a suffix it doesn't have (e.g. a stemmed or CJK-particle-suffixed form). `tag_match` is `any` (default) or `all`; `assignee`/`requester`/`topic_scope`/`mine`/`archived`/`limit`/`offset`/`summary`/response shape same as `list_items` above — full-text search and an ownership filter combine in one call |
 | `claim_item` | `item_id`, `worker_id` | `POST /items/{id}/claim {"worker_id"}` | `open → claimed`. Exclusive — loser gets a tool-level error, not a crash |
 | `submit_item` | `item_id`, `worker_id` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current assignee may submit |
 | `approve_item` | `item_id`, `author?` | `POST /items/{id}/approve {"author"}` | `resolved → closed`, `resolution=done`. The requester's sign-off. `author` defaults to `"unknown"` if omitted |
@@ -144,10 +145,12 @@ Neither transition adds a new `state` value — both land back on an ordinary ex
 *why* the item bounced lives in the comment `reason` records, not in `state` itself. See
 [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md).
 
-`GET /items/{id}` and `GET /workers/{id}` also exist at the HTTP level (fetch one item/worker by id)
-but have no MCP tool equivalent yet — reach them directly if you're a plain HTTP client, or
-`list_items`/`search_items` and filter if you're going through MCP. `GET /workers/{id}` is the only
-way to positively confirm a worker is registered — see the read/write not-found note below.
+`GET /items/{id}` also exists at the HTTP level (fetch one item by id) but has no MCP tool equivalent
+yet — reach it directly if you're a plain HTTP client, or `list_items`/`search_items` and filter if
+you're going through MCP. `GET /workers/{id}` (fetch one worker by id) does have an MCP tool —
+`get_worker`, table above — it's the only way to positively confirm a worker is registered, since
+every list-style filter answers an unregistered id the same as a registered one with no matches (see
+the read/write not-found note below).
 
 `PATCH /items/{id} {"requester": "…"}` sets `requester` on an item that already exists — the only
 field this covers so far, and the only way to give an item a requester after creation (`requester` is
@@ -233,18 +236,20 @@ state) so this doesn't apply to either.
 **A *list/search* filter never 404s on a non-matching or unregistered reference — a call that
 targets one specific known resource by id does.** `list_items`/`search_items`/`list_comments`/
 `list_tags` answer any filter that matches nothing (an unknown `topic`, `assignee`, `requester`,
-`topic_scope` worker id, or `item_id`) with an empty result, the same way a database query does —
-there is no "does this reference exist" check on a filter. `GET /items/{id}` and
-`GET /workers/{id}`, and every mutate call (`create_item`/`claim_item`/`submit_item`/`approve_item`/
-`reject_item`/`reopen_item`/`archive_item`/`add_comment`/`add_tags`/`remove_tags`/`delete_item`/the
-three admin close operations), target one specific item or worker by id and 404 when it doesn't
-exist — fetching or acting on one named thing has nothing sensible to do with "no such reference"
-other than fail. Rely on this instead of treating an empty
+`topic_scope`/`mine` worker id, or `item_id`) with an empty result, the same way a database query
+does — there is no "does this reference exist" check on a filter. `GET /items/{id}` and
+`GET /workers/{id}` (`get_worker`), and every mutate call (`create_item`/`claim_item`/`submit_item`/
+`approve_item`/`reject_item`/`reopen_item`/`archive_item`/`add_comment`/`add_tags`/`remove_tags`/
+`delete_item`/the three admin close operations), target one specific item or worker by id and 404
+when it doesn't exist — fetching or acting on one named thing has nothing sensible to do with "no
+such reference" other than fail. Rely on this instead of treating an empty
 list as ambiguous: it always means "no matches", never "the thing you filtered by doesn't exist" —
 there's nothing else it could mean, since a filter doesn't look that up in the first place.
-`list_items(topic_scope=<id>)` in particular can't tell you whether `<id>` is a registered worker —
-it treats "unregistered" the same as "registered, no matching topics" (both: empty result) — call
-`GET /workers/{id}` directly if you need to know which.
+`list_items(topic_scope=<id>)`/`list_items(mine=<id>)` in particular can't tell you whether `<id>` is
+a registered worker — `topic_scope` treats "unregistered" the same as "registered, no matching
+topics" (both: empty result), and `mine` doesn't touch registration at all (it only ever compares
+against `assignee`/`requester` on items, which exist independently of any worker record) — call
+`get_worker` directly if you need to know whether an id is actually registered.
 
 ## 5. The worker loop
 
@@ -253,13 +258,17 @@ This is the pattern an agent repeats:
 1. **Once per session**: `register_worker(id, topics)` — `topics` are prefixes (`"iyulab"` owns every
    topic starting `iyulab/…`, exact match or `/`-delimited prefix; see `topic_matches` in
    [glossary.md](glossary.md)).
-2. **Discover work**: `list_items(topic_scope=<your id>, state="open")`.
-3. **Before filing something new**: `search_items(query=…)` — check it doesn't already exist.
-4. **Take an item**: `claim_item(item_id, worker_id)`. If it 409s, someone else got there first — go
-   back to step 2.
-5. Do the actual work.
-6. **Finish**: `submit_item(item_id, worker_id)` — moves it to `resolved`, waiting on the requester.
-7. The requester (whoever wanted the item done — may be a different worker, or a human via
+2. **Check what you already hold**: `list_items(mine=<your id>)` — catches an item claimed in a
+   prior session, or one waiting on your approval as requester, before you go looking for new work.
+   Cheaper and less error-prone than remembering to run `assignee=<id>` and `requester=<id>&state=
+   resolved` separately and merging them yourself.
+3. **Discover new work**: `list_items(topic_scope=<your id>, state="open")`.
+4. **Before filing something new**: `search_items(query=…)` — check it doesn't already exist.
+5. **Take an item**: `claim_item(item_id, worker_id)`. If it 409s, someone else got there first — go
+   back to step 3.
+6. Do the actual work.
+7. **Finish**: `submit_item(item_id, worker_id)` — moves it to `resolved`, waiting on the requester.
+8. The requester (whoever wanted the item done — may be a different worker, or a human via
    `docket-console`) calls `approve_item(item_id)` once satisfied, closing it.
 
 Tags and comments are asynchronous side-channels on top of this loop — attach them whenever relevant,
@@ -285,6 +294,23 @@ any ancestor directory to override the derivation entirely.
 ownership. Running several sessions in parallel via `git worktree` still means they all resolve to the
 same topic and safely race for items in it via `claim` — the worktree doesn't need to (and shouldn't
 try to) also carve out a separate topic per worktree.
+
+Working across an umbrella and its submodules (like this repository's own `docket-works`/`docket`
+pair) means the umbrella root and each submodule resolve to *different* topics by design (above) — a
+session that only registers the one it happened to run `topic` from misses the others, silently
+(a `topic_scope`/`mine` filter on the missed topic just returns fewer rows, no error). `topic --all`
+covers the whole tree in one call, reading `.gitmodules` recursively (an umbrella-of-umbrellas
+included) rather than requiring you to enumerate submodules by hand:
+
+```bash
+cd path/to/some/umbrella && docket-cc topic --all
+# iyulab/some-umbrella
+# iyulab/some-submodule
+```
+
+One topic per line, in `.gitmodules` declaration order — pass straight into `register_worker`'s
+`topics[]`. An uninitialized submodule (listed in `.gitmodules` but never `git submodule update`d) is
+skipped, not guessed at.
 
 ## 7. File projection & Claude Code hook (`docket-cc`)
 

@@ -140,6 +140,16 @@ cd path/to/some/repo && docket-cc topic
 
 The topic comes from the nearest `.git` above the current directory — its `origin` remote's `org/repo`. The whole repository is one topic by default, however many packages live inside it (a package inside a monorepo resolves to the same topic as the repository root). A submodule's own `.git` stops the walk at the submodule, so it resolves to its own remote rather than the umbrella repository's — and a `git worktree` resolves through to the same remote as the repository it was created from. Drop a `.docket/topic` file (one line, the topic to use) in any ancestor directory to override the derivation entirely — useful when there's no remote yet, or to opt a specific directory into a finer-grained topic than the repo-level default.
 
+`docket-cc topic --all` covers an umbrella and every submodule underneath it (recursively, `.gitmodules`-driven) in one call — the umbrella root and each submodule resolve to different topics by design (above), so registering only the one topic you happened to run `topic` from misses the rest:
+
+```
+cd path/to/some/umbrella && docket-cc topic --all
+# iyulab/some-umbrella
+# iyulab/some-submodule
+```
+
+One topic per line, ready to drop straight into `register_worker`'s `topics[]`. See [docs/usage.md](docs/usage.md#6-topic-derivation-docket-cc-topic) for the full detail.
+
 **`git worktree` and `claim` are orthogonal, not substitutes.** Running several Claude Code sessions in parallel usually means several `git worktree` checkouts of the same repository — but a worktree only isolates the working tree on disk; it says nothing about which session owns which item. Every worktree of the same repository resolves to the same topic (see above), so nothing about worktree isolation prevents two sessions from claiming — and safely racing for — items in that topic; `claim` is what makes exactly one of them win. Conversely, `claim` doesn't isolate a session's filesystem changes from another session's — that's what the worktree is for. Use both together: the worktree keeps two sessions from stepping on each other's files, `claim` keeps them from stepping on each other's work.
 
 ### As a console
