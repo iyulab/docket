@@ -219,9 +219,11 @@ struct AddCommentParams {
     body: String,
 }
 
+/// Shared by every tool whose only input is an item id (`get_item`,
+/// `list_comments`, `archive_item`).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ListCommentsParams {
+struct ItemIdParams {
     item_id: String,
 }
 
@@ -620,13 +622,32 @@ impl DocketMcp {
     }
 
     #[tool(
+        description = "Fetch a single item by id — the way to resolve an id from a shared link \
+            or a comment into its current state/resolution/requester/assignee/turn/tags/body. \
+            Unaffected by list_items/search_items' summary mode (body always included) and \
+            returns archived items too (get_item is a direct id lookup, not a list query)."
+    )]
+    async fn get_item(
+        &self,
+        Parameters(p): Parameters<ItemIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .get(format!("{}/items/{}", self.base_url, p.item_id))
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
         description = "Archive an item — hides it from default list_items/search_items results \
             (still fully queryable with archived=true). Idempotent. Does not lose any data; \
             there is currently no unarchive operation."
     )]
     async fn archive_item(
         &self,
-        Parameters(p): Parameters<ListCommentsParams>,
+        Parameters(p): Parameters<ItemIdParams>,
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
@@ -743,7 +764,7 @@ impl DocketMcp {
     #[tool(description = "List an item's comment thread in chronological order")]
     async fn list_comments(
         &self,
-        Parameters(p): Parameters<ListCommentsParams>,
+        Parameters(p): Parameters<ItemIdParams>,
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
@@ -1260,7 +1281,7 @@ mod tests {
         assert_ne!(added.is_error, Some(true));
 
         let listed = server
-            .list_comments(Parameters(ListCommentsParams {
+            .list_comments(Parameters(ItemIdParams {
                 item_id: item_id.clone(),
             }))
             .await
@@ -1295,7 +1316,7 @@ mod tests {
         let item_id = field(&created, "id");
 
         server
-            .archive_item(Parameters(ListCommentsParams {
+            .archive_item(Parameters(ItemIdParams {
                 item_id: item_id.clone(),
             }))
             .await
@@ -1671,5 +1692,69 @@ mod tests {
         let searched_items = json_value(&searched)["items"].as_array().unwrap().clone();
         assert_eq!(searched_items.len(), 1);
         assert_eq!(searched_items[0]["id"], held_id);
+    }
+
+    /// `get_item` is the one-call path from an id (e.g. resolved out of a
+    /// shared link) to the item's current state — round-trips a created
+    /// item, 404s an unknown id, and confirms it still returns an archived
+    /// item (unlike list_items/search_items, which hide archived by
+    /// default).
+    #[tokio::test]
+    async fn get_item_round_trips_and_covers_archived_and_unknown() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-get-item-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("get-item.db");
+        let core = spawn_core(18433, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "resolve me by id".to_string(),
+                body: Some("full body".to_string()),
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        let fetched = server
+            .get_item(Parameters(ItemIdParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(fetched.is_error, Some(true));
+        assert_eq!(json_value(&fetched)["id"], item_id);
+        assert_eq!(json_value(&fetched)["body"], "full body");
+
+        server
+            .archive_item(Parameters(ItemIdParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+
+        let fetched_archived = server
+            .get_item(Parameters(ItemIdParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(fetched_archived.is_error, Some(true));
+        assert_eq!(json_value(&fetched_archived)["id"], item_id);
+
+        let missing = server
+            .get_item(Parameters(ItemIdParams {
+                item_id: "never-created".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
     }
 }

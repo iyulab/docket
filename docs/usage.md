@@ -118,6 +118,7 @@ losing a claim race), never a silent protocol failure.
 | `set_item_requester` | `item_id`, `requester` | `PATCH /items/{id} {"requester"}` | Backfills `requester` on an item that doesn't have one yet — the one way to correct an item filed before a requester identity was available, or one a migration left blank. State-unrestricted (works on a closed item too — this corrects metadata, not a workflow transition). `requester` must not be blank. Does not cover `assignee`/`turn` or `title`/`body`/`topic` — those have no edit path yet |
 | `list_items` | `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `mine?`, `archived?`, `limit?`, `offset?`, `summary?` | `GET /items?topic=&state=&assignee=&requester=&topic_scope=&mine=&archived=&limit=&offset=&summary=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `assignee`/`requester` match the current assignee/requester exactly. `mine=<worker id>` is the one-shot "what do I currently hold" filter — `assignee=<id>` OR (`requester=<id>` AND `state=resolved`), so you don't have to know to run and merge those two yourself; ANDs with every other filter here, same as `assignee`/`requester` individually — see §5. `archived` defaults to `false` (today's behavior); `true` browses only the archive — see §4's archiving note. **Tool result is `{items, total}`, not a bare array** — `limit` defaults to 50, capped at 200; `total` is the row count before that cap, so a `total` above `items.length` means page further with `offset` ([ADR-0014](decisions/ADR-0014-list-search-pagination-and-list-topics.md)). Over HTTP the body stays a bare `Item[]`; `total` comes back as the `X-Total-Count` header instead. `summary=true` nulls every returned item's `body` — use it when you only need enough of each row to decide which item (if any) to fetch in full next via `get_item`/`GET /items/{id}`, which is unaffected |
 | `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `mine?`, `archived?`, `limit?`, `offset?`, `summary?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=&assignee=&requester=&topic_scope=&mine=&archived=&limit=&offset=&summary=` | `query` full-text matches title+body+comments — matched word-by-word (each word independently, not as one exact adjacent phrase), so word order doesn't matter and a query word also prefix-matches a token carrying a suffix it doesn't have (e.g. a stemmed or CJK-particle-suffixed form). `tag_match` is `any` (default) or `all`; `assignee`/`requester`/`topic_scope`/`mine`/`archived`/`limit`/`offset`/`summary`/response shape same as `list_items` above — full-text search and an ownership filter combine in one call |
+| `get_item` | `item_id` | `GET /items/{id}` | Fetch one item by id — the way to resolve an id from a shared link or a comment into its current state/resolution/requester/assignee/turn/tags/body. Unaffected by `list_items`/`search_items`' `summary` mode (`body` always included), and returns archived items too (a direct id lookup, not a list query) |
 | `claim_item` | `item_id`, `worker_id` | `POST /items/{id}/claim {"worker_id"}` | `open → claimed`. Exclusive — loser gets a tool-level error, not a crash |
 | `submit_item` | `item_id`, `worker_id` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current assignee may submit |
 | `approve_item` | `item_id`, `author?` | `POST /items/{id}/approve {"author"}` | `resolved → closed`, `resolution=done`. The requester's sign-off. `author` defaults to `"unknown"` if omitted |
@@ -152,12 +153,13 @@ Neither transition adds a new `state` value — both land back on an ordinary ex
 *why* the item bounced lives in the comment `reason` records, not in `state` itself. See
 [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md).
 
-`GET /items/{id}` also exists at the HTTP level (fetch one item by id) but has no MCP tool equivalent
-yet — reach it directly if you're a plain HTTP client, or `list_items`/`search_items` and filter if
-you're going through MCP. `GET /workers/{id}` (fetch one worker by id) does have an MCP tool —
-`get_worker`, table above — it's the only way to positively confirm a worker is registered, since
-every list-style filter answers an unregistered id the same as a registered one with no matches (see
-the read/write not-found note below).
+`GET /items/{id}` (fetch one item by id) has an MCP tool — `get_item`, table above. Prefer it over
+`list_items`/`search_items` plus a filter whenever you already have the id (e.g. from a shared link
+or a comment) — it's one call instead of a list-and-scan, and unlike the list tools it also reaches
+an archived item without passing `archived: true`. `GET /workers/{id}` (fetch one worker by id) has
+the same kind of MCP tool — `get_worker`, table above — it's the only way to positively confirm a
+worker is registered, since every list-style filter answers an unregistered id the same as a
+registered one with no matches (see the read/write not-found note below).
 
 `PATCH /items/{id} {"requester": "…"}` sets `requester` on an item that already exists — the only
 field this covers so far, and the only way to give an item a requester after creation (`requester` is
@@ -244,7 +246,7 @@ state) so this doesn't apply to either.
 targets one specific known resource by id does.** `list_items`/`search_items`/`list_comments`/
 `list_tags` answer any filter that matches nothing (an unknown `topic`, `assignee`, `requester`,
 `topic_scope`/`mine` worker id, or `item_id`) with an empty result, the same way a database query
-does — there is no "does this reference exist" check on a filter. `GET /items/{id}` and
+does — there is no "does this reference exist" check on a filter. `GET /items/{id}` (`get_item`) and
 `GET /workers/{id}` (`get_worker`), and every mutate call (`create_item`/`claim_item`/`submit_item`/
 `approve_item`/`reject_item`/`reopen_item`/`archive_item`/`add_comment`/`add_tags`/`remove_tags`/
 `delete_item`/the three admin close operations), target one specific item or worker by id and 404
