@@ -4,6 +4,7 @@ import {
   approveItem,
   archiveItem,
   claimItem,
+  deleteItem,
   fetchComments,
   fetchItems,
   fetchTags,
@@ -266,6 +267,24 @@ describe('archiveItem', () => {
 
     expect(result).toEqual(item)
     expect(fetch).toHaveBeenCalledWith('/api/items/i1/archive', { method: 'POST' })
+  })
+})
+
+describe('deleteItem', () => {
+  it('DELETEs with no body and resolves without a return value on 204', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 204 }),
+    )
+
+    await expect(deleteItem('i1')).resolves.toBeUndefined()
+    expect(fetch).toHaveBeenCalledWith('/api/items/i1', { method: 'DELETE' })
+  })
+
+  it('throws the server error message on failure', async () => {
+    mockFetchOnce({ error: 'not found' }, false, 404)
+
+    await expect(deleteItem('i1')).rejects.toThrow('not found')
   })
 })
 

@@ -195,8 +195,9 @@ duplicate` alone can't say duplicate of what, so `merge` also atomically tags th
 >   `resolution → invalid`. The item, its tags, and its comments all still exist and are still
 >   queryable — this is how you mark "this should never have been filed" while keeping a
 >   permanent, traceable record of that fact.
-> - **`DELETE /items/{id}`** (`delete_item`, HTTP-only, no MCP tool, no `author`/`reason` params —
->   there is no item left afterward to attach either to) *destroys* the item outright: the row,
+> - **`DELETE /items/{id}`** (`delete_item`, no MCP tool — reachable over plain HTTP or from
+>   `docket-console`'s detail view, no `author`/`reason` params since there is no item left
+>   afterward to attach either to) *destroys* the item outright: the row,
 >   its tags, and its comments are all gone. Nothing is left to query. This is for a mistaken or
 >   throwaway item where no trace should remain at all — not for routine cleanup.
 >
@@ -229,6 +230,13 @@ the assignee side to look at it) or `claimed` (the assignee's turn to act), `"re
 `resolved` (awaiting approval), `null` only while `closed` (done — nobody's turn). See
 [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) /
 [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md).
+
+`turn` says whose hand the item is in *within docket* — it does not say whether the actual
+bottleneck is inside docket at all. An item can sit at `turn: "assignee"` because the assignee is
+genuinely waiting to act, or because the assignee is blocked on something docket has no visibility
+into (an external approval, a purchase, another person entirely) — the two look identical from
+`turn` alone. A `blocked`-style tag plus a comment explaining why is the way to make that
+distinction visible to anyone reading the item, since there is no separate field for it.
 
 `open` is `state != closed`, computed the same way as `turn` — never stored, so it can never drift
 out of sync with `state`. `archived_at` is `null` unless the item was archived; it's independent of
@@ -362,10 +370,13 @@ every 5s — a pure HTTP client, no `docket-cc` involved. Item/comment body text
 markdown, including `![alt](url)` images — the URL must point to an already-hosted image; the
 console has no upload/storage of its own. Besides browsing (state/tag/topic filters,
 full-text search across title/body/comments), the detail view shows `requester`/`assignee`/`turn`
-alongside state and can claim/submit/approve an item and
-edit its tags, and — for any item not yet `closed` — remove/merge/force-close it (§4's admin
-operations). Writes are attributed to a fixed `console` worker id; multi-user identity is out of
-scope while docket stays single-owner. In production, `docket-core` itself serves the built console
+alongside state and can claim/submit/approve an item, edit its tags, reject/reopen it with a
+required reason, and — for any item not yet `closed` — remove/merge/force-close it (§4's admin
+operations). Archive is available from any state (idempotent, no unarchive yet). Delete is too —
+unlike every other action here, it requires typing the item's exact title before the button
+enables, since it's the one operation that destroys tags/comments with no way back (§4's
+`remove_item` vs `delete_item` note). Writes are attributed to a fixed `console` worker id;
+multi-user identity is out of scope while docket stays single-owner. In production, `docket-core` itself serves the built console
 at `/` (`DOCKET_CONSOLE_DIR`, default `console/dist`); the same API is available at that origin under
 `/api/*`. For local dev: `cd console && npm install && npm run dev` (proxies to `127.0.0.1:8420` by
 default; override via `.env`'s `VITE_DOCKET_CORE_URL`).

@@ -401,6 +401,11 @@ body {
   border-color: #e4e6ea;
 }
 
+.item-page-danger-actions button {
+  color: #a4262c;
+  border-color: #f3c7c4;
+}
+
 .reason-input {
   font-size: 0.8rem;
   padding: 0.25rem 0.4rem;

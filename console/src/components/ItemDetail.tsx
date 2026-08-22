@@ -6,6 +6,7 @@ import {
   archiveItem,
   assigneeDisplay,
   claimItem,
+  deleteItem,
   fetchComments,
   forceCloseItem,
   mergeItem,
@@ -42,6 +43,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
   const [tagDraft, setTagDraft] = useState('')
   const [reasonDraft, setReasonDraft] = useState('')
   const [duplicateOfDraft, setDuplicateOfDraft] = useState('')
+  const [deleteConfirmDraft, setDeleteConfirmDraft] = useState('')
   // Tracks which item is currently selected so a mutation's response,
   // arriving after the user has already switched to a different item, does
   // not paint its error/pending state onto the wrong item.
@@ -58,6 +60,7 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     setTagDraft('')
     setReasonDraft('')
     setDuplicateOfDraft('')
+    setDeleteConfirmDraft('')
     if (!item) {
       setComments([])
       setCommentsError(false)
@@ -158,6 +161,18 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     if (!duplicateOfId) return
     setDuplicateOfDraft('')
     void runAction(() => mergeItem(item.id, duplicateOfId))
+  }
+
+  // Unlike every other admin action, delete destroys the row (and its
+  // tags/comments) with no way back — a plain click, or even a reason
+  // input, is too easy to fire by accident. Requiring the item's exact
+  // title before the button enables is the one confirmation strength that
+  // scales with how irreversible the action is.
+  const deleteConfirmMatches = deleteConfirmDraft === item.title
+  const submitDelete = () => {
+    if (!deleteConfirmMatches) return
+    setDeleteConfirmDraft('')
+    void runAction(() => deleteItem(item.id), onBack)
   }
 
   return (
@@ -328,6 +343,36 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
           </button>
         </div>
       )}
+      {
+        // State-unrestricted and archive-independent (ADR-0013) — unlike
+        // every row above, so this one has no conditional on item.state or
+        // archived_at. `title="…"` matches the confirmation instruction
+        // itself, since the button stays disabled until it does.
+      }
+      <div className="item-page-actions item-page-danger-actions">
+        <input
+          type="text"
+          className="reason-input"
+          placeholder={`삭제하려면 정확한 제목 입력: ${item.title}`}
+          value={deleteConfirmDraft}
+          disabled={actionPending}
+          onChange={(e) => setDeleteConfirmDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              submitDelete()
+            }
+          }}
+        />
+        <button
+          type="button"
+          title="영구 삭제 — 태그·댓글까지 전부 사라지며 되돌릴 수 없음. 기록을 남기려면 Remove/Force-close를 대신 쓸 것"
+          disabled={actionPending || !deleteConfirmMatches}
+          onClick={submitDelete}
+        >
+          Delete
+        </button>
+      </div>
       {actionError && <p className="banner banner-error">{actionError}</p>}
       <div className="item-page-tags">
         {item.tags.map((tag) => (

@@ -212,6 +212,18 @@ export async function archiveItem(id: string): Promise<Item> {
   return mutate<Item>(`/api/items/${id}/archive`, { method: 'POST' })
 }
 
+// Unlike every op above, this destroys the row (and its tags/comments)
+// outright — no `author`/`reason`, nothing left afterward to attach either
+// to (ADR-0013). The server answers `204 No Content`, so there is no body
+// to parse; `mutate<T>` isn't reusable here because it always calls
+// `res.json()`.
+export async function deleteItem(id: string): Promise<void> {
+  const res = await fetch(`/api/items/${id}`, { method: 'DELETE' })
+  if (!res.ok) {
+    throw new Error(await parseErrorMessage(res))
+  }
+}
+
 export async function addItemTags(id: string, tags: string[]): Promise<string[]> {
   return mutate<string[]>(`/api/items/${id}/tags`, {
     method: 'POST',
