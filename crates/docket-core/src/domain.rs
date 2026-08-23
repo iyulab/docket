@@ -32,6 +32,12 @@ impl State {
 }
 
 /// Why an item was closed. Only meaningful once `state == Closed`.
+///
+/// `Blocked`/`Deferred` are not admin overrides like the other four — they
+/// are the normal, reversible way a worker parks an item that cannot
+/// currently progress (an external dependency, unproven cross-consumer
+/// demand). `reopen_item` is the way back for any of the six. See
+/// [ADR-0018](../../../docs/decisions/ADR-0018-blocked-deferred-resolution.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
@@ -39,6 +45,8 @@ pub enum Resolution {
     Duplicate,
     Wontfix,
     Invalid,
+    Blocked,
+    Deferred,
 }
 
 impl Resolution {
@@ -48,6 +56,8 @@ impl Resolution {
             Resolution::Duplicate => "duplicate",
             Resolution::Wontfix => "wontfix",
             Resolution::Invalid => "invalid",
+            Resolution::Blocked => "blocked",
+            Resolution::Deferred => "deferred",
         }
     }
 
@@ -57,6 +67,8 @@ impl Resolution {
             "duplicate" => Some(Resolution::Duplicate),
             "wontfix" => Some(Resolution::Wontfix),
             "invalid" => Some(Resolution::Invalid),
+            "blocked" => Some(Resolution::Blocked),
+            "deferred" => Some(Resolution::Deferred),
             _ => None,
         }
     }

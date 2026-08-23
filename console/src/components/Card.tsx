@@ -6,6 +6,8 @@ const RESOLUTION_LABEL: Record<Resolution, string> = {
   duplicate: 'duplicate',
   wontfix: "won't fix",
   invalid: 'invalid',
+  blocked: 'blocked',
+  deferred: 'deferred',
 }
 
 interface CardProps {

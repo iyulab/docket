@@ -1,5 +1,5 @@
 export type ItemState = 'open' | 'claimed' | 'resolved' | 'closed'
-export type Resolution = 'done' | 'duplicate' | 'wontfix' | 'invalid'
+export type Resolution = 'done' | 'duplicate' | 'wontfix' | 'invalid' | 'blocked' | 'deferred'
 export type Turn = 'requester' | 'assignee'
 
 // Mirrors docket-core's Item exactly (crates/docket-core/src/domain.rs) —

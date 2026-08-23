@@ -611,6 +611,70 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
+    /// Same state-unrestricted shape as `close_with_resolution` (any
+    /// pre-closed state, no assignee check), but the lifecycle comment
+    /// carries the caller's free-text `reason` instead of a bare op-name
+    /// marker — matching `reject_item`/`reopen_item`, not the admin closes.
+    /// Backs `block_item`/`defer_item`: unlike `remove`/`merge`/
+    /// `force-close`/`force-approve`, these are normal worker judgment
+    /// calls (MCP-exposed), not admin overrides, so *why* is load-bearing
+    /// for whoever later decides to `reopen_item`. See
+    /// [ADR-0018](../../../docs/decisions/ADR-0018-blocked-deferred-resolution.md).
+    fn close_with_reason(
+        &self,
+        id: &str,
+        resolution: Resolution,
+        op: &str,
+        author: &str,
+        reason: &str,
+    ) -> Result<Item> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(StoreError::Validation(
+                "reason must not be blank".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
+        let now = now_millis();
+        let affected = conn.execute(
+            "UPDATE items SET state = 'closed', resolution = ?1, updated_at = ?2
+             WHERE id = ?3 AND state != 'closed'",
+            params![resolution.as_str(), now, id],
+        )?;
+        if affected == 0 {
+            return Err(existing_state_conflict(&conn, id, op)?);
+        }
+        insert_lifecycle_comment(&conn, id, author, reason, now)?;
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
+    /// Parks an item that cannot progress right now because of a concrete
+    /// external dependency (e.g. no access to a paywalled standard) —
+    /// `resolution = blocked`. Callable by any worker on its own judgment
+    /// from any pre-closed state (MCP-exposed, unlike the admin closes —
+    /// see `architecture.md`'s MCP-exposure rule): fully reversible via
+    /// `reopen_item` once the dependency clears, so it carries none of the
+    /// self-approval risk `force-approve` guards against. `reason` is
+    /// required — it is the only record of *why*, for whoever reopens
+    /// later. See [ADR-0018](../../../docs/decisions/ADR-0018-blocked-deferred-resolution.md).
+    pub fn block_item(&self, id: &str, author: &str, reason: &str) -> Result<Item> {
+        self.close_with_reason(id, Resolution::Blocked, "block", author, reason)
+    }
+
+    /// Parks an item that is intentionally not being worked right now for a
+    /// reason short of a hard external block (e.g. cross-consumer demand
+    /// not yet proven) — `resolution = deferred`. Same shape and rationale
+    /// as `block_item`; the two are separate resolutions rather than one
+    /// with a flag because they are distinct dispositions a reader (or the
+    /// console's badge) should be able to tell apart at a glance, the same
+    /// way `duplicate`/`wontfix`/`invalid` already are. See
+    /// [ADR-0018](../../../docs/decisions/ADR-0018-blocked-deferred-resolution.md).
+    pub fn defer_item(&self, id: &str, author: &str, reason: &str) -> Result<Item> {
+        self.close_with_reason(id, Resolution::Deferred, "defer", author, reason)
+    }
+
     /// Adds `tags` to an item. Idempotent — already-present tags are
     /// silently skipped (`INSERT OR IGNORE`). Returns the item's full tag
     /// set after the add. Bumps `updated_at` only if a tag was actually
@@ -1314,6 +1378,84 @@ mod tests {
         assert_eq!(closed.resolution, Some(Resolution::Done));
         // never claimed — force-approve doesn't require or touch assignee
         assert_eq!(closed.assignee, None);
+    }
+
+    #[test]
+    fn block_item_closes_an_open_item_as_blocked_and_records_reason() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+
+        let closed = store
+            .block_item(&item.id, "w1", "no access to the primary standard")
+            .unwrap();
+        assert_eq!(closed.state, State::Closed);
+        assert_eq!(closed.resolution, Some(Resolution::Blocked));
+        assert_eq!(closed.turn, None);
+
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(
+            comments.last().unwrap().body,
+            "no access to the primary standard"
+        );
+    }
+
+    #[test]
+    fn block_item_rejects_blank_reason() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+
+        let err = store.block_item(&item.id, "w1", "  ").unwrap_err();
+        assert!(matches!(err, StoreError::Validation(_)));
+        assert_eq!(store.get_item(&item.id).unwrap().state, State::Open);
+    }
+
+    #[test]
+    fn defer_item_closes_a_claimed_item_as_deferred_keeping_assignee() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+
+        let closed = store
+            .defer_item(&item.id, "w1", "cross-consumer demand not yet proven")
+            .unwrap();
+        assert_eq!(closed.state, State::Closed);
+        assert_eq!(closed.resolution, Some(Resolution::Deferred));
+        assert_eq!(closed.assignee.as_deref(), Some("w1"));
+    }
+
+    #[test]
+    fn reopen_item_reverses_block_and_defer_the_same_as_admin_closes() {
+        let store = open_test_store();
+        let blocked = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store
+            .block_item(&blocked.id, "w1", "external dependency")
+            .unwrap();
+        let reopened = store
+            .reopen_item(&blocked.id, "w1", "dependency resolved")
+            .unwrap();
+        assert_eq!(reopened.state, State::Open);
+        assert_eq!(reopened.resolution, None);
+
+        let deferred = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&deferred.id, "w2").unwrap();
+        store
+            .defer_item(&deferred.id, "w2", "not a priority yet")
+            .unwrap();
+        let reopened = store
+            .reopen_item(&deferred.id, "w2", "second consumer showed up")
+            .unwrap();
+        assert_eq!(reopened.state, State::Claimed);
+        assert_eq!(reopened.resolution, None);
     }
 
     #[test]

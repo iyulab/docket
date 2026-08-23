@@ -57,7 +57,7 @@ distinction. Full decision rationale: [ADR-0016](decisions/ADR-0016-item-seq-ali
 
 ```
 state: open | claimed | resolved | closed
-resolution: null | done | duplicate | wontfix | invalid   # only has a value when closed
+resolution: null | done | duplicate | wontfix | invalid | blocked | deferred   # only has a value when closed
 ```
 
 Two additional transitions exist alongside the forward path above, both moving an item backward
@@ -82,6 +82,15 @@ There's no `expired` here — the policy for automatic claim expiry / automatic 
 `force-approve` and requester approval both write `resolution = done` — telling them apart means
 reading the lifecycle comment's op name (`"force-approve"` vs `"approved"`), not `resolution` alone.
 See [ADR-0017](decisions/ADR-0017-item-force-approve.md).
+
+`block`/`defer` close an item from any pre-closed state with `resolution = blocked`/`deferred` —
+unlike the five admin operations above, these are not admin overrides but the normal, fully
+reversible way a *worker* parks an item that cannot currently progress (a concrete external
+dependency, or unproven cross-consumer demand). `reopen_item` is the way back for either, the same
+as for an admin close. Both require a `reason`, recorded as the lifecycle comment verbatim (like
+`reject`/`reopen`, unlike the bare op-name marker the admin closes record) — it's the only record
+of *why*, load-bearing for whoever later decides to reopen. See
+[ADR-0018](decisions/ADR-0018-blocked-deferred-resolution.md).
 
 Full decision rationale: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
 
@@ -155,9 +164,13 @@ MCP when a worker can safely call it on its own judgment — reversible, or dest
 something disposable (a claim, a tag). An operation stays HTTP/console-only when it is
 irreversible against durable history, or represents an admin/human value judgment about an
 item's disposition: `remove`, `merge`, `force-close`, `force-approve`, and `delete` all stay
-HTTP-only under this rule; `claim`/`submit`/`approve`/`reject`/`reopen`/`archive` are all MCP
-tools. `force-approve` in particular must stay off MCP — exposing it there would let a worker
-approve its own (or another item's) completion without ever reaching `resolved`, exactly the
-shortcut the `claim → submit → approve` split exists to prevent (see
-[ADR-0017](decisions/ADR-0017-item-force-approve.md)). See
+HTTP-only under this rule; `claim`/`submit`/`approve`/`reject`/`reopen`/`archive`/`block`/`defer`
+are all MCP tools. `force-approve` in particular must stay off MCP — exposing it there would let
+a worker approve its own (or another item's) completion without ever reaching `resolved`, exactly
+the shortcut the `claim → submit → approve` split exists to prevent (see
+[ADR-0017](decisions/ADR-0017-item-force-approve.md)). `block`/`defer` are MCP tools precisely
+because they don't carry that risk — either is fully undone by `reopen_item`, and neither lets a
+worker claim a disposition (`done`/`duplicate`/`wontfix`/`invalid`) it hasn't earned; it can only
+say "I can't move this forward right now," which is exactly the kind of thing a worker is trusted
+to judge for itself (see [ADR-0018](decisions/ADR-0018-blocked-deferred-resolution.md)). See
 [ADR-0013](decisions/ADR-0013-item-archive-and-delete.md).

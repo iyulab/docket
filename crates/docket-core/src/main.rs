@@ -68,6 +68,8 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/force-approve", post(force_approve_item))
         .route("/items/{id}/reject", post(reject_item))
         .route("/items/{id}/reopen", post(reopen_item))
+        .route("/items/{id}/block", post(block_item))
+        .route("/items/{id}/defer", post(defer_item))
         .route("/items/{id}/archive", post(archive_item))
         .route(
             "/items/{id}/tags",
@@ -557,6 +559,22 @@ async fn reopen_item(
     Json(req): Json<ReasonedRequest>,
 ) -> Result<Json<Item>, ApiError> {
     Ok(Json(store.reopen_item(&id, &req.author, &req.reason)?))
+}
+
+async fn block_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<ReasonedRequest>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.block_item(&id, &req.author, &req.reason)?))
+}
+
+async fn defer_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Json(req): Json<ReasonedRequest>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.defer_item(&id, &req.author, &req.reason)?))
 }
 
 async fn archive_item(

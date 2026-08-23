@@ -747,6 +747,62 @@ impl DocketMcp {
     }
 
     #[tool(
+        description = "Park an item that cannot progress right now because of a concrete \
+            external dependency (e.g. no access to a paywalled standard, waiting on a third \
+            party) — closes it with resolution=blocked. Unlike remove/merge/force-close/\
+            force-approve this is a normal, fully reversible worker judgment call, not an admin \
+            override: reopen_item is the way back once the dependency clears. Requires a reason, \
+            recorded as a comment atomically with the state change — it is the only record of \
+            why for whoever reopens it later. author may be omitted if this session's \
+            DOCKET_WORKER_ID is set"
+    )]
+    async fn block_item(
+        &self,
+        Parameters(p): Parameters<ReasonedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let body = with_author(serde_json::json!({ "reason": p.reason }), author);
+        let resp = self
+            .http
+            .post(items_url(&self.base_url, &p.item_id, &["block"]))
+            .json(&body)
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Park an item that is intentionally not being worked right now for a \
+            reason short of a hard external block (e.g. cross-consumer demand not yet proven) — \
+            closes it with resolution=deferred. Same shape as block_item: a normal, fully \
+            reversible worker judgment call, reversed with reopen_item. Requires a reason, \
+            recorded as a comment atomically with the state change. author may be omitted if \
+            this session's DOCKET_WORKER_ID is set"
+    )]
+    async fn defer_item(
+        &self,
+        Parameters(p): Parameters<ReasonedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let body = with_author(serde_json::json!({ "reason": p.reason }), author);
+        let resp = self
+            .http
+            .post(items_url(&self.base_url, &p.item_id, &["defer"]))
+            .json(&body)
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
         description = "Fetch a single item by id — the way to resolve an id from a shared link \
             or a comment into its current state/resolution/requester/assignee/turn/tags/body. \
             item_id accepts either the canonical id or the item's short numeric alias (seq, e.g. \
@@ -1190,6 +1246,83 @@ mod tests {
             .unwrap();
         assert_eq!(field(&reopened, "state"), "claimed");
         assert!(json_value(&reopened)["resolution"].is_null());
+    }
+
+    /// `block_item`/`defer_item` (ADR-0018) — a worker's own reversible
+    /// judgment call, MCP-exposed unlike the admin closes — closes from any
+    /// pre-closed state with `resolution=blocked`/`deferred`, and
+    /// `reopen_item` is the way back, same as for any other closed item.
+    #[tokio::test]
+    async fn block_and_defer_close_and_reopen_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "docket-mcp-test-block-defer-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("block-defer.db");
+        let core = spawn_core(18436, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let blocked_item = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "blocked one".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let blocked_id = field(&blocked_item, "id");
+
+        let blocked = server
+            .block_item(Parameters(ReasonedParams {
+                item_id: blocked_id.clone(),
+                author: Some("w1".to_string()),
+                reason: "no access to the primary standard".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&blocked, "state"), "closed");
+        assert_eq!(field(&blocked, "resolution"), "blocked");
+        assert!(json_value(&blocked)["turn"].is_null());
+
+        let reopened = server
+            .reopen_item(Parameters(ReasonedParams {
+                item_id: blocked_id.clone(),
+                author: Some("w1".to_string()),
+                reason: "standard obtained".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&reopened, "state"), "open");
+        assert!(json_value(&reopened)["resolution"].is_null());
+
+        let deferred_item = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "deferred one".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let deferred_id = field(&deferred_item, "id");
+
+        let deferred = server
+            .defer_item(Parameters(ReasonedParams {
+                item_id: deferred_id.clone(),
+                author: Some("w2".to_string()),
+                reason: "cross-consumer demand not yet proven".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&deferred, "state"), "closed");
+        assert_eq!(field(&deferred, "resolution"), "deferred");
     }
 
     /// Losing a claim race must come back as a tool-level error the model
