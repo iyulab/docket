@@ -572,7 +572,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Claim an open item — exclusive, only one worker can win a race for the same item"
+        description = "Claim an open item — exclusive, only one worker can win a race for the same item. Call this before starting any work: it's the only thing that moves turn off its default; add_comment never does"
     )]
     async fn claim_item(
         &self,
@@ -788,7 +788,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices"
+        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices. Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it"
     )]
     async fn add_comment(
         &self,
