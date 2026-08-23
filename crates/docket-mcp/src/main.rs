@@ -437,7 +437,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker currently holds a live stake in (mine — assignee OR resolved-and-awaiting-my-approval), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker currently holds a live stake in (mine — assignee OR resolved-and-awaiting-my-approval), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Always ordered by updated_at descending (most-recently-touched first) — fixed, no ascending option; to find the longest-untouched items, page to the tail via offset using total"
     )]
     async fn list_items(
         &self,
@@ -469,7 +469,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same fixed updated_at-descending ordering as list_items"
     )]
     async fn search_items(
         &self,
