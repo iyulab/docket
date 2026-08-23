@@ -227,6 +227,13 @@ body {
   margin-top: 0;
 }
 
+.item-list-seq-cell {
+  color: #6b778c;
+  font-family: monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .item-list-group-header th {
   background: #ebecf0;
   color: #44546f;
@@ -361,6 +368,12 @@ body {
 .item-page-header h1 {
   font-size: 1.3rem;
   margin: 0 0 0.5rem;
+}
+
+.item-page-seq {
+  color: #97a0af;
+  font-family: monospace;
+  font-weight: 400;
 }
 
 .item-page-meta {

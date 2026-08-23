@@ -38,6 +38,21 @@ The core knows exactly four concepts.
 
 A `claim` is a pull a worker performs on its own. An admin's "force-assign" is just an entry point at the application/permission layer where the admin triggers that same `claim` on the worker's behalf — the core doesn't need a separate `assign` concept.
 
+## Item identity
+
+```
+id:  string   # canonical identifier — a UUID v4, assigned at creation, never reused.
+seq: integer  # short numeric alias for the same item — assigned at creation, from a single
+              # global counter, in creation order, never reused (even after delete). Purely a
+              # human/token-friendlier reference; `id` remains authoritative and unchanged.
+```
+
+Every operation that takes an item id accepts either form interchangeably — a caller-supplied
+value that parses as a bare integer (with or without a leading `#`) is resolved against `seq`;
+anything else is assumed to already be the canonical `id`. Resolution happens once, inside the
+store, so every layer above it (HTTP, `docket-mcp`, `docket-cc`) needs no awareness of the
+distinction. Full decision rationale: [ADR-0016](decisions/ADR-0016-item-seq-alias.md).
+
 ## Item state schema
 
 ```

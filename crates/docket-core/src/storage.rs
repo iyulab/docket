@@ -64,10 +64,21 @@ impl Store {
                 assignee TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
-                archived_at INTEGER
+                archived_at INTEGER,
+                seq INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_items_topic ON items(topic);
             CREATE INDEX IF NOT EXISTS idx_items_state ON items(state);
+            -- Backs `seq`'s allocation (see migrate_add_item_seq / create_item):
+            -- a single row advanced under the store's connection-wide mutex, so
+            -- `seq` is race-free without any extra locking primitive. Not an
+            -- AUTOINCREMENT rowid alias — items.id is already the declared
+            -- PRIMARY KEY, and rowid reuse after delete_item would risk handing
+            -- a deleted item's number to an unrelated new item. See ADR-0016.
+            CREATE TABLE IF NOT EXISTS seq_counter (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                next INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS item_tags (
                 item_id TEXT NOT NULL REFERENCES items(id),
                 tag     TEXT NOT NULL,
@@ -137,6 +148,31 @@ impl Store {
             "INSERT INTO comments_fts(comments_fts) VALUES('rebuild')",
             [],
         )?;
+        // Must run after both `rebuild`s above, not before: on a legacy
+        // database, `items_fts` is freshly created and still empty at this
+        // point in `open()` until 'rebuild' populates it. The backfill UPDATE
+        // below fires `items_fts_au` (an UPDATE touches the row regardless of
+        // which column changed), whose 'delete' command targets a rowid that
+        // must already be indexed — exactly the failure mode the 'rebuild'
+        // comment above describes ("an un-indexed row makes the AFTER UPDATE
+        // trigger's 'delete' command fail the whole write"), observed here as
+        // the migration returning `DatabaseCorrupt` when this ran earlier.
+        migrate_add_item_seq(&conn)?;
+        // Same reasoning as idx_items_archived_at above: must run after the
+        // migration, since a legacy database's `seq` column doesn't exist
+        // until migrate_add_item_seq adds it. UNIQUE guards against a bug in
+        // that backfill ever assigning the same number twice.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_items_seq ON items(seq)",
+            [],
+        )?;
+        // Seeds a fresh database's counter to 1. A no-op on a database that
+        // just ran migrate_add_item_seq's backfill (already inserted its own
+        // row, set to continue from the highest existing seq).
+        conn.execute(
+            "INSERT OR IGNORE INTO seq_counter (id, next) VALUES (1, 1)",
+            [],
+        )?;
         Ok(Store {
             conn: Mutex::new(conn),
         })
@@ -182,10 +218,17 @@ impl Store {
         let now = now_millis();
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
+        // Race-free under the store's connection-wide mutex — see
+        // seq_counter's schema comment and ADR-0016.
+        let seq: i64 = tx.query_row(
+            "UPDATE seq_counter SET next = next + 1 WHERE id = 1 RETURNING next - 1",
+            [],
+            |row| row.get(0),
+        )?;
         tx.execute(
-            "INSERT INTO items (id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'open', NULL, ?5, NULL, ?6, ?6)",
-            params![id, topic, title, body, requester, now],
+            "INSERT INTO items (id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, seq)
+             VALUES (?1, ?2, ?3, ?4, 'open', NULL, ?5, NULL, ?6, ?6, ?7)",
+            params![id, topic, title, body, requester, now, seq],
         )?;
         for tag in tags {
             tx.execute(
@@ -209,11 +252,14 @@ impl Store {
             created_at: now,
             updated_at: now,
             archived_at: None,
+            seq,
         })
     }
 
     pub fn get_item(&self, id: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -230,6 +276,8 @@ impl Store {
             ));
         }
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         let affected = conn.execute(
             "UPDATE items SET requester = ?1, updated_at = ?2 WHERE id = ?3",
             params![requester, now_millis(), id],
@@ -248,6 +296,8 @@ impl Store {
     /// as a `closed` one). See ADR-0013.
     pub fn archive_item(&self, id: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         require_item(&conn, id)?;
         let now = now_millis();
         conn.execute(
@@ -272,6 +322,8 @@ impl Store {
     pub fn delete_item(&self, id: &str) -> Result<()> {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
+        let resolved = resolve_item_id(&tx, id)?;
+        let id = resolved.as_str();
         require_item(&tx, id)?;
         tx.execute("DELETE FROM item_tags WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM item_comments WHERE item_id = ?1", params![id])?;
@@ -313,7 +365,7 @@ impl Store {
     ) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
-            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at FROM items WHERE 1=1",
+            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at, seq FROM items WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -347,6 +399,8 @@ impl Store {
     /// or in a later state) — the case this exists to make exclusive.
     pub fn claim_item(&self, id: &str, worker_id: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'claimed', assignee = ?1, updated_at = ?2
@@ -363,6 +417,8 @@ impl Store {
     /// assignee may submit.
     pub fn submit_item(&self, id: &str, worker_id: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'resolved', updated_at = ?1
@@ -389,6 +445,8 @@ impl Store {
             ));
         }
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'claimed', updated_at = ?1 WHERE id = ?2 AND state = 'resolved'",
@@ -422,6 +480,8 @@ impl Store {
             ));
         }
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET
@@ -443,6 +503,8 @@ impl Store {
     /// comment (traceability — see ADR-0012's "author" discussion).
     pub fn approve_item(&self, id: &str, author: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'closed', resolution = 'done', updated_at = ?1
@@ -486,6 +548,8 @@ impl Store {
         }
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
+        let resolved = resolve_item_id(&tx, id)?;
+        let id = resolved.as_str();
         let now = now_millis();
         let affected = tx.execute(
             "UPDATE items SET state = 'closed', resolution = 'duplicate', updated_at = ?1
@@ -520,6 +584,8 @@ impl Store {
         author: &str,
     ) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'closed', resolution = ?1, updated_at = ?2
@@ -539,6 +605,8 @@ impl Store {
     /// new — a fully-idempotent call is not activity.
     pub fn add_tags(&self, item_id: &str, tags: &[String]) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, item_id)?;
+        let item_id = resolved.as_str();
         require_item(&conn, item_id)?;
         let mut changed = false;
         for tag in tags {
@@ -562,6 +630,8 @@ impl Store {
     /// Bumps `updated_at` only if a tag was actually removed.
     pub fn remove_tags(&self, item_id: &str, tags: &[String]) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, item_id)?;
+        let item_id = resolved.as_str();
         let mut changed = false;
         for tag in tags {
             let affected = conn.execute(
@@ -628,6 +698,8 @@ impl Store {
         let id = Uuid::new_v4().to_string();
         let now = now_millis();
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, item_id)?;
+        let item_id = resolved.as_str();
         require_item(&conn, item_id)?;
         conn.execute(
             "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -648,6 +720,8 @@ impl Store {
 
     pub fn list_comments(&self, item_id: &str) -> Result<Vec<Comment>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, item_id)?;
+        let item_id = resolved.as_str();
         let mut stmt = conn.prepare(
             "SELECT id, item_id, author, body, created_at FROM item_comments
              WHERE item_id = ?1 ORDER BY created_at ASC",
@@ -682,7 +756,7 @@ impl Store {
     ) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
-            "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.requester, i.assignee, i.created_at, i.updated_at, i.archived_at
+            "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.requester, i.assignee, i.created_at, i.updated_at, i.archived_at, i.seq
              FROM items i WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -815,6 +889,36 @@ fn migrate_add_archived_at(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Upgrades a database created before [ADR-0016](../../../docs/decisions/ADR-0016-item-seq-alias.md):
+/// adds the nullable `items.seq` column and backfills it in creation order
+/// (`created_at` ASC, `id` ASC as a deterministic tiebreak for rows sharing a
+/// millisecond) so existing items get the same stable, never-reused numbering
+/// a fresh database assigns at `create_item` time. Seeds `seq_counter` to
+/// continue from the highest assigned value. Same `pragma_table_info`-gated,
+/// idempotent shape as `migrate_add_archived_at`.
+fn migrate_add_item_seq(conn: &Connection) -> rusqlite::Result<()> {
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'seq'")?
+        .exists([])?;
+    if !has_column {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN seq INTEGER;")?;
+        conn.execute(
+            "UPDATE items SET seq = (
+                 SELECT COUNT(*) FROM items i2
+                 WHERE i2.created_at < items.created_at
+                    OR (i2.created_at = items.created_at AND i2.id < items.id)
+             ) + 1",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO seq_counter (id, next) VALUES (1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM items))
+             ON CONFLICT(id) DO UPDATE SET next = excluded.next",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn existing_state_conflict(conn: &Connection, id: &str, op: &str) -> Result<StoreError> {
     match row_to_item(conn, id)? {
         Some(item) => Ok(StoreError::Conflict(format!(
@@ -822,6 +926,27 @@ fn existing_state_conflict(conn: &Connection, id: &str, op: &str) -> Result<Stor
             item.state.as_str()
         ))),
         None => Ok(StoreError::NotFound),
+    }
+}
+
+/// Resolves a caller-supplied item identifier to the canonical UUID. Accepts
+/// either the UUID itself or the item's short numeric alias (`seq`), with or
+/// without a leading `#` (`"142"` and `"#142"` both work) — see
+/// [ADR-0016](../../../docs/decisions/ADR-0016-item-seq-alias.md). A UUID
+/// never parses as a bare integer, so the two formats can't collide; anything
+/// that doesn't parse as one is passed through unchanged, exactly today's
+/// behavior for every existing caller. Every public `Store` method that takes
+/// an item id calls this first, so callers below it always see a UUID.
+fn resolve_item_id(conn: &Connection, id: &str) -> Result<String> {
+    let candidate = id.strip_prefix('#').unwrap_or(id);
+    match candidate.parse::<i64>() {
+        Ok(seq) => conn
+            .query_row("SELECT id FROM items WHERE seq = ?1", params![seq], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(StoreError::NotFound),
+        Err(_) => Ok(id.to_string()),
     }
 }
 
@@ -862,7 +987,7 @@ fn insert_lifecycle_comment(
 fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
     let item = conn
         .query_row(
-            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at
+            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at, seq
              FROM items WHERE id = ?1",
             params![id],
             item_from_row_without_tags,
@@ -877,7 +1002,7 @@ fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
 /// Reads every non-tag column. Safe to use inside `query_map` closures
 /// because it never re-borrows `conn`. Expects the column order every SQL
 /// string in this module uses: `id, topic, title, body, state, resolution,
-/// requester, assignee, created_at, updated_at, archived_at`.
+/// requester, assignee, created_at, updated_at, archived_at, seq`.
 fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
     let state_str: String = row.get(4)?;
     let resolution_str: Option<String> = row.get(5)?;
@@ -897,6 +1022,7 @@ fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         archived_at: row.get(10)?,
+        seq: row.get(11)?,
     })
 }
 
@@ -1450,6 +1576,72 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A database predating ADR-0016 has no `seq` column at all. `open`
+    /// backfills one in creation order — not insertion order into this test,
+    /// which deliberately inserts out of `created_at` order to prove the
+    /// backfill sorts by `created_at`, not by whatever rowid SQLite happened
+    /// to assign.
+    #[test]
+    fn open_backfills_seq_in_creation_order_on_a_legacy_database() {
+        let dir = temp_db_dir("seq-migration-test");
+        let db_path = dir.join("pre-adr-0016.db");
+
+        let legacy = Connection::open(&db_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE items (
+                    id TEXT PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT,
+                    state TEXT NOT NULL,
+                    resolution TEXT,
+                    requester TEXT,
+                    assignee TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    archived_at INTEGER
+                );",
+            )
+            .unwrap();
+        // Inserted newest-first; `created_at` order is oldest-first.
+        legacy
+            .execute(
+                "INSERT INTO items (id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at)
+                 VALUES ('newest', 'iyulab/docket', 'newest', NULL, 'open', NULL, NULL, NULL, 200, 200)",
+                [],
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO items (id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at)
+                 VALUES ('oldest', 'iyulab/docket', 'oldest', NULL, 'open', NULL, NULL, NULL, 100, 100)",
+                [],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+        assert_eq!(store.get_item("oldest").unwrap().seq, 1);
+        assert_eq!(store.get_item("newest").unwrap().seq, 2);
+
+        // The counter continues from the backfilled high-water mark, not
+        // from 1 — a fresh item must not collide with a backfilled seq.
+        let fresh = store
+            .create_item("iyulab/docket", "fresh", None, &[], None)
+            .unwrap();
+        assert_eq!(fresh.seq, 3);
+
+        // Idempotent: re-opening must not re-run the backfill (there is no
+        // longer a missing `seq` column to trigger it) or renumber anything.
+        drop(store);
+        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+        assert_eq!(store.get_item("oldest").unwrap().seq, 1);
+
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn fresh_database_has_archived_at_column() {
         let store = open_test_store();
@@ -1506,6 +1698,81 @@ mod tests {
         assert_eq!(item.topic, "iyulab/docket");
         assert_eq!(item.title, "t");
         assert_eq!(item.requester.as_deref(), Some("reporter-1"));
+    }
+
+    /// `seq` is assigned from a single global counter (ADR-0016), so items
+    /// created in sequence get consecutive numbers regardless of topic.
+    #[test]
+    fn create_item_assigns_sequential_seq_starting_at_one() {
+        let store = open_test_store();
+        let a = store
+            .create_item("iyulab/docket", "a", None, &[], None)
+            .unwrap();
+        let b = store
+            .create_item("iyulab/other-topic", "b", None, &[], None)
+            .unwrap();
+        let c = store
+            .create_item("iyulab/docket", "c", None, &[], None)
+            .unwrap();
+        assert_eq!((a.seq, b.seq, c.seq), (1, 2, 3));
+    }
+
+    #[test]
+    fn get_item_resolves_by_seq_with_and_without_hash_prefix() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        assert_eq!(store.get_item(&item.seq.to_string()).unwrap().id, item.id);
+        assert_eq!(
+            store.get_item(&format!("#{}", item.seq)).unwrap().id,
+            item.id
+        );
+        // The canonical UUID still works unchanged.
+        assert_eq!(store.get_item(&item.id).unwrap().id, item.id);
+    }
+
+    #[test]
+    fn get_item_by_unknown_seq_is_not_found() {
+        let store = open_test_store();
+        assert!(matches!(store.get_item("999"), Err(StoreError::NotFound)));
+        assert!(matches!(store.get_item("#999"), Err(StoreError::NotFound)));
+    }
+
+    /// Every id-accepting operation, not just `get_item`, resolves a `seq`
+    /// alias — spot-checked here on a state transition and a child-table
+    /// write, the two shapes `resolve_item_id` is threaded into.
+    #[test]
+    fn claim_item_and_add_comment_accept_a_seq_alias() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        let alias = format!("#{}", item.seq);
+        let claimed = store.claim_item(&alias, "w1").unwrap();
+        assert_eq!(claimed.id, item.id);
+        assert_eq!(claimed.state, State::Claimed);
+        let comment = store.add_comment(&alias, "w1", "note").unwrap();
+        assert_eq!(comment.item_id, item.id);
+    }
+
+    /// `seq` is never reused, even after the item it named is hard-deleted —
+    /// a deleted item's number stays a permanent gap, matching how GitHub
+    /// issue numbers behave. Guards against a rowid-reuse-style regression:
+    /// `seq_counter` only ever advances, it isn't derived from `MAX(seq)` at
+    /// allocation time.
+    #[test]
+    fn seq_is_never_reused_after_delete() {
+        let store = open_test_store();
+        let first = store
+            .create_item("iyulab/docket", "first", None, &[], None)
+            .unwrap();
+        store.delete_item(&first.id).unwrap();
+        let second = store
+            .create_item("iyulab/docket", "second", None, &[], None)
+            .unwrap();
+        assert_eq!(first.seq, 1);
+        assert_eq!(second.seq, 2);
     }
 
     #[test]

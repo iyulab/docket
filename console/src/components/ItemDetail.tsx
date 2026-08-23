@@ -179,7 +179,9 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
     <div className="item-page">
       {backButton}
       <div className="item-page-header">
-        <h1>{item.title}</h1>
+        <h1>
+          <span className="item-page-seq">#{item.seq}</span> {item.title}
+        </h1>
       </div>
       <dl className="item-page-meta">
         <dt>topic</dt>

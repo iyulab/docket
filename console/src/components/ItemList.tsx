@@ -44,6 +44,7 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
     <table className="item-list">
       <thead>
         <tr>
+          <th>#</th>
           <th>제목</th>
           <th>state</th>
           <th>requester</th>
@@ -57,7 +58,7 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
         {groupByTopic(items).map(([topic, groupItems]) => (
           <Fragment key={topic}>
             <tr className="item-list-group-header">
-              <th colSpan={7}>
+              <th colSpan={8}>
                 {topic} <span className="item-list-group-count">{groupItems.length}</span>
               </th>
             </tr>
@@ -67,6 +68,7 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
                 className={item.id === selectedId ? 'item-row item-row-selected' : 'item-row'}
                 onClick={() => onSelect(item.id)}
               >
+                <td className="item-list-seq-cell">#{item.seq}</td>
                 <td>{item.title}</td>
                 <td>
                   <span className={`badge badge-state-${item.state}`}>{item.state}</span>

@@ -6,6 +6,8 @@ export type Turn = 'requester' | 'assignee'
 // field names and casing are the wire format, not renamed to camelCase.
 export interface Item {
   id: string
+  /** Short numeric alias for `id` — assigned once at creation, never reused. */
+  seq: number
   topic: string
   title: string
   body: string | null

@@ -166,6 +166,8 @@ struct SearchItemsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ClaimOrSubmitParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     worker_id: String,
 }
@@ -173,6 +175,8 @@ struct ClaimOrSubmitParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ApproveParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     #[serde(default)]
     author: Option<String>,
@@ -181,6 +185,8 @@ struct ApproveParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReasonedParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     #[serde(default)]
     author: Option<String>,
@@ -190,6 +196,8 @@ struct ReasonedParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TagsParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     tags: Vec<String>,
 }
@@ -197,6 +205,8 @@ struct TagsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetRequesterParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     /// The corrected requester identity. Must not be blank.
     requester: String,
@@ -213,6 +223,8 @@ struct ListTagsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddCommentParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     #[serde(default)]
     author: Option<String>,
@@ -224,6 +236,8 @@ struct AddCommentParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ItemIdParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
 }
 
@@ -624,8 +638,10 @@ impl DocketMcp {
     #[tool(
         description = "Fetch a single item by id — the way to resolve an id from a shared link \
             or a comment into its current state/resolution/requester/assignee/turn/tags/body. \
-            Unaffected by list_items/search_items' summary mode (body always included) and \
-            returns archived items too (get_item is a direct id lookup, not a list query)."
+            item_id accepts either the canonical id or the item's short numeric alias (seq, e.g. \
+            142 or #142) — both returned on every item. Unaffected by list_items/search_items' \
+            summary mode (body always included) and returns archived items too (get_item is a \
+            direct id lookup, not a list query)."
     )]
     async fn get_item(
         &self,

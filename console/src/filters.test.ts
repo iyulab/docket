@@ -5,6 +5,7 @@ import { deriveTopics, matchesFilters, relationOf, sortItems } from './filters'
 function makeItem(overrides: Partial<Item> = {}): Item {
   return {
     id: 'i1',
+    seq: 1,
     topic: 'iyulab/docket',
     title: 'title',
     body: null,

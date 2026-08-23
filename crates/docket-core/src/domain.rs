@@ -90,6 +90,11 @@ pub enum Turn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
+    /// Short numeric alias for `id` — assigned once at creation, from a
+    /// single global counter, never reused (even after delete). Every
+    /// id-accepting operation takes either form interchangeably; `id` stays
+    /// canonical. See [ADR-0016](../../../docs/decisions/ADR-0016-item-seq-alias.md).
+    pub seq: i64,
     pub topic: String,
     pub title: String,
     pub body: Option<String>,

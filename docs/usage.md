@@ -110,6 +110,11 @@ talking to `docket-core` directly instead (base path `/api/*`, or unprefixed; bo
 Errors come back as a **tool-level error** you can see and react to (e.g. retry `list_items` after
 losing a claim race), never a silent protocol failure.
 
+Every `item_id` below accepts either the item's canonical id or its short numeric alias — `seq`,
+e.g. `142` or `#142` — returned alongside `id` on every item ([ADR-0016](decisions/ADR-0016-item-seq-alias.md)).
+Both forms resolve to the same item; `id` stays canonical everywhere (stored references like
+`merge_item`'s `duplicate_of_id` tag are unaffected).
+
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5 |
