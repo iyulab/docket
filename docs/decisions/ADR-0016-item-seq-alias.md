@@ -65,9 +65,9 @@ concept — any caller referencing items by hand or by token budget hits the sam
   up in `seq_counter`'s backing column and resolved to the canonical UUID before any existing SQL
   runs; anything else is assumed to already be the canonical UUID, unchanged from today. A UUID
   never parses as a bare integer, so the two formats can't collide. Resolution lives once, inside
-  `docket-core`'s `Store` — `docket-mcp` and `docket-cc` are thin HTTP/string-interpolating clients
-  (verified: every `item_id`-taking MCP tool interpolates the caller's string directly into the
-  request path), so neither needs any code change for this to work end-to-end.
+  `docket-core`'s `Store` — `docket-mcp` and `docket-cc` are thin HTTP/string-interpolating clients,
+  so neither needs any *resolution* logic of its own. They did turn out to need two small,
+  independent fixes to carry the new field through correctly — see Consequences.
 - **Reject — resolving `duplicate_of_id` in `merge_item`**: that value is stored verbatim as an
   opaque `duplicate-of:<id>` tag (ADR-0015), with an already-documented, deliberate absence of any
   referential check that it names a real item. Resolving it here would newly reject a value that
@@ -98,13 +98,12 @@ tiebreak) the first time `Store::open` runs against them, same idempotent
 `pragma_table_info`-gated migration pattern as `migrate_add_archived_at`.
 ```
 
-No new `state`/`resolution` value. `docket-mcp`/`docket-cc` need no code change (see above);
-`docket-mcp`'s tool descriptions and `docs/usage.md` gain a note that `item_id` accepts either
-form, matching the doc-only precedent set by
+No new `state`/`resolution` value. `docket-mcp`'s tool descriptions and `docs/usage.md` gain a note
+that `item_id` accepts either form, matching the doc-only precedent set by
 [Issue #26](https://github.com/iyulab/docket-works/issues/26)'s sort-order documentation.
 `docket-console` gains a visible `#<seq>` next to each item (replacing `Card.tsx`'s truncated-UUID
 slice, the exact display this ADR's motivating friction traced back to) and in the item detail
-header.
+header. `docket-cc`'s file projection gains a `seq:` frontmatter line alongside `id:`.
 
 ## Consequences
 
@@ -127,3 +126,34 @@ If items ever gain a topic-reassignment operation, a global counter's "which top
 gap (see Given up) becomes worth resolving properly rather than living with `topic` as a
 separate read. If `merge_item`'s `duplicate_of_id` not accepting `seq` is reported as real friction
 (not just theoretical asymmetry), revisit the rejected option above with that evidence.
+
+## 2026-08-23 update — implemented; two `docket-mcp` gaps found and fixed by testing end-to-end
+
+The Context/Decision sections above assumed `docket-mcp` needed zero code changes, reasoned from
+reading its request-building code. Actually exercising `get_item` with a `#`-prefixed alias through
+a real MCP call against a spawned `docket-core` (not just `docket-core`'s own unit tests) surfaced
+two gaps that reading the code alone missed:
+
+- **`seq` was silently dropped from every tool response.** `docket-mcp` re-shapes `docket-core`'s
+  HTTP response through its own `ItemDto` before returning it to the caller; that struct didn't
+  list `seq`, so serde dropped the field on the way through. Fixed by adding `seq: i64` to
+  `ItemDto` (`#[serde(default)]`, same older-server-compat convention as `tags`/`turn`/`open`).
+- **The `#`-prefixed form 404'd over HTTP even though `resolve_item_id` accepts it.** Every
+  `item_id`-taking request URL was built via `format!("{base}/items/{item_id}/...")` — plain string
+  interpolation, not proper URL construction. `#` is the URL fragment delimiter; reqwest's URL
+  parser silently truncates everything from `#` onward *before the request is sent*, so `#142`
+  produced a request for an empty id, which `docket-core` correctly 404'd (a UUID or a bare-integer
+  `seq` were both unaffected — the bug was specific to the `#`-prefixed form this ADR documents as
+  valid). Fixed with an `items_url()` helper that builds through `Url::path_segments_mut`, which
+  percent-encodes every segment correctly.
+
+Both are now covered by `get_item_accepts_seq_alias_bare_and_hash_prefixed`, an MCP-level test that
+round-trips through a real HTTP request — the layer neither gap could have been caught at from
+`docket-core`'s own unit tests, which never construct a URL from the alias at all. Lesson for this
+ADR's own "docket-mcp is a thin client, no code change needed" reasoning: *reading* a thin client's
+code establishes what it deliberately does; it doesn't establish what a new input value does to
+code that was never written with that input in mind. `docket-cc` needed no equivalent fix — its
+`ItemDto` already had the same missing-field-drops-silently shape, so `seq` was added there too
+(same commit) preemptively rather than after finding it broken, but `docket-cc` never builds a URL
+from `item_id` (it only ever reads items, keyed by its own `worker_id`/`topic` filters), so the
+fragment bug had no equivalent there to find.
