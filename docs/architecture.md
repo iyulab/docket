@@ -74,9 +74,14 @@ assignee to hand it back to). Neither introduces a new `state` value — see
 | Remove (clean up an item created by mistake) | `invalid` |
 | Merge (consolidate a duplicate item) | `duplicate` |
 | Force-close (close an item that's become irrelevant) | `wontfix` |
+| Force-approve (admin confirms completion when `claim`/`submit` never happened) | `done` |
 | Requester approval (normal completion) | `done` |
 
 There's no `expired` here — the policy for automatic claim expiry / automatic stall-closing hasn't been decided yet. It gets added once that policy is settled.
+
+`force-approve` and requester approval both write `resolution = done` — telling them apart means
+reading the lifecycle comment's op name (`"force-approve"` vs `"approved"`), not `resolution` alone.
+See [ADR-0017](decisions/ADR-0017-item-force-approve.md).
 
 Full decision rationale: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
 
@@ -149,6 +154,10 @@ Not every `docket-core` HTTP operation becomes a `docket-mcp` tool. An operation
 MCP when a worker can safely call it on its own judgment — reversible, or destructive only to
 something disposable (a claim, a tag). An operation stays HTTP/console-only when it is
 irreversible against durable history, or represents an admin/human value judgment about an
-item's disposition: `remove`, `merge`, `force-close`, and `delete` all stay HTTP-only under this
-rule; `claim`/`submit`/`approve`/`reject`/`reopen`/`archive` are all MCP tools. See
+item's disposition: `remove`, `merge`, `force-close`, `force-approve`, and `delete` all stay
+HTTP-only under this rule; `claim`/`submit`/`approve`/`reject`/`reopen`/`archive` are all MCP
+tools. `force-approve` in particular must stay off MCP — exposing it there would let a worker
+approve its own (or another item's) completion without ever reaching `resolved`, exactly the
+shortcut the `claim → submit → approve` split exists to prevent (see
+[ADR-0017](decisions/ADR-0017-item-force-approve.md)). See
 [ADR-0013](decisions/ADR-0013-item-archive-and-delete.md).

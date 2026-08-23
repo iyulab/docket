@@ -8,6 +8,7 @@ import {
   claimItem,
   deleteItem,
   fetchComments,
+  forceApproveItem,
   forceCloseItem,
   mergeItem,
   reopenItem,
@@ -296,6 +297,14 @@ export function ItemDetail({ item, loading, onBack, onMutated }: ItemDetailProps
             onClick={() => void runAction(() => forceCloseItem(item.id))}
           >
             Force-close
+          </button>
+          <button
+            type="button"
+            title="상태를 done으로 종료 — claim/submit 없이 코멘트로만 완료 보고된 항목을 admin이 확인"
+            disabled={actionPending}
+            onClick={() => void runAction(() => forceApproveItem(item.id))}
+          >
+            Force-approve
           </button>
         </div>
       )}

@@ -6,7 +6,7 @@ Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 
 **The share of items completed without human intervention.** This is the lagging indicator that most directly inverts the bottleneck problem this project starts from (see [vision.md](vision.md)'s "Why now").
 
-**Operational definition (relaxed)**: on the `open → claimed → resolved → closed(resolution=done)` path, an admin's "refine" (see [vision.md](vision.md) S5) counts as normal operation. Only signals that the workflow itself failed — like "force-assign" or "force-close" — count as "intervention occurred."
+**Operational definition (relaxed)**: on the `open → claimed → resolved → closed(resolution=done)` path, an admin's "refine" (see [vision.md](vision.md) S5) counts as normal operation. Only signals that the workflow itself failed — like "force-assign", "force-close", or "force-approve" — count as "intervention occurred." `force-approve` needs care measuring this: it writes the same `resolution=done` a normal `approve` does ([ADR-0017](decisions/ADR-0017-item-force-approve.md)), so a query keyed on `resolution` alone will misclassify it as an unaided completion — the lifecycle comment's op name (`"force-approve"` vs `"approved"`) is what actually distinguishes the two.
 
 Measuring this requires per-item admin-intervention history to accumulate in the core, so it becomes the primary metric only after M3 (console) ([ADR-0002](decisions/ADR-0002-four-layer-architecture.md)).
 

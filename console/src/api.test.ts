@@ -9,6 +9,7 @@ import {
   fetchItems,
   fetchTags,
   fetchTopics,
+  forceApproveItem,
   forceCloseItem,
   mergeItem,
   reopenItem,
@@ -178,6 +179,7 @@ describe('approveItem', () => {
 describe.each([
   ['removeItem', removeItem, 'remove'],
   ['forceCloseItem', forceCloseItem, 'force-close'],
+  ['forceApproveItem', forceApproveItem, 'force-approve'],
 ] as const)('%s', (_name, fn, route) => {
   it('POSTs a JSON author body and returns the updated item', async () => {
     const item = { id: 'i1', state: 'closed' }

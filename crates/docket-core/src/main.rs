@@ -65,6 +65,7 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/remove", post(remove_item))
         .route("/items/{id}/merge", post(merge_item))
         .route("/items/{id}/force-close", post(force_close_item))
+        .route("/items/{id}/force-approve", post(force_approve_item))
         .route("/items/{id}/reject", post(reject_item))
         .route("/items/{id}/reopen", post(reopen_item))
         .route("/items/{id}/archive", post(archive_item))
@@ -496,7 +497,7 @@ async fn remove_item(
     Ok(Json(store.remove_item(&id, &authored_by(body))?))
 }
 
-/// Unlike the other three admin closes, `merge` has a required field — a
+/// Unlike the other four admin closes, `merge` has a required field — a
 /// `resolution = duplicate` with no reference to what it duplicates is
 /// exactly the traceability gap this exists to close, so this can't be
 /// bodiless the way `AuthoredRequest`-based ops are. See ADR-0015.
@@ -525,6 +526,14 @@ async fn force_close_item(
     body: Option<Json<AuthoredRequest>>,
 ) -> Result<Json<Item>, ApiError> {
     Ok(Json(store.force_close_item(&id, &authored_by(body))?))
+}
+
+async fn force_approve_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    body: Option<Json<AuthoredRequest>>,
+) -> Result<Json<Item>, ApiError> {
+    Ok(Json(store.force_approve_item(&id, &authored_by(body))?))
 }
 
 #[derive(Deserialize)]
@@ -1187,7 +1196,11 @@ mod tests {
             json_body(resp).await
         }
 
-        for (op, resolution) in [("remove", "invalid"), ("force-close", "wontfix")] {
+        for (op, resolution) in [
+            ("remove", "invalid"),
+            ("force-close", "wontfix"),
+            ("force-approve", "done"),
+        ] {
             let id = create(&app).await;
             let closed = close(&app, &id, op).await;
             assert_eq!(closed["state"], "closed");
@@ -1206,8 +1219,9 @@ mod tests {
         }
     }
 
-    /// `merge` diverges from `remove`/`force-close` (ADR-0012's other two
-    /// state-unrestricted admin closes): it requires `duplicate_of_id`, and
+    /// `merge` diverges from `remove`/`force-close`/`force-approve` (the
+    /// other three state-unrestricted admin closes, ADR-0012/ADR-0017): it
+    /// requires `duplicate_of_id`, and
     /// atomically tags the item `duplicate-of:<id>` — the traceability gap
     /// this closes is "resolution=duplicate alone can't say duplicate of
     /// what".
@@ -1226,8 +1240,8 @@ mod tests {
         let id = json_body(resp).await["id"].as_str().unwrap().to_string();
 
         // A bare-object request is rejected at the JSON-schema level (axum's
-        // `Json` extractor, missing required field) — unlike remove/
-        // force-close, merge has no bodiless path.
+        // `Json` extractor, missing required field) — unlike
+        // remove/force-close/force-approve, merge has no bodiless path.
         let resp = app
             .clone()
             .oneshot(json_request(

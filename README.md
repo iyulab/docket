@@ -17,7 +17,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 
 ## Current status
 
-**M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API, tags, comments, full-text search over both), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection, a `SessionStart` hook, and local topic derivation) exist and are covered by tests. `docket-console` exists — list→detail view with filters/search/sort plus claim/submit/approve, admin close (remove/merge/force-close), and tag editing (a kanban board is available as a secondary view) — see "As a console" below.
+**M1 done, M2 in progress, M3 started** ([roadmap.md](docs/roadmap.md)). `docket-core` (domain model, SQLite-backed store, HTTP API, tags, comments, full-text search over both), `docket-mcp` (exposes the same operations as MCP tools), and `docket-cc` (file projection, a `SessionStart` hook, and local topic derivation) exist and are covered by tests. `docket-console` exists — list→detail view with filters/search/sort plus claim/submit/approve, admin close (remove/merge/force-close/force-approve), and tag editing (a kanban board is available as a secondary view) — see "As a console" below.
 
 **Operating docket** (as an MCP-calling agent or a plain HTTP client — register, file, discover, claim, complete work): [docs/usage.md](docs/usage.md) is the single complete reference. The rest of this README is a shorter, example-driven walkthrough of the same ground.
 
@@ -165,9 +165,10 @@ topic-level from/to perspective toggle (a separate, topic-to-topic axis — see
 an item navigates to a dedicated detail page (rendered from markdown) rather than opening a side
 panel, and supports the core write operations — claim, submit, approve, and tag add/remove —
 attributed to a fixed `console` identity, since multi-user identity is Later
-([ADR-0006](docs/decisions/ADR-0006-single-owner-later.md)). It also exposes the three admin close
-operations (remove/merge/force-close, valid from any non-closed state, assignee-agnostic) that set
-`resolution` to `invalid`/`duplicate`/`wontfix` — see [usage.md](docs/usage.md#8-console).
+([ADR-0006](docs/decisions/ADR-0006-single-owner-later.md)). It also exposes the four admin close
+operations (remove/merge/force-close/force-approve, valid from any non-closed state,
+assignee-agnostic) that set `resolution` to `invalid`/`duplicate`/`wontfix`/`done` — see
+[usage.md](docs/usage.md#8-console).
 
 ```bash
 cd console

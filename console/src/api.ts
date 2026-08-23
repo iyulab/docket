@@ -207,6 +207,13 @@ export async function forceCloseItem(id: string): Promise<Item> {
   return mutate<Item>(`/api/items/${id}/force-close`, authoredPost())
 }
 
+// Admin confirms completion when `claim`/`submit` never happened (e.g. a
+// worker only narrated "done" via comments) — `approveItem` stays
+// unreachable since the item never reached `resolved`. See ADR-0017.
+export async function forceApproveItem(id: string): Promise<Item> {
+  return mutate<Item>(`/api/items/${id}/force-approve`, authoredPost())
+}
+
 // Valid from any state, idempotent, no `author`/`reason` — orthogonal to
 // workflow position (ADR-0013). Hides the item from default list/search
 // views; there is no `unarchive`.

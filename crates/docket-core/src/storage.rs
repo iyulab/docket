@@ -576,6 +576,18 @@ impl Store {
         self.close_with_resolution(id, Resolution::Wontfix, "force-close", author)
     }
 
+    /// Admin operation: closes an item as done when the normal
+    /// `claim → submit → approve` handshake never happened (e.g. a worker
+    /// narrated completion entirely through comments and never called
+    /// `claim_item`/`submit_item`), with `resolution = done`. Same
+    /// any-pre-closed-state, assignee-agnostic rules as `remove_item` — see
+    /// its doc comment. `resolution = done` alone can't distinguish this from
+    /// a normal `approve_item`; the lifecycle comment's `"force-approve"` op
+    /// name is what carries that distinction. See ADR-0017.
+    pub fn force_approve_item(&self, id: &str, author: &str) -> Result<Item> {
+        self.close_with_resolution(id, Resolution::Done, "force-approve", author)
+    }
+
     fn close_with_resolution(
         &self,
         id: &str,
@@ -1289,6 +1301,22 @@ mod tests {
     }
 
     #[test]
+    fn force_approve_item_closes_an_open_item_never_claimed_or_submitted() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        assert_eq!(item.state, State::Open);
+        assert_eq!(item.assignee, None);
+
+        let closed = store.force_approve_item(&item.id, "admin").unwrap();
+        assert_eq!(closed.state, State::Closed);
+        assert_eq!(closed.resolution, Some(Resolution::Done));
+        // never claimed — force-approve doesn't require or touch assignee
+        assert_eq!(closed.assignee, None);
+    }
+
+    #[test]
     fn admin_close_ops_reject_an_already_closed_item() {
         let store = open_test_store();
         let item = store
@@ -1304,6 +1332,10 @@ mod tests {
         ));
         assert!(matches!(
             store.force_close_item(&item.id, "admin").unwrap_err(),
+            StoreError::Conflict(_)
+        ));
+        assert!(matches!(
+            store.force_approve_item(&item.id, "admin").unwrap_err(),
             StoreError::Conflict(_)
         ));
         assert!(matches!(
@@ -1327,6 +1359,10 @@ mod tests {
         ));
         assert!(matches!(
             store.force_close_item("nope", "admin").unwrap_err(),
+            StoreError::NotFound
+        ));
+        assert!(matches!(
+            store.force_approve_item("nope", "admin").unwrap_err(),
             StoreError::NotFound
         ));
     }

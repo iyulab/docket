@@ -21,7 +21,7 @@ MCP-capable session, or raw HTTP for anything else (`docket-console`, `curl`, sc
 | `item` | A single unit of work |
 | `claim` | A worker pulling an open item to itself, exclusively |
 | `state` | `open → claimed → resolved → closed` — the workflow stage. `reject` and `reopen` move an item backward — onto `claimed`, or onto `open` when `reopen` hits an item nobody ever claimed (§4) |
-| `resolution` | Why an item closed: `done` (requester approval) / `duplicate` (merge) / `wontfix` (force-close) / `invalid` (remove) |
+| `resolution` | Why an item closed: `done` (requester approval, or admin `force-approve`) / `duplicate` (merge) / `wontfix` (force-close) / `invalid` (remove) — `force-approve` and a normal `approve` both write `done`; tell them apart via the lifecycle comment's op name (`"force-approve"` vs `"approved"`), not `resolution` alone |
 | `open` | `true` while `state != closed`, else `false` — derived from `state`, not stored, same treatment as `turn`. See [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md) |
 | `requester` / `assignee` / `turn` | `requester` is who the item is for, `assignee` is the current holder (was `owner`), `turn` says whose hand it's in right now — derived from `state`, not stored, and only changes when `state` does. `add_comment` never moves `state`; only `claim_item`/`submit_item`/`approve_item`/`reject_item`/`reopen_item` do, so an assignee narrating a whole workflow through comments alone leaves `turn` exactly where it started. See [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) / [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md). `list_items`/`search_items`'s `mine=<worker id>` filter (§4) is the query-side equivalent of "whose turn" — it matches exactly the items where it is that worker's turn, as either assignee or requester |
 | `archived_at` | `null` unless archived, else the epoch-millis timestamp it was archived at — independent of `state`, caller-set, hides an item from default listings. See [ADR-0013](decisions/ADR-0013-item-archive-and-delete.md) |
@@ -174,9 +174,9 @@ reasoning as the admin operations below) and no way yet to edit `title`/`body`/`
 creation. State-independent (works on a closed item too — it corrects metadata, not a workflow
 transition). Rejects a blank `requester` with `400`, a missing item with `404`.
 
-Three more HTTP-only operations close an item early, bypassing the normal
+Four more HTTP-only operations close an item early, bypassing the normal
 `claimed → resolved → closed` path — they're console/admin actions (`docket-console` exposes them as
-buttons), not worker actions, so there's no MCP tool for them. All three are assignee-agnostic and valid
+buttons), not worker actions, so there's no MCP tool for them. All four are assignee-agnostic and valid
 from any state except `closed` (unlike `approve`, they don't require reaching `resolved` first):
 
 | HTTP | resolution | Meaning |
@@ -184,15 +184,22 @@ from any state except `closed` (unlike `approve`, they don't require reaching `r
 | `POST /items/{id}/remove {"author"}` | `invalid` | The item was a mistake — never should have been filed |
 | `POST /items/{id}/merge {"duplicate_of_id", "author"}` | `duplicate` | Consolidated into another item |
 | `POST /items/{id}/force-close {"author"}` | `wontfix` | No longer relevant, closed without being done |
+| `POST /items/{id}/force-approve {"author"}` | `done` | An admin confirms the work is actually complete even though `claim_item`/`submit_item` were never called — e.g. a worker only narrated completion through `add_comment` (§4's `add_comment`/`claim_item` note) and `approve_item` now rejects with `cannot approve: item is open/claimed` since the item never reached `resolved`. See [ADR-0017](decisions/ADR-0017-item-force-approve.md). |
 
-All three take an optional `author`, recorded as a comment alongside the close, exactly like
+All four take an optional `author`, recorded as a comment alongside the close, exactly like
 `approve_item` above — it defaults to `"unknown"` if omitted, and the request body (for
-`remove`/`force-close`) may be omitted entirely (a bodiless `POST` is accepted and takes the same
-default). `merge` is the one exception: `duplicate_of_id` is **required, non-blank** — `resolution =
-duplicate` alone can't say duplicate of what, so `merge` also atomically tags the item
-`duplicate-of:<id>` (a free-form-tag reference, not a schema column — see
+`remove`/`force-close`/`force-approve`) may be omitted entirely (a bodiless `POST` is accepted and
+takes the same default). `merge` is the one exception: `duplicate_of_id` is **required, non-blank**
+— `resolution = duplicate` alone can't say duplicate of what, so `merge` also atomically tags the
+item `duplicate-of:<id>` (a free-form-tag reference, not a schema column — see
 [ADR-0015](decisions/ADR-0015-merge-duplicate-of-reference.md)). No referential check that
 `duplicate_of_id` names a real item — tags stay opaque, caller-defined strings to the store.
+
+> **`submit_item` is the only door into `resolved` — repeated "done" comments never substitute for
+> it.** A worker that reports completion purely through `add_comment` (however many times) leaves
+> `state` exactly where it was; `approve_item` stays unreachable until `submit_item` actually runs.
+> If a worker skips `claim_item`/`submit_item` entirely, the requester's only way to close the item
+> as done is the admin-side `force-approve` above — there is no worker-side or MCP-side path.
 
 > **`remove_item` is not `delete_item` — do not confuse the two.**
 >
@@ -250,10 +257,10 @@ out of sync with `state`. `archived_at` is `null` unless the item was archived; 
 
 Errors are `{"error": "<message>"}` with `404` (not found), `409` (state conflict — e.g. `"cannot
 claim: item is claimed"`), or `500` (server-side failure). A `claim`/`submit`/`approve`/`reject`/
-`reopen`/`remove`/`merge`/`force-close` call that loses a race or targets the wrong state always
-comes back `409`, never `500` — that's the signal to re-`list_items` and try something else rather
-than treat it as a bug. `archive_item` and `delete_item` are state-unrestricted (valid from any
-state) so this doesn't apply to either.
+`reopen`/`remove`/`merge`/`force-close`/`force-approve` call that loses a race or targets the wrong
+state always comes back `409`, never `500` — that's the signal to re-`list_items` and try something
+else rather than treat it as a bug. `archive_item` and `delete_item` are state-unrestricted (valid
+from any state) so this doesn't apply to either.
 
 **A *list/search* filter never 404s on a non-matching or unregistered reference — a call that
 targets one specific known resource by id does.** `list_items`/`search_items`/`list_comments`/
@@ -376,8 +383,8 @@ markdown, including `![alt](url)` images — the URL must point to an already-ho
 console has no upload/storage of its own. Besides browsing (state/tag/topic filters,
 full-text search across title/body/comments), the detail view shows `requester`/`assignee`/`turn`
 alongside state and can claim/submit/approve an item, edit its tags, reject/reopen it with a
-required reason, and — for any item not yet `closed` — remove/merge/force-close it (§4's admin
-operations). Archive is available from any state (idempotent, no unarchive yet). Delete is too —
+required reason, and — for any item not yet `closed` — remove/merge/force-close/force-approve it
+(§4's admin operations). Archive is available from any state (idempotent, no unarchive yet). Delete is too —
 unlike every other action here, it requires typing the item's exact title before the button
 enables, since it's the one operation that destroys tags/comments with no way back (§4's
 `remove_item` vs `delete_item` note). Writes are attributed to a fixed `console` worker id;
