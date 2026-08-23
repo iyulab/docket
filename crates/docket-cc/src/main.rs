@@ -33,6 +33,11 @@ mod topic;
 #[derive(Debug, Deserialize)]
 struct ItemDto {
     id: String,
+    /// Absent from servers older than ADR-0016. Defaulted (to 0, never a
+    /// real item's value — seq starts at 1) so an old-server response still
+    /// deserializes.
+    #[serde(default)]
+    seq: i64,
     topic: String,
     title: String,
     body: Option<String>,
@@ -149,8 +154,9 @@ fn topic_to_path(root: &Path, topic: &str) -> PathBuf {
 /// the sole source of truth), so nothing reads this format back yet.
 fn render_item_file(item: &ItemDto) -> String {
     format!(
-        "---\nid: {}\ntopic: {}\nstate: {}\nresolution: {}\nrequester: {}\nassignee: {}\ncreated_at: {}\nupdated_at: {}\n---\n\n# {}\n\n{}\n",
+        "---\nid: {}\nseq: {}\ntopic: {}\nstate: {}\nresolution: {}\nrequester: {}\nassignee: {}\ncreated_at: {}\nupdated_at: {}\n---\n\n# {}\n\n{}\n",
         item.id,
+        item.seq,
         item.topic,
         item.state,
         item.resolution.as_deref().unwrap_or("null"),
@@ -397,6 +403,7 @@ mod tests {
     fn sample_item() -> ItemDto {
         ItemDto {
             id: "abc123".to_string(),
+            seq: 7,
             topic: "iyulab/docket".to_string(),
             title: "fix the thing".to_string(),
             body: Some("some detail".to_string()),
@@ -413,6 +420,7 @@ mod tests {
     fn rendered_file_has_frontmatter_and_body() {
         let rendered = render_item_file(&sample_item());
         assert!(rendered.starts_with("---\nid: abc123\n"));
+        assert!(rendered.contains("seq: 7\n"));
         assert!(rendered.contains("state: open\n"));
         assert!(rendered.contains("resolution: null\n"));
         assert!(rendered.contains("# fix the thing"));
