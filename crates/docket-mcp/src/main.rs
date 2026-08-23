@@ -64,8 +64,11 @@ struct RegisterWorkerParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GetWorkerParams {
-    /// The worker id to look up.
-    id: String,
+    /// The worker id to look up. Omit to look up this session's own
+    /// registration via `DOCKET_WORKER_ID` (see `resolve_identity`) — HD-18
+    /// (cycle-59), same fallback pattern as register_worker/claim_item/etc.
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -502,15 +505,19 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Fetch a worker's own registration — its topics and online status. The only way to positively confirm what you're currently registered as (topic_scope/mine treat an unknown worker id the same as one with no matching topics: an empty result, not an error)"
+        description = "Fetch a worker's registration — its topics and online status. id may be omitted to look up this session's own registration via DOCKET_WORKER_ID. The only way to positively confirm what you're currently registered as (topic_scope/mine treat an unknown worker id the same as one with no matching topics: an empty result, not an error)"
     )]
     async fn get_worker(
         &self,
         Parameters(p): Parameters<GetWorkerParams>,
     ) -> Result<CallToolResult, McpError> {
+        let id = match resolve_identity(p.id, docket_worker_id(), "id") {
+            Ok(id) => id,
+            Err(error) => return Ok(error),
+        };
         let resp = self
             .http
-            .get(format!("{}/workers/{}", self.base_url, p.id))
+            .get(format!("{}/workers/{}", self.base_url, id))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -1323,9 +1330,10 @@ mod tests {
     }
 
     /// End-to-end through the real handlers (not just `resolve_identity`
-    /// directly): `add_comment`/`register_worker` read `DOCKET_WORKER_ID`
-    /// from this process's actual environment when `author`/`id` are
-    /// omitted. `set_var`/`remove_var` mutate global process state, which is
+    /// directly): `add_comment`/`register_worker`/`get_worker` read
+    /// `DOCKET_WORKER_ID` from this process's actual environment when
+    /// `author`/`id` are omitted. `set_var`/`remove_var` mutate global
+    /// process state, which is
     /// normally unsafe to do in a parallel test binary — safe here only
     /// because this is the one test in the suite that touches this specific
     /// env var (checked: no other test or non-test code reads
@@ -1380,6 +1388,12 @@ mod tests {
             .unwrap();
         assert_eq!(register_without_fallback.is_error, Some(true));
 
+        let get_worker_without_fallback = server
+            .get_worker(Parameters(GetWorkerParams { id: None }))
+            .await
+            .unwrap();
+        assert_eq!(get_worker_without_fallback.is_error, Some(true));
+
         unsafe {
             std::env::set_var("DOCKET_WORKER_ID", "env-worker");
         }
@@ -1403,6 +1417,13 @@ mod tests {
             .unwrap();
         assert_ne!(registered.is_error, Some(true));
         assert_eq!(field(&registered, "id"), "env-worker");
+
+        let self_looked_up = server
+            .get_worker(Parameters(GetWorkerParams { id: None }))
+            .await
+            .unwrap();
+        assert_ne!(self_looked_up.is_error, Some(true));
+        assert_eq!(field(&self_looked_up, "id"), "env-worker");
 
         unsafe {
             std::env::remove_var("DOCKET_WORKER_ID");
@@ -1858,7 +1879,7 @@ mod tests {
 
         let found = server
             .get_worker(Parameters(GetWorkerParams {
-                id: "w1".to_string(),
+                id: Some("w1".to_string()),
             }))
             .await
             .unwrap();
@@ -1868,7 +1889,7 @@ mod tests {
 
         let missing = server
             .get_worker(Parameters(GetWorkerParams {
-                id: "never-registered".to_string(),
+                id: Some("never-registered".to_string()),
             }))
             .await
             .unwrap();
