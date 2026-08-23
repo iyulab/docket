@@ -47,11 +47,15 @@ fn items_url(base_url: &str, item_id: &str, suffix: &[&str]) -> reqwest::Url {
 // which for a filter parameter reads as "no matching items" rather than
 // "you misspelled the filter". A rejected-field error is far more
 // actionable than a quietly-empty result.
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RegisterWorkerParams {
-    /// Unique id for this worker.
-    id: String,
+    /// Unique id for this worker. Omit to use this session's
+    /// `DOCKET_WORKER_ID` (see `resolve_identity`) — required, explicitly or
+    /// via that fallback (cycle-58, same pattern as claim_item/add_comment/
+    /// etc., HD-16/HD-17).
+    #[serde(default)]
+    id: Option<String>,
     /// Topic prefixes this worker owns (see docs/glossary.md "topic").
     #[serde(default)]
     topics: Vec<String>,
@@ -192,7 +196,11 @@ struct ClaimOrSubmitParams {
     /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
     /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    worker_id: String,
+    /// Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
+    /// — required, explicitly or via that fallback, so a claim can always be
+    /// traced to a worker.
+    #[serde(default)]
+    worker_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -201,6 +209,8 @@ struct ApproveParams {
     /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
     /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
+    /// Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
+    /// — required, explicitly or via that fallback (HD-16/HD-17, cycle-57).
     #[serde(default)]
     author: Option<String>,
 }
@@ -211,6 +221,8 @@ struct ReasonedParams {
     /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
     /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
+    /// Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
+    /// — required, explicitly or via that fallback (HD-16/HD-17, cycle-57).
     #[serde(default)]
     author: Option<String>,
     reason: String,
@@ -249,12 +261,14 @@ struct AddCommentParams {
     /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
     /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    /// Who's writing this comment. Required (unlike the four admin-close
-    /// ops' `author?`, which stay optional — see `with_optional_author`):
-    /// `add_comment` is the primary thread callers narrate work through, so
-    /// leaving it out silently degrades every comment to docket-core's
-    /// `"unknown"` fallback, making the thread unreadable (Issue #30).
-    author: String,
+    /// Who's writing this comment. Omit to use this session's
+    /// `DOCKET_WORKER_ID` (see `resolve_identity`) — required, explicitly or
+    /// via that fallback, so the thread never lands docket-core's
+    /// `"unknown"` default (Issue #30). Schema-optional (unlike the original
+    /// cycle-55 shape) precisely so an omission can still resolve through
+    /// the env var instead of failing at deserialization.
+    #[serde(default)]
+    author: Option<String>,
     body: String,
 }
 
@@ -423,31 +437,64 @@ async fn respond_paginated(resp: reqwest::Response) -> Result<CallToolResult, Mc
     }
 }
 
-/// Adds an `author` field to a request body when the caller supplied one —
-/// every admin-close mutation (approve/reject/reopen/remove/merge/
-/// force-close/force-approve) follows the same optional-author convention,
-/// docket-core defaulting to `"unknown"` when it's omitted. `add_comment`
-/// does NOT use this helper — its `author` is required at this layer (see
-/// `AddCommentParams`), since it's the primary thread callers narrate work
-/// through rather than an infrequent admin action.
-fn with_optional_author(mut body: serde_json::Value, author: Option<String>) -> serde_json::Value {
-    if let Some(author) = author {
-        body["author"] = serde_json::Value::String(author);
-    }
+/// Resolves a caller identity (an `author` or `worker_id` tool argument)
+/// against an explicit value or, when the caller omitted it, this process's
+/// `DOCKET_WORKER_ID` (`docket-cc-launcher` injects it every session) —
+/// HD-16/HD-17 (cycle-57, extended cycle-58): identity is required at this
+/// layer for `register_worker`/`claim_item`/`submit_item`/`approve_item`/
+/// `reject_item`/`reopen_item`/`add_comment`, but "required" means
+/// *resolvable*, not "the caller must type it every time". A blank/
+/// whitespace-only value counts as absent, the
+/// same treatment `SetRequesterParams.requester` and `ReasonedParams.reason`
+/// already get. `env_fallback` is threaded in by the caller (rather than
+/// read here via `std::env::var`) purely so this stays a pure function —
+/// see `resolve_identity_*` unit tests, which exercise it without touching
+/// real process env state.
+///
+/// Returns a tool-level error (`CallToolResult::error`, visible to the
+/// calling model) rather than `Err(McpError)` when neither resolves — a
+/// protocol-level error would not be, per `claim_conflict_is_tool_level_error`.
+fn resolve_identity(
+    explicit: Option<String>,
+    env_fallback: Option<String>,
+    field: &str,
+) -> Result<String, CallToolResult> {
+    explicit
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| env_fallback.filter(|s| !s.trim().is_empty()))
+        .ok_or_else(|| {
+            CallToolResult::error(vec![ContentBlock::text(format!(
+                "{field} is required — pass it explicitly or set DOCKET_WORKER_ID"
+            ))])
+        })
+}
+
+fn docket_worker_id() -> Option<String> {
+    std::env::var("DOCKET_WORKER_ID").ok()
+}
+
+fn with_author(mut body: serde_json::Value, author: String) -> serde_json::Value {
+    body["author"] = serde_json::Value::String(author);
     body
 }
 
 #[tool_router(server_handler)]
 impl DocketMcp {
-    #[tool(description = "Register as a worker, reporting which topic prefixes you own")]
+    #[tool(
+        description = "Register as a worker, reporting which topic prefixes you own. id may be omitted if this session's DOCKET_WORKER_ID is set"
+    )]
     async fn register_worker(
         &self,
         Parameters(p): Parameters<RegisterWorkerParams>,
     ) -> Result<CallToolResult, McpError> {
+        let id = match resolve_identity(p.id, docket_worker_id(), "id") {
+            Ok(id) => id,
+            Err(error) => return Ok(error),
+        };
         let resp = self
             .http
             .post(format!("{}/workers", self.base_url))
-            .json(&p)
+            .json(&serde_json::json!({ "id": id, "topics": p.topics }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -579,16 +626,20 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Claim an open item — exclusive, only one worker can win a race for the same item. Call this before starting any work: it's the only thing that moves turn off its default; add_comment never does"
+        description = "Claim an open item — exclusive, only one worker can win a race for the same item. Call this before starting any work: it's the only thing that moves turn off its default; add_comment never does. worker_id may be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn claim_item(
         &self,
         Parameters(p): Parameters<ClaimOrSubmitParams>,
     ) -> Result<CallToolResult, McpError> {
+        let worker_id = match resolve_identity(p.worker_id, docket_worker_id(), "worker_id") {
+            Ok(id) => id,
+            Err(error) => return Ok(error),
+        };
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["claim"]))
-            .json(&serde_json::json!({ "worker_id": p.worker_id }))
+            .json(&serde_json::json!({ "worker_id": worker_id }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -596,16 +647,20 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Submit a claimed item as done, moving it to resolved for the requester to approve"
+        description = "Submit a claimed item as done, moving it to resolved for the requester to approve. worker_id may be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn submit_item(
         &self,
         Parameters(p): Parameters<ClaimOrSubmitParams>,
     ) -> Result<CallToolResult, McpError> {
+        let worker_id = match resolve_identity(p.worker_id, docket_worker_id(), "worker_id") {
+            Ok(id) => id,
+            Err(error) => return Ok(error),
+        };
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["submit"]))
-            .json(&serde_json::json!({ "worker_id": p.worker_id }))
+            .json(&serde_json::json!({ "worker_id": worker_id }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -613,13 +668,17 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Approve a resolved item as the requester, closing it with resolution=done"
+        description = "Approve a resolved item as the requester, closing it with resolution=done. author may be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn approve_item(
         &self,
         Parameters(p): Parameters<ApproveParams>,
     ) -> Result<CallToolResult, McpError> {
-        let body = with_optional_author(serde_json::json!({}), p.author);
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let body = with_author(serde_json::json!({}), author);
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["approve"]))
@@ -632,13 +691,18 @@ impl DocketMcp {
 
     #[tool(
         description = "Reject a resolved item, sending it back to the assignee for rework. \
-            Requires a reason, recorded as a comment atomically with the state change."
+            Requires a reason, recorded as a comment atomically with the state change. author \
+            may be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn reject_item(
         &self,
         Parameters(p): Parameters<ReasonedParams>,
     ) -> Result<CallToolResult, McpError> {
-        let body = with_optional_author(serde_json::json!({ "reason": p.reason }), p.author);
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let body = with_author(serde_json::json!({ "reason": p.reason }), author);
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["reject"]))
@@ -653,13 +717,18 @@ impl DocketMcp {
         description = "Reopen a closed item that was closed prematurely or turns out not to be \
             finished. Puts it back in front of the assignee side and clears resolution — back to \
             claimed if it still has an assignee, back to open if it never had one. Requires a \
-            reason, recorded as a comment atomically with the state change."
+            reason, recorded as a comment atomically with the state change. author may be \
+            omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn reopen_item(
         &self,
         Parameters(p): Parameters<ReasonedParams>,
     ) -> Result<CallToolResult, McpError> {
-        let body = with_optional_author(serde_json::json!({ "reason": p.reason }), p.author);
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let body = with_author(serde_json::json!({ "reason": p.reason }), author);
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["reopen"]))
@@ -795,13 +864,17 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices. Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it. `author` is required — identify yourself (your worker id, or another stable caller identity) so the thread stays readable instead of filling up with docket-core's \"unknown\" fallback"
+        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices. Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it. `author` is required — identify yourself (your worker id, or another stable caller identity) so the thread stays readable instead of filling up with docket-core's \"unknown\" fallback. May be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn add_comment(
         &self,
         Parameters(p): Parameters<AddCommentParams>,
     ) -> Result<CallToolResult, McpError> {
-        let body = serde_json::json!({ "body": p.body, "author": p.author });
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let body = serde_json::json!({ "body": p.body, "author": author });
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["comments"]))
@@ -965,7 +1038,7 @@ mod tests {
 
         let registered = server
             .register_worker(Parameters(RegisterWorkerParams {
-                id: "w1".to_string(),
+                id: Some("w1".to_string()),
                 topics: vec!["iyulab".to_string()],
             }))
             .await
@@ -995,7 +1068,7 @@ mod tests {
         let claimed = server
             .claim_item(Parameters(ClaimOrSubmitParams {
                 item_id: item_id.clone(),
-                worker_id: "w1".to_string(),
+                worker_id: Some("w1".to_string()),
             }))
             .await
             .unwrap();
@@ -1005,7 +1078,7 @@ mod tests {
         let submitted = server
             .submit_item(Parameters(ClaimOrSubmitParams {
                 item_id: item_id.clone(),
-                worker_id: "w1".to_string(),
+                worker_id: Some("w1".to_string()),
             }))
             .await
             .unwrap();
@@ -1014,7 +1087,12 @@ mod tests {
         let approved = server
             .approve_item(Parameters(ApproveParams {
                 item_id: item_id.clone(),
-                author: None,
+                // Explicit — the omitted-with-no-fallback case is HD-16/
+                // HD-17's own dedicated coverage
+                // (`resolve_identity_errors_as_tool_level_when_both_absent`,
+                // `add_comment_without_author_resolves_via_env_var_or_errors`),
+                // not this happy-path lifecycle test's concern.
+                author: Some("requester-1".to_string()),
             }))
             .await
             .unwrap();
@@ -1054,14 +1132,14 @@ mod tests {
         server
             .claim_item(Parameters(ClaimOrSubmitParams {
                 item_id: item_id.clone(),
-                worker_id: "w1".to_string(),
+                worker_id: Some("w1".to_string()),
             }))
             .await
             .unwrap();
         server
             .submit_item(Parameters(ClaimOrSubmitParams {
                 item_id: item_id.clone(),
-                worker_id: "w1".to_string(),
+                worker_id: Some("w1".to_string()),
             }))
             .await
             .unwrap();
@@ -1080,7 +1158,7 @@ mod tests {
         server
             .submit_item(Parameters(ClaimOrSubmitParams {
                 item_id: item_id.clone(),
-                worker_id: "w1".to_string(),
+                worker_id: Some("w1".to_string()),
             }))
             .await
             .unwrap();
@@ -1136,7 +1214,7 @@ mod tests {
         let first = server
             .claim_item(Parameters(ClaimOrSubmitParams {
                 item_id: item_id.clone(),
-                worker_id: "w1".to_string(),
+                worker_id: Some("w1".to_string()),
             }))
             .await
             .unwrap();
@@ -1145,7 +1223,7 @@ mod tests {
         let second = server
             .claim_item(Parameters(ClaimOrSubmitParams {
                 item_id: item_id.clone(),
-                worker_id: "w2".to_string(),
+                worker_id: Some("w2".to_string()),
             }))
             .await
             .unwrap();
@@ -1191,17 +1269,144 @@ mod tests {
         assert!(err.to_string().contains("owned_by"));
     }
 
-    /// `author` is required on `add_comment` (unlike the admin-close ops'
-    /// `author?`) — a caller that omits it fails at the schema layer
-    /// instead of silently landing docket-core's `"unknown"` fallback,
-    /// which is what made comment threads unreadable (Issue #30).
+    /// `AddCommentParams.author` is schema-optional (HD-16/HD-17, cycle-57)
+    /// specifically so an omitted value can still resolve through
+    /// `DOCKET_WORKER_ID` rather than failing to deserialize at all — the
+    /// hard-failure guarantee Issue #30 wanted moved from the schema layer
+    /// to `resolve_identity`, exercised below.
     #[test]
-    fn add_comment_params_rejects_missing_author() {
-        let err = serde_json::from_value::<AddCommentParams>(
-            serde_json::json!({ "item_id": "x", "body": "hi" }),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("author"));
+    fn add_comment_params_accepts_missing_author() {
+        let parsed: AddCommentParams =
+            serde_json::from_value(serde_json::json!({ "item_id": "x", "body": "hi" })).unwrap();
+        assert_eq!(parsed.author, None);
+    }
+
+    /// `resolve_identity` — the shared fallback behind HD-16 (`author`
+    /// required on `approve_item`/`reject_item`/`reopen_item`, matching
+    /// `add_comment`'s cycle-55 treatment) and HD-17 (resolvable via
+    /// `DOCKET_WORKER_ID` instead of a hard schema failure). Exercised as a
+    /// pure function — `env_fallback` is passed in rather than read from
+    /// real process env, so these cases can't race with any other test that
+    /// happens to run concurrently in the same binary.
+    #[test]
+    fn resolve_identity_prefers_explicit_over_env_fallback() {
+        let resolved = resolve_identity(
+            Some("explicit".to_string()),
+            Some("from-env".to_string()),
+            "author",
+        );
+        assert_eq!(resolved.unwrap(), "explicit");
+    }
+
+    #[test]
+    fn resolve_identity_falls_back_to_env_when_omitted() {
+        let resolved = resolve_identity(None, Some("from-env".to_string()), "author");
+        assert_eq!(resolved.unwrap(), "from-env");
+    }
+
+    #[test]
+    fn resolve_identity_errors_as_tool_level_when_both_absent() {
+        let error = resolve_identity(None, None, "author").unwrap_err();
+        assert_eq!(error.is_error, Some(true));
+        let message = text_of(&error);
+        assert!(message.contains("author"));
+        assert!(message.contains("DOCKET_WORKER_ID"));
+    }
+
+    /// Blank/whitespace-only counts as absent on both sides — a caller
+    /// passing `author: ""` (or an env var left set to an empty string)
+    /// must not silently resolve to an empty identity.
+    #[test]
+    fn resolve_identity_treats_blank_as_absent() {
+        let result = resolve_identity(Some("   ".to_string()), Some("".to_string()), "author");
+        assert!(result.unwrap_err().is_error == Some(true));
+    }
+
+    /// End-to-end through the real handlers (not just `resolve_identity`
+    /// directly): `add_comment`/`register_worker` read `DOCKET_WORKER_ID`
+    /// from this process's actual environment when `author`/`id` are
+    /// omitted. `set_var`/`remove_var` mutate global process state, which is
+    /// normally unsafe to do in a parallel test binary — safe here only
+    /// because this is the one test in the suite that touches this specific
+    /// env var (checked: no other test or non-test code reads
+    /// `DOCKET_WORKER_ID`). Every handler that resolves identity through it
+    /// is exercised here, in one test, rather than one test per handler —
+    /// splitting would reintroduce the exact global-state race this comment
+    /// warns against.
+    #[tokio::test]
+    async fn identity_fallback_resolves_via_env_var_across_tools_or_errors() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-workerid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("workerid.db");
+        let core = spawn_core(18435, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "t".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        // SAFETY (env-mutation caveat above): the only test touching this var.
+        unsafe {
+            std::env::remove_var("DOCKET_WORKER_ID");
+        }
+        let without_fallback = server
+            .add_comment(Parameters(AddCommentParams {
+                item_id: item_id.clone(),
+                author: None,
+                body: "no identity available".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(without_fallback.is_error, Some(true));
+
+        let register_without_fallback = server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: None,
+                topics: vec!["iyulab".to_string()],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(register_without_fallback.is_error, Some(true));
+
+        unsafe {
+            std::env::set_var("DOCKET_WORKER_ID", "env-worker");
+        }
+        let with_fallback = server
+            .add_comment(Parameters(AddCommentParams {
+                item_id: item_id.clone(),
+                author: None,
+                body: "identity from env".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(with_fallback.is_error, Some(true));
+        assert_eq!(field(&with_fallback, "author"), "env-worker");
+
+        let registered = server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: None,
+                topics: vec!["iyulab".to_string()],
+            }))
+            .await
+            .unwrap();
+        assert_ne!(registered.is_error, Some(true));
+        assert_eq!(field(&registered, "id"), "env-worker");
+
+        unsafe {
+            std::env::remove_var("DOCKET_WORKER_ID");
+        }
     }
 
     #[tokio::test]
@@ -1337,7 +1542,7 @@ mod tests {
         let added = server
             .add_comment(Parameters(AddCommentParams {
                 item_id: item_id.clone(),
-                author: "maintainer".to_string(),
+                author: Some("maintainer".to_string()),
                 body: "root cause found".to_string(),
             }))
             .await
@@ -1645,7 +1850,7 @@ mod tests {
 
         server
             .register_worker(Parameters(RegisterWorkerParams {
-                id: "w1".to_string(),
+                id: Some("w1".to_string()),
                 topics: vec!["iyulab".to_string()],
             }))
             .await
@@ -1700,7 +1905,7 @@ mod tests {
         server
             .claim_item(Parameters(ClaimOrSubmitParams {
                 item_id: held_id.clone(),
-                worker_id: "w1".to_string(),
+                worker_id: Some("w1".to_string()),
             }))
             .await
             .unwrap();

@@ -182,3 +182,23 @@ corrected here rather than silently edited:
 
 Found during the final review of the implementing branch, before merge — the transition was
 never released in its original form.
+
+## 2026-08-23 update — `docket-mcp` now requires `author` on `approve`/`reject`/`reopen` (HD-16/HD-17)
+
+This ADR's own decision — `author` on all four closing operations defaults to `"unknown"` if
+omitted, no hard failure (`## Decision` above) — is **unchanged at the `docket-core` HTTP layer**:
+a direct `POST /items/{id}/approve` (or `reject`/`reopen`) with no `author` in the body still
+closes the item and records `"unknown"`, exactly as decided and tested here.
+
+What changed is one layer up. `docket-mcp`'s `approve_item`/`reject_item`/`reopen_item` tools now
+treat `author` as *resolvable-required*: omitting it no longer reaches `docket-core` at all unless
+this session's `DOCKET_WORKER_ID` env var resolves it first — with neither present, the tool
+returns a tool-level error instead of silently landing the `"unknown"` default. This mirrors the
+MCP-only tightening `add_comment` already got (cycle-55, unrelated to this ADR — `add_comment` was
+never one of the four operations this ADR covers) and closes the same traceability gap this ADR's
+own Context section named ("an item can reach its terminal state with zero identity attached"),
+without reopening the trade-off decided above: an MCP-calling agent is now the same kind of primary
+narrating caller `add_comment` already required identity from, while `docket-core`'s wire contract —
+what this ADR actually governs — keeps the optionality every existing direct-HTTP caller and the
+tests above depend on. No supersede; see `docket-mcp/src/main.rs`'s `resolve_identity` and
+`docs/usage.md` §4 for the tool-layer behavior.
