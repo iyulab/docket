@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ItemState } from './api'
 import { fetchTags, fetchTopics } from './api'
+import { getActingAs, setActingAs } from './identity'
 import { useItems } from './useItems'
 import { useUrlState } from './useUrlState'
 import { deriveTopics, matchesFilters, sortItems } from './filters'
@@ -84,6 +85,31 @@ function parseView(raw: string | null): 'list' | 'board' {
 }
 function serializeView(value: 'list' | 'board'): string | null {
   return value === 'list' ? null : value
+}
+
+// Not a `useUrlState` field — this identifies the person at the keyboard,
+// not the board's filter/view state, so it lives in localStorage (per
+// browser, not per shared link) via `identity.ts`.
+function ActingAs() {
+  const [value, setValue] = useState(getActingAs)
+
+  return (
+    <label className="acting-as" title="approve/reject/admin 액션에 author로 기록되는 값 — requester와 일치해야 approve/reject가 통과함(ADR-0019)">
+      acting as
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => {
+          setActingAs(value)
+          setValue(getActingAs())
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+        }}
+      />
+    </label>
+  )
 }
 
 export default function App() {
@@ -171,6 +197,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>docket-console</h1>
+        <ActingAs />
         {!connected && (
           <div className="banner banner-error" role="status">
             Can&rsquo;t reach docket-core &mdash; showing last known state.

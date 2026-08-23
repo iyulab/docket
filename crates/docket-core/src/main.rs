@@ -823,12 +823,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(json_body(resp).await["turn"], "requester");
 
+        // ADR-0019: approve must come from the item's requester once one is
+        // set — an omitted `author` (defaulting to "unknown") would now
+        // conflict against "reporter-1".
         let resp = app
             .clone()
             .oneshot(json_request(
                 "POST",
                 &format!("/items/{id}/approve"),
-                serde_json::json!({}),
+                serde_json::json!({"author": "reporter-1"}),
             ))
             .await
             .unwrap();

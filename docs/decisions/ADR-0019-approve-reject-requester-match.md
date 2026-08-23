@@ -1,4 +1,4 @@
-Status: v0 alignment snapshot | 2026-08-24 | settled
+Status: v0 alignment snapshot | 2026-08-24 | implemented
 
 # ADR-0019: `approve`/`reject` require caller identity to match `requester`
 
@@ -150,11 +150,21 @@ Every current and future `docket-core` caller inherits the guarantee without rei
 
 **Given up**: a `requester`/worker-id string mismatch (typo, a repo renamed without updating the
 item, inconsistent naming convention between two consumers) now hard-fails a legitimate approve —
-mitigated by `set_item_requester` and a clear error message, not eliminated. `docket-console`
-cannot ship this without also picking up its own identity fix; the two land together, not
-independently. No existing `docket-core` test exercises a `requester` mismatch today (all current
-approve/reject tests use items with `requester = null`, so all pass unchanged) — new tests are
-required to cover match/mismatch/null-passthrough, and none of that coverage exists yet.
+mitigated by `set_item_requester` and a clear error message, not eliminated.
+
+**Implemented** (2026-08-24, same day as this decision): `storage.rs`'s `approve_item`/
+`reject_item` add the `requester` match with a dedicated `approve_reject_conflict` helper that
+distinguishes wrong-state from wrong-requester in the error message; six new `docket-core` tests
+cover match/mismatch/null-passthrough for both ops (all pre-existing approve/reject tests used
+`requester = null` fixtures and pass unchanged). `docket-console` replaced its hardcoded
+`CONSOLE_AUTHOR` literal with a per-browser, user-settable "acting as" identity
+(`identity.ts`, `localStorage`-backed, default `console`) wired into every closing op via
+`api.ts`, with an input in the app header — landed in the same batch, not independently.
+`docket-mcp`'s `approve_item`/`reject_item` tool descriptions were updated to mention the
+requester-match requirement (the HTTP forwarding itself needed no change — `author` already passed
+straight through). Verified via new unit tests, a live MCP stdio handshake (match/mismatch/
+null-passthrough for both `approve`/`reject`), and a real-browser console walkthrough (mismatched
+"acting as" shows the conflict banner inline; matching it approves successfully).
 
 **Explicitly not addressed by this ADR**: visibility. Even with this enforced, a requester who
 never queries `list_items(requester=me, state=closed)` can still miss a legitimate admin

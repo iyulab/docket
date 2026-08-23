@@ -25,6 +25,22 @@ body {
   margin: 0;
 }
 
+.acting-as {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.acting-as input {
+  font-size: 0.85rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  width: 8rem;
+}
+
 .banner {
   padding: 0.4rem 0.75rem;
   border-radius: 4px;

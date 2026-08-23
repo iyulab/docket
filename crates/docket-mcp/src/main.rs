@@ -675,7 +675,10 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Approve a resolved item as the requester, closing it with resolution=done. author may be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Approve a resolved item as the requester, closing it with resolution=done. \
+            If the item has a requester set, author must match it or the call fails — use \
+            set_item_requester to correct a drifted identity. author may be omitted if this \
+            session's DOCKET_WORKER_ID is set"
     )]
     async fn approve_item(
         &self,
@@ -698,8 +701,10 @@ impl DocketMcp {
 
     #[tool(
         description = "Reject a resolved item, sending it back to the assignee for rework. \
-            Requires a reason, recorded as a comment atomically with the state change. author \
-            may be omitted if this session's DOCKET_WORKER_ID is set"
+            Requires a reason, recorded as a comment atomically with the state change. If the \
+            item has a requester set, author must match it or the call fails — use \
+            set_item_requester to correct a drifted identity. author may be omitted if this \
+            session's DOCKET_WORKER_ID is set"
     )]
     async fn reject_item(
         &self,

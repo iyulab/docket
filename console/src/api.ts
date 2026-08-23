@@ -1,3 +1,5 @@
+import { getActingAs } from './identity'
+
 export type ItemState = 'open' | 'claimed' | 'resolved' | 'closed'
 export type Resolution = 'done' | 'duplicate' | 'wontfix' | 'invalid' | 'blocked' | 'deferred'
 export type Turn = 'requester' | 'assignee'
@@ -144,28 +146,26 @@ export async function submitItem(id: string, workerId: string): Promise<Item> {
   })
 }
 
-// The four closing operations record who closed the item (ADR-0012). The
-// console has no per-user identity — every write from here is a button click
-// in the single-owner admin UI — so it attributes them to a fixed `console`
-// author rather than leaving the server's `"unknown"` fallback to stand in.
-const CONSOLE_AUTHOR = 'console'
-
+// The four closing operations record who closed the item (ADR-0012), and
+// approve/reject (ADR-0019) match it against the item's `requester` when one
+// is set — so this can no longer be a fixed literal. `getActingAs()` reads
+// the per-browser identity the user has set (defaulting to `console`).
 function authoredPost(): RequestInit {
   return {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ author: CONSOLE_AUTHOR }),
+    body: JSON.stringify({ author: getActingAs() }),
   }
 }
 
 // `reject`/`reopen` are corrections to a decision someone already made, so —
 // unlike the four ops above — they require a non-blank `reason` alongside
-// the same fixed `author` (ADR-0012).
+// the same `author` (ADR-0012).
 function reasonedPost(reason: string): RequestInit {
   return {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ author: CONSOLE_AUTHOR, reason }),
+    body: JSON.stringify({ author: getActingAs(), reason }),
   }
 }
 
@@ -199,7 +199,7 @@ export async function mergeItem(id: string, duplicateOfId: string): Promise<Item
   return mutate<Item>(`/api/items/${id}/merge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ author: CONSOLE_AUTHOR, duplicate_of_id: duplicateOfId }),
+    body: JSON.stringify({ author: getActingAs(), duplicate_of_id: duplicateOfId }),
   })
 }
 

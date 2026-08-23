@@ -437,6 +437,11 @@ impl Store {
     /// (same two-`execute`-under-one-lock pattern as `add_comment` — no
     /// separate `conn.transaction()` needed, since no other thread can
     /// interleave while this lock is held). See ADR-0012.
+    ///
+    /// Only the item's `requester` may reject (mirrors `submit_item`'s
+    /// `assignee` match on the other side of the handshake) — unless
+    /// `requester` is unset, in which case there is no party to violate. See
+    /// [ADR-0019](../../../docs/decisions/ADR-0019-approve-reject-requester-match.md).
     pub fn reject_item(&self, id: &str, author: &str, reason: &str) -> Result<Item> {
         let reason = reason.trim();
         if reason.is_empty() {
@@ -449,11 +454,12 @@ impl Store {
         let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
-            "UPDATE items SET state = 'claimed', updated_at = ?1 WHERE id = ?2 AND state = 'resolved'",
-            params![now, id],
+            "UPDATE items SET state = 'claimed', updated_at = ?1
+             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3)",
+            params![now, id, author],
         )?;
         if affected == 0 {
-            return Err(existing_state_conflict(&conn, id, "reject")?);
+            return Err(approve_reject_conflict(&conn, id, "reject", author)?);
         }
         insert_lifecycle_comment(&conn, id, author, reason, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
@@ -501,6 +507,11 @@ impl Store {
     /// Atomically transitions `resolved -> closed` with `resolution = done`
     /// — the requester's approval. `author` is recorded as an atomic
     /// comment (traceability — see ADR-0012's "author" discussion).
+    ///
+    /// Only the item's `requester` may approve (mirrors `submit_item`'s
+    /// `assignee` match on the other side of the handshake) — unless
+    /// `requester` is unset, in which case there is no party to violate. See
+    /// [ADR-0019](../../../docs/decisions/ADR-0019-approve-reject-requester-match.md).
     pub fn approve_item(&self, id: &str, author: &str) -> Result<Item> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
@@ -508,11 +519,11 @@ impl Store {
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'closed', resolution = 'done', updated_at = ?1
-             WHERE id = ?2 AND state = 'resolved'",
-            params![now, id],
+             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3)",
+            params![now, id, author],
         )?;
         if affected == 0 {
-            return Err(existing_state_conflict(&conn, id, "approve")?);
+            return Err(approve_reject_conflict(&conn, id, "approve", author)?);
         }
         insert_lifecycle_comment(&conn, id, author, "approved", now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
@@ -1005,6 +1016,38 @@ fn existing_state_conflict(conn: &Connection, id: &str, op: &str) -> Result<Stor
     }
 }
 
+/// Same shape as [`existing_state_conflict`], but for `approve_item`/
+/// `reject_item`, whose `WHERE` clause can fail for either of two reasons —
+/// wrong state, or a `requester` mismatch (ADR-0019) — that a caller needs to
+/// tell apart: a wrong-state conflict is a stale-state retry, a requester
+/// mismatch is an authorization violation (or a drifted identity fixable via
+/// `set_item_requester`).
+fn approve_reject_conflict(
+    conn: &Connection,
+    id: &str,
+    op: &str,
+    author: &str,
+) -> Result<StoreError> {
+    match row_to_item(conn, id)? {
+        Some(item) => {
+            if item.state != State::Resolved {
+                Ok(StoreError::Conflict(format!(
+                    "cannot {op}: item is {}",
+                    item.state.as_str()
+                )))
+            } else {
+                let requester = item.requester.as_deref().unwrap_or("(unset)");
+                Ok(StoreError::Conflict(format!(
+                    "cannot {op}: caller `{author}` does not match item's requester `{requester}` \
+                     — if this is a drifted identity rather than a genuine wrong-party call, use \
+                     set_item_requester to correct it"
+                )))
+            }
+        }
+        None => Ok(StoreError::NotFound),
+    }
+}
+
 /// Resolves a caller-supplied item identifier to the canonical UUID. Accepts
 /// either the UUID itself or the item's short numeric alias (`seq`), with or
 /// without a leading `#` (`"142"` and `"#142"` both work) — see
@@ -1263,6 +1306,106 @@ mod tests {
             .reject_item(&item.id, "requester-1", "   ")
             .unwrap_err();
         assert!(matches!(err, StoreError::Validation(_)));
+    }
+
+    /// ADR-0019: `approve`/`reject` mirror `submit_item`'s `assignee` match
+    /// on the requester side. `author` mismatching a set `requester` must
+    /// fail, distinguishably from a plain wrong-state conflict.
+    #[test]
+    fn approve_rejects_when_author_does_not_match_requester() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let err = store.approve_item(&item.id, "someone-else").unwrap_err();
+        let StoreError::Conflict(msg) = &err else {
+            panic!("expected Conflict, got {err:?}");
+        };
+        assert!(msg.contains("someone-else"));
+        assert!(msg.contains("requester-1"));
+        assert_eq!(store.get_item(&item.id).unwrap().state, State::Resolved);
+    }
+
+    #[test]
+    fn approve_succeeds_when_author_matches_requester() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let closed = store.approve_item(&item.id, "requester-1").unwrap();
+        assert_eq!(closed.state, State::Closed);
+    }
+
+    /// No `requester` was ever named to hold this turn, so there is nothing
+    /// for any `author` to violate — matches `submit_item`'s behavior when
+    /// there is no comparable gap in its own model.
+    #[test]
+    fn approve_passes_through_when_requester_is_unset() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let closed = store.approve_item(&item.id, "anyone-at-all").unwrap();
+        assert_eq!(closed.state, State::Closed);
+    }
+
+    #[test]
+    fn reject_rejects_when_author_does_not_match_requester() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let err = store
+            .reject_item(&item.id, "someone-else", "reason")
+            .unwrap_err();
+        let StoreError::Conflict(msg) = &err else {
+            panic!("expected Conflict, got {err:?}");
+        };
+        assert!(msg.contains("someone-else"));
+        assert!(msg.contains("requester-1"));
+        assert_eq!(store.get_item(&item.id).unwrap().state, State::Resolved);
+    }
+
+    #[test]
+    fn reject_succeeds_when_author_matches_requester() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let rejected = store
+            .reject_item(&item.id, "requester-1", "not done yet")
+            .unwrap();
+        assert_eq!(rejected.state, State::Claimed);
+    }
+
+    #[test]
+    fn reject_passes_through_when_requester_is_unset() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1").unwrap();
+
+        let rejected = store
+            .reject_item(&item.id, "anyone-at-all", "not done yet")
+            .unwrap();
+        assert_eq!(rejected.state, State::Claimed);
     }
 
     #[test]
