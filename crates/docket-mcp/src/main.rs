@@ -249,8 +249,12 @@ struct AddCommentParams {
     /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
     /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    #[serde(default)]
-    author: Option<String>,
+    /// Who's writing this comment. Required (unlike the four admin-close
+    /// ops' `author?`, which stay optional — see `with_optional_author`):
+    /// `add_comment` is the primary thread callers narrate work through, so
+    /// leaving it out silently degrades every comment to docket-core's
+    /// `"unknown"` fallback, making the thread unreadable (Issue #30).
+    author: String,
     body: String,
 }
 
@@ -420,9 +424,12 @@ async fn respond_paginated(resp: reqwest::Response) -> Result<CallToolResult, Mc
 }
 
 /// Adds an `author` field to a request body when the caller supplied one —
-/// every mutation that records authorship (approve/reject/reopen/
-/// add_comment) follows the same optional-author convention, docket-core
-/// defaulting to `"unknown"` when it's omitted.
+/// every admin-close mutation (approve/reject/reopen/remove/merge/
+/// force-close/force-approve) follows the same optional-author convention,
+/// docket-core defaulting to `"unknown"` when it's omitted. `add_comment`
+/// does NOT use this helper — its `author` is required at this layer (see
+/// `AddCommentParams`), since it's the primary thread callers narrate work
+/// through rather than an infrequent admin action.
 fn with_optional_author(mut body: serde_json::Value, author: Option<String>) -> serde_json::Value {
     if let Some(author) = author {
         body["author"] = serde_json::Value::String(author);
@@ -788,13 +795,13 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices. Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it"
+        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices. Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it. `author` is required — identify yourself (your worker id, or another stable caller identity) so the thread stays readable instead of filling up with docket-core's \"unknown\" fallback"
     )]
     async fn add_comment(
         &self,
         Parameters(p): Parameters<AddCommentParams>,
     ) -> Result<CallToolResult, McpError> {
-        let body = with_optional_author(serde_json::json!({ "body": p.body }), p.author);
+        let body = serde_json::json!({ "body": p.body, "author": p.author });
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["comments"]))
@@ -1184,6 +1191,19 @@ mod tests {
         assert!(err.to_string().contains("owned_by"));
     }
 
+    /// `author` is required on `add_comment` (unlike the admin-close ops'
+    /// `author?`) — a caller that omits it fails at the schema layer
+    /// instead of silently landing docket-core's `"unknown"` fallback,
+    /// which is what made comment threads unreadable (Issue #30).
+    #[test]
+    fn add_comment_params_rejects_missing_author() {
+        let err = serde_json::from_value::<AddCommentParams>(
+            serde_json::json!({ "item_id": "x", "body": "hi" }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("author"));
+    }
+
     #[tokio::test]
     async fn create_item_with_tags_then_add_remove_and_list_tags() {
         let dir = std::env::temp_dir().join(format!("docket-mcp-test-tags-{}", std::process::id()));
@@ -1317,7 +1337,7 @@ mod tests {
         let added = server
             .add_comment(Parameters(AddCommentParams {
                 item_id: item_id.clone(),
-                author: Some("maintainer".to_string()),
+                author: "maintainer".to_string(),
                 body: "root cause found".to_string(),
             }))
             .await
