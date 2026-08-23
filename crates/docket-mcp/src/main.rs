@@ -17,6 +17,29 @@ struct DocketMcp {
     base_url: String,
 }
 
+/// Builds `{base_url}/items/{item_id}[/{suffix...}]`, percent-encoding
+/// `item_id` (and any suffix segments) via `Url::path_segments_mut` instead
+/// of raw `format!` string interpolation. `item_id` may be a `#`-prefixed
+/// seq alias (ADR-0016), and `#` is the URL fragment delimiter — a naive
+/// `format!("{base}/items/{item_id}")` string, once handed to reqwest and
+/// parsed as a URL, silently drops everything from `#` onward *before the
+/// request is ever sent*, turning `#142` into a request for an empty id
+/// (docket-core then 404s) instead of the intended lookup. Building through
+/// `Url` keeps every reserved character correctly encoded, not just `#`.
+fn items_url(base_url: &str, item_id: &str, suffix: &[&str]) -> reqwest::Url {
+    let mut url = reqwest::Url::parse(base_url).expect("base_url is a valid absolute URL");
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .expect("http(s) base_url has path segments");
+        segments.push("items").push(item_id);
+        for s in suffix {
+            segments.push(s);
+        }
+    }
+    url
+}
+
 // Every tool-parameter struct below denies unknown fields — a caller
 // guessing a stale or misremembered field name (e.g. `owned_by`, the
 // pre-ADR-0010 name for what's now `assignee`/`requester`/`topic_scope`)
@@ -246,6 +269,11 @@ struct ItemIdParams {
 #[derive(Debug, Serialize, Deserialize)]
 struct ItemDto {
     id: String,
+    /// Absent from servers older than ADR-0016. Defaulted (to 0, never a
+    /// real item's value — seq starts at 1) for the same older-server
+    /// reason as `tags`/`turn`/`open` above.
+    #[serde(default)]
+    seq: i64,
     topic: String,
     title: String,
     body: Option<String>,
@@ -552,7 +580,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .post(format!("{}/items/{}/claim", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["claim"]))
             .json(&serde_json::json!({ "worker_id": p.worker_id }))
             .send()
             .await
@@ -569,7 +597,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .post(format!("{}/items/{}/submit", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["submit"]))
             .json(&serde_json::json!({ "worker_id": p.worker_id }))
             .send()
             .await
@@ -587,7 +615,7 @@ impl DocketMcp {
         let body = with_optional_author(serde_json::json!({}), p.author);
         let resp = self
             .http
-            .post(format!("{}/items/{}/approve", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["approve"]))
             .json(&body)
             .send()
             .await
@@ -606,7 +634,7 @@ impl DocketMcp {
         let body = with_optional_author(serde_json::json!({ "reason": p.reason }), p.author);
         let resp = self
             .http
-            .post(format!("{}/items/{}/reject", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["reject"]))
             .json(&body)
             .send()
             .await
@@ -627,7 +655,7 @@ impl DocketMcp {
         let body = with_optional_author(serde_json::json!({ "reason": p.reason }), p.author);
         let resp = self
             .http
-            .post(format!("{}/items/{}/reopen", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["reopen"]))
             .json(&body)
             .send()
             .await
@@ -649,7 +677,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .get(format!("{}/items/{}", self.base_url, p.item_id))
+            .get(items_url(&self.base_url, &p.item_id, &[]))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -667,7 +695,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .post(format!("{}/items/{}/archive", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["archive"]))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -687,7 +715,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .patch(format!("{}/items/{}", self.base_url, p.item_id))
+            .patch(items_url(&self.base_url, &p.item_id, &[]))
             .json(&serde_json::json!({ "requester": p.requester }))
             .send()
             .await
@@ -704,7 +732,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .post(format!("{}/items/{}/tags", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["tags"]))
             .json(&serde_json::json!({ "tags": p.tags }))
             .send()
             .await
@@ -721,7 +749,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .delete(format!("{}/items/{}/tags", self.base_url, p.item_id))
+            .delete(items_url(&self.base_url, &p.item_id, &["tags"]))
             .json(&serde_json::json!({ "tags": p.tags }))
             .send()
             .await
@@ -769,7 +797,7 @@ impl DocketMcp {
         let body = with_optional_author(serde_json::json!({ "body": p.body }), p.author);
         let resp = self
             .http
-            .post(format!("{}/items/{}/comments", self.base_url, p.item_id))
+            .post(items_url(&self.base_url, &p.item_id, &["comments"]))
             .json(&body)
             .send()
             .await
@@ -784,7 +812,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .get(format!("{}/items/{}/comments", self.base_url, p.item_id))
+            .get(items_url(&self.base_url, &p.item_id, &["comments"]))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -1772,5 +1800,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.is_error, Some(true));
+    }
+
+    /// `item_id` accepts the bare numeric `seq` alias, or the same value
+    /// prefixed with `#` — both must resolve end to end through the real
+    /// HTTP request docket-mcp sends, not just docket-core's own
+    /// in-process resolver. The `#`-prefixed form specifically exercises a
+    /// URL-fragment pitfall: `#` is the fragment delimiter in a URL, so a
+    /// naive `format!("{base}/items/{item_id}")` that reqwest then parses
+    /// as a URL could silently drop everything from `#` onward before the
+    /// request is ever sent, turning `#142` into a lookup for an empty id
+    /// instead of a 404 or a resolved item — a failure this MCP-level test
+    /// would catch that a docket-core-only unit test cannot, since that
+    /// layer never constructs a URL string from the alias at all.
+    #[tokio::test]
+    async fn get_item_accepts_seq_alias_bare_and_hash_prefixed() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-seq-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("seq-alias.db");
+        let core = spawn_core(18434, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "resolve me by seq".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+        let seq = json_value(&created)["seq"]
+            .as_i64()
+            .expect("seq is a number");
+
+        let by_bare_seq = server
+            .get_item(Parameters(ItemIdParams {
+                item_id: seq.to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(by_bare_seq.is_error, Some(true));
+        assert_eq!(json_value(&by_bare_seq)["id"], item_id);
+
+        let by_hash_seq = server
+            .get_item(Parameters(ItemIdParams {
+                item_id: format!("#{seq}"),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(
+            by_hash_seq.is_error,
+            Some(true),
+            "error: {}",
+            text_of(&by_hash_seq)
+        );
+        assert_eq!(json_value(&by_hash_seq)["id"], item_id);
     }
 }
