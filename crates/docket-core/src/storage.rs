@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::domain::{Comment, Item, Resolution, State, TagCount, TagMatch, TopicCount, Worker};
+use crate::domain::{
+    Comment, Item, Resolution, SortOrder, State, TagCount, TagMatch, TopicCount, Worker,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -362,6 +364,7 @@ impl Store {
         topic: Option<&str>,
         state: Option<State>,
         archived: Option<bool>,
+        order: SortOrder,
     ) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
@@ -382,7 +385,8 @@ impl Store {
         } else {
             sql.push_str(" AND archived_at IS NULL");
         }
-        sql.push_str(" ORDER BY updated_at DESC");
+        sql.push_str(" ORDER BY updated_at ");
+        sql.push_str(order.sql_keyword());
 
         let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
@@ -832,6 +836,12 @@ impl Store {
     /// mentions the term is as findable as one whose title does).
     /// `list_items` itself is untouched — this is a separate method so its
     /// existing callers/tests can't regress.
+    ///
+    /// Seven independent, already-existing filter/sort dimensions — a
+    /// params struct would be a separate refactor spanning `list_items` too
+    /// (not scoped to ADR-0020, which only adds `order`), not a fix for
+    /// this method alone.
+    #[allow(clippy::too_many_arguments)]
     pub fn search_items(
         &self,
         topic: Option<&str>,
@@ -840,6 +850,7 @@ impl Store {
         tag_match: TagMatch,
         query: Option<&str>,
         archived: Option<bool>,
+        order: SortOrder,
     ) -> Result<Vec<Item>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
@@ -902,7 +913,8 @@ impl Store {
         } else {
             sql.push_str(" AND i.archived_at IS NULL");
         }
-        sql.push_str(" ORDER BY i.updated_at DESC");
+        sql.push_str(" ORDER BY i.updated_at ");
+        sql.push_str(order.sql_keyword());
 
         let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
@@ -1834,7 +1846,15 @@ mod tests {
         let store = Store::open(db_path.to_str().unwrap()).unwrap();
 
         let found = store
-            .search_items(None, None, &[], TagMatch::Any, Some("hydration"), None)
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("hydration"),
+                None,
+                SortOrder::Desc,
+            )
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "legacy-1");
@@ -2197,7 +2217,7 @@ mod tests {
             StoreError::NotFound
         ));
         // list_items over the whole store no longer includes it
-        let all = store.list_items(None, None, None).unwrap();
+        let all = store.list_items(None, None, None, SortOrder::Desc).unwrap();
         assert!(!all.iter().any(|i| i.id == item.id));
 
         // The cascade itself, not just what the public API surfaces —
@@ -2236,6 +2256,7 @@ mod tests {
                 TagMatch::Any,
                 Some("unique-searchable-title"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(found_before.len(), 1);
@@ -2250,6 +2271,7 @@ mod tests {
                 TagMatch::Any,
                 Some("unique-searchable-title"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert!(found_after.is_empty());
@@ -2480,6 +2502,7 @@ mod tests {
                 TagMatch::Any,
                 None,
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         let mut any_ids: Vec<_> = any_match.iter().map(|i| i.id.clone()).collect();
@@ -2496,6 +2519,7 @@ mod tests {
                 TagMatch::All,
                 None,
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(all_match.len(), 1);
@@ -2520,6 +2544,7 @@ mod tests {
                 TagMatch::Any,
                 Some("form"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -2550,6 +2575,7 @@ mod tests {
                 TagMatch::Any,
                 Some("EnumMember JsonOptions"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -2575,7 +2601,15 @@ mod tests {
             .unwrap();
 
         let results = store
-            .search_items(None, None, &[], TagMatch::Any, Some("전송 처리량"), None)
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("전송 처리량"),
+                None,
+                SortOrder::Desc,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
     }
@@ -2597,9 +2631,74 @@ mod tests {
                 TagMatch::Any,
                 Some("\"quoted\" word"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    /// See ADR-0020: `order` picks the direction of the fixed `updated_at`
+    /// sort, default `Desc` unchanged.
+    #[test]
+    fn list_items_order_asc_reverses_the_default_desc_ordering() {
+        let store = open_test_store();
+        let first = store
+            .create_item("iyulab/docket", "first", None, &[], None)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = store
+            .create_item("iyulab/docket", "second", None, &[], None)
+            .unwrap();
+
+        let desc = store.list_items(None, None, None, SortOrder::Desc).unwrap();
+        assert_eq!(desc[0].id, second.id);
+        assert_eq!(desc[1].id, first.id);
+
+        let asc = store.list_items(None, None, None, SortOrder::Asc).unwrap();
+        assert_eq!(asc[0].id, first.id);
+        assert_eq!(asc[1].id, second.id);
+    }
+
+    /// `search_items` gets the same `order` treatment as `list_items` — see
+    /// ADR-0020.
+    #[test]
+    fn search_items_order_asc_reverses_the_default_desc_ordering() {
+        let store = open_test_store();
+        let first = store
+            .create_item("iyulab/docket", "order-probe first", None, &[], None)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = store
+            .create_item("iyulab/docket", "order-probe second", None, &[], None)
+            .unwrap();
+
+        let desc = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("order-probe"),
+                None,
+                SortOrder::Desc,
+            )
+            .unwrap();
+        assert_eq!(desc[0].id, second.id);
+        assert_eq!(desc[1].id, first.id);
+
+        let asc = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("order-probe"),
+                None,
+                SortOrder::Asc,
+            )
+            .unwrap();
+        assert_eq!(asc[0].id, first.id);
+        assert_eq!(asc[1].id, second.id);
     }
 
     #[test]
@@ -2613,11 +2712,13 @@ mod tests {
             .unwrap();
         store.archive_item(&hidden.id).unwrap();
 
-        let default_view = store.list_items(None, None, None).unwrap();
+        let default_view = store.list_items(None, None, None, SortOrder::Desc).unwrap();
         assert!(default_view.iter().any(|i| i.id == visible.id));
         assert!(!default_view.iter().any(|i| i.id == hidden.id));
 
-        let archive_only = store.list_items(None, None, Some(true)).unwrap();
+        let archive_only = store
+            .list_items(None, None, Some(true), SortOrder::Desc)
+            .unwrap();
         assert!(!archive_only.iter().any(|i| i.id == visible.id));
         assert!(archive_only.iter().any(|i| i.id == hidden.id));
     }
@@ -2637,13 +2738,29 @@ mod tests {
         store.archive_item(&hidden.id).unwrap();
 
         let default_view = store
-            .search_items(None, None, &[], TagMatch::Any, Some("matching"), None)
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("matching"),
+                None,
+                SortOrder::Desc,
+            )
             .unwrap();
         assert!(default_view.iter().any(|i| i.id == visible.id));
         assert!(!default_view.iter().any(|i| i.id == hidden.id));
 
         let archive_only = store
-            .search_items(None, None, &[], TagMatch::Any, Some("matching"), Some(true))
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("matching"),
+                Some(true),
+                SortOrder::Desc,
+            )
             .unwrap();
         assert!(!archive_only.iter().any(|i| i.id == visible.id));
         assert!(archive_only.iter().any(|i| i.id == hidden.id));
@@ -2727,6 +2844,7 @@ mod tests {
                 TagMatch::Any,
                 Some("race in claim_item"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -2794,6 +2912,7 @@ mod tests {
                 TagMatch::Any,
                 Some("race in claim_item"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(found.len(), 1);
@@ -2812,6 +2931,7 @@ mod tests {
                 TagMatch::Any,
                 Some("thanks for the fix"),
                 None,
+                SortOrder::Desc,
             )
             .unwrap();
         assert_eq!(found2.len(), 1);

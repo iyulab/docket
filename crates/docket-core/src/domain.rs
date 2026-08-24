@@ -198,6 +198,48 @@ impl TagMatch {
     }
 }
 
+/// Sort direction for `list_items`/`search_items`' fixed `updated_at`
+/// column — see [ADR-0020](../../../docs/decisions/ADR-0020-list-search-order-parameter.md).
+/// `Desc` (most-recently-touched first) is the default, matching this
+/// project's behavior before this parameter existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOrder {
+    Asc,
+    #[default]
+    Desc,
+}
+
+impl SortOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SortOrder::Asc => "asc",
+            SortOrder::Desc => "desc",
+        }
+    }
+
+    /// An unrecognized value is the caller's problem to notice via
+    /// behavior, not a hard error — same treatment `TagMatch::parse`'s
+    /// callers already give an unrecognized `tag_match` (falls back to the
+    /// default rather than rejecting the request).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "asc" => Some(SortOrder::Asc),
+            "desc" => Some(SortOrder::Desc),
+            _ => None,
+        }
+    }
+
+    /// The literal `ORDER BY` keyword — safe to interpolate directly since
+    /// it's drawn from this closed enum, never from caller-supplied text.
+    pub(crate) fn sql_keyword(self) -> &'static str {
+        match self {
+            SortOrder::Asc => "ASC",
+            SortOrder::Desc => "DESC",
+        }
+    }
+}
+
 /// One row of `list_tags` — a tag and how many items currently carry it,
 /// so a caller can browse existing vocabulary before inventing a new tag
 /// string (avoids synonym drift, e.g. "release-pending" vs "awaiting-release").
@@ -272,5 +314,14 @@ mod tests {
         for m in [TagMatch::Any, TagMatch::All] {
             assert_eq!(TagMatch::parse(m.as_str()), Some(m));
         }
+    }
+
+    #[test]
+    fn sort_order_round_trips_through_str_and_defaults_to_desc() {
+        for o in [SortOrder::Asc, SortOrder::Desc] {
+            assert_eq!(SortOrder::parse(o.as_str()), Some(o));
+        }
+        assert_eq!(SortOrder::default(), SortOrder::Desc);
+        assert_eq!(SortOrder::parse("sideways"), None);
     }
 }

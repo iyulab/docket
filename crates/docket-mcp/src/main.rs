@@ -138,6 +138,12 @@ struct ListItemsParams {
     /// fetch in full next. See ADR-0014.
     #[serde(default)]
     summary: Option<bool>,
+    /// "asc" or "desc", sorting by `updated_at`. Defaults to "desc"
+    /// (most-recently-touched first, today's fixed behavior); pass "asc"
+    /// to find the longest-untouched items directly instead of paging to
+    /// the tail via `offset`. See ADR-0020.
+    #[serde(default)]
+    order: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -191,6 +197,10 @@ struct SearchItemsParams {
     /// fetch in full next. See ADR-0014.
     #[serde(default)]
     summary: Option<bool>,
+    /// "asc" or "desc", sorting by `updated_at`. Same semantics as
+    /// `list_items`'s field of the same name. See ADR-0020.
+    #[serde(default)]
+    order: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -540,7 +550,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker currently holds a live stake in (mine — assignee OR resolved-and-awaiting-my-approval), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Always ordered by updated_at descending (most-recently-touched first) — fixed, no ascending option; to find the longest-untouched items, page to the tail via offset using total"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker currently holds a live stake in (mine — assignee OR resolved-and-awaiting-my-approval), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset"
     )]
     async fn list_items(
         &self,
@@ -564,6 +574,7 @@ impl DocketMcp {
                 ("limit", limit.as_deref()),
                 ("offset", offset.as_deref()),
                 ("summary", summary.as_deref()),
+                ("order", p.order.as_deref()),
             ])
             .send()
             .await
@@ -572,7 +583,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same fixed updated_at-descending ordering as list_items"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse)"
     )]
     async fn search_items(
         &self,
@@ -621,6 +632,9 @@ impl DocketMcp {
         let summary = p.summary.map(|s| s.to_string());
         if let Some(s) = summary.as_deref() {
             query_pairs.push(("summary", s));
+        }
+        if let Some(o) = p.order.as_deref() {
+            query_pairs.push(("order", o));
         }
         let resp = self
             .http
@@ -1125,6 +1139,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
@@ -1666,6 +1681,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
@@ -1762,6 +1778,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
@@ -1785,6 +1802,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
@@ -1872,6 +1890,7 @@ mod tests {
                 limit: Some(2),
                 offset: Some(1),
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
@@ -1915,6 +1934,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: Some(true),
+                order: None,
             }))
             .await
             .unwrap();
@@ -1971,6 +1991,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
@@ -2092,6 +2113,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
@@ -2114,12 +2136,100 @@ mod tests {
                 limit: None,
                 offset: None,
                 summary: None,
+                order: None,
             }))
             .await
             .unwrap();
         let searched_items = json_value(&searched)["items"].as_array().unwrap().clone();
         assert_eq!(searched_items.len(), 1);
         assert_eq!(searched_items[0]["id"], held_id);
+    }
+
+    /// `order` is forwarded end to end through both `list_items` and
+    /// `search_items`, not just dropped between the MCP params and the HTTP
+    /// call (`docket-core`'s own tests already cover the SQL-level
+    /// behavior). See ADR-0020.
+    #[tokio::test]
+    async fn order_is_forwarded_through_list_items_and_search_items() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("order.db");
+        let core = spawn_core(18437, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let first = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "order-probe first".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let first_id = field(&first, "id");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let second = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "order-probe second".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let second_id = field(&second, "id");
+
+        let listed_asc = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: Some("asc".to_string()),
+            }))
+            .await
+            .unwrap();
+        let listed_asc_items = json_value(&listed_asc)["items"].as_array().unwrap().clone();
+        assert_eq!(listed_asc_items[0]["id"], first_id);
+        assert_eq!(listed_asc_items[1]["id"], second_id);
+
+        let searched_asc = server
+            .search_items(Parameters(SearchItemsParams {
+                query: Some("order-probe".to_string()),
+                tags: vec![],
+                tag_match: None,
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: Some("asc".to_string()),
+            }))
+            .await
+            .unwrap();
+        let searched_asc_items = json_value(&searched_asc)["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(searched_asc_items[0]["id"], first_id);
+        assert_eq!(searched_asc_items[1]["id"], second_id);
     }
 
     /// `get_item` is the one-call path from an id (e.g. resolved out of a

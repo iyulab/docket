@@ -172,6 +172,14 @@ override (`force-close`, `remove`, `merge`) closing an item they cared about —
 agnostic, human-console actions by design. That gap is a query-convention concern, not a
 `docket-core` invariant, and is out of scope here.
 
+**2026-08-24 update — the query-convention gap above is documented, not left implicit**
+(`docket-works#32`): no new primitive was needed — `list_items(requester=<id>, state="closed")`
+already answers "what closed while I wasn't looking" with the same tools this ADR's own text names.
+What was actually missing was the connection between that existing call and `mine`'s deliberate
+`closed` exclusion. `docs/usage.md` §5 (the worker loop) now states this explicitly next to `mine`,
+so a reader lands on the answer instead of re-deriving it the way this ADR's own investigation had
+to.
+
 ## Re-open trigger
 
 If `requester`/worker-id string drift turns out to be common enough that legitimate approvals are

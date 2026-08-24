@@ -311,6 +311,12 @@ struct ListItemsQuery {
     /// See ADR-0014's "summary mode" re-open trigger.
     #[serde(default)]
     summary: Option<bool>,
+    /// `asc` or `desc`, sorting by `updated_at`. Defaults to `desc`
+    /// (today's fixed behavior); an unrecognized value also falls back to
+    /// `desc` rather than erroring, same as an unrecognized `tag_match`.
+    /// See [ADR-0020](../../../docs/decisions/ADR-0020-list-search-order-parameter.md).
+    #[serde(default)]
+    order: Option<String>,
 }
 
 /// See ADR-0014: keeps a single-topic or unfiltered query well under the
@@ -334,6 +340,11 @@ async fn list_items(
         .clamp(1, MAX_LIST_LIMIT);
     let offset = q.offset.unwrap_or(0);
     let state = q.state.as_deref().and_then(ItemState::parse);
+    let order = q
+        .order
+        .as_deref()
+        .and_then(docket_core::domain::SortOrder::parse)
+        .unwrap_or_default();
     let items = if q.q.is_some() || !q.tag.is_empty() {
         let tag_match = q
             .tag_match
@@ -347,9 +358,10 @@ async fn list_items(
             tag_match,
             q.q.as_deref(),
             q.archived,
+            order,
         )?
     } else {
-        store.list_items(q.topic.as_deref(), state, q.archived)?
+        store.list_items(q.topic.as_deref(), state, q.archived, order)?
     };
     let items = match q.topic_scope {
         Some(worker_id) => {
@@ -2047,6 +2059,78 @@ mod tests {
             .unwrap();
         let items = json_body(resp).await;
         assert_eq!(items.as_array().unwrap().len(), 5);
+    }
+
+    /// See ADR-0020: `order=asc` reverses the default `updated_at`-descending
+    /// ordering; an unrecognized value falls back to the default rather than
+    /// erroring (same treatment `tag_match` already gets).
+    #[tokio::test]
+    async fn order_query_param_controls_ascending_vs_descending_and_defaults_to_desc() {
+        let app = test_app();
+        let first = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "first"}),
+            ))
+            .await
+            .unwrap();
+        let first_id = json_body(first).await["id"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let second = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "second"}),
+            ))
+            .await
+            .unwrap();
+        let second_id = json_body(second).await["id"].as_str().unwrap().to_string();
+
+        let desc = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let desc_items = json_body(desc).await;
+        assert_eq!(desc_items[0]["id"], second_id);
+        assert_eq!(desc_items[1]["id"], first_id);
+
+        let asc = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket&order=asc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let asc_items = json_body(asc).await;
+        assert_eq!(asc_items[0]["id"], first_id);
+        assert_eq!(asc_items[1]["id"], second_id);
+
+        // An unrecognized `order` value degrades to the default, not a 400.
+        let unrecognized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket&order=sideways")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unrecognized.status(), StatusCode::OK);
+        let unrecognized_items = json_body(unrecognized).await;
+        assert_eq!(unrecognized_items[0]["id"], second_id);
+        assert_eq!(unrecognized_items[1]["id"], first_id);
     }
 
     #[tokio::test]
