@@ -24,9 +24,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            ext: ".exe"
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             ext: ""
@@ -71,6 +68,61 @@ jobs:
           path: dist/*
           retention-days: 1
 
+  build-windows:
+    # Split out of the `build` matrix so `environment: production` (required
+    # for the code-sign composite action's OIDC federated credential) scopes
+    # to this job only — declaring it on the shared matrix job would gate the
+    # linux/macos legs behind the same environment protection rules too.
+    runs-on: windows-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Add target
+        run: rustup target add ${{ env.target }}
+
+      - name: Build docket-core, docket-mcp, docket-cc, and their launchers
+        run: |
+          cargo build --release -p docket-core --target ${{ env.target }}
+          cargo build --release -p docket-mcp --target ${{ env.target }}
+          cargo build --release -p docket-cc --target ${{ env.target }}
+          cargo build --release -p docket-mcp-launcher --target ${{ env.target }}
+          cargo build --release -p docket-cc-launcher --target ${{ env.target }}
+
+      - uses: iyulab/code-sign@main
+        with:
+          files: |
+            target/${{ env.target }}/release/docket-core.exe
+            target/${{ env.target }}/release/docket-mcp.exe
+            target/${{ env.target }}/release/docket-cc.exe
+            target/${{ env.target }}/release/docket-mcp-launcher.exe
+            target/${{ env.target }}/release/docket-cc-launcher.exe
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          mkdir -p dist
+          for bin in docket-core docket-mcp docket-cc docket-mcp-launcher docket-cc-launcher; do
+            cp "target/${{ env.target }}/release/${bin}.exe" \
+               "dist/${bin}-${{ env.target }}.exe"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ env.target }}
+          path: dist/*
+          retention-days: 1
+
   build-console:
     runs-on: ubuntu-latest
     steps:
@@ -100,7 +152,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [build, build-console]
+    needs: [build, build-windows, build-console]
     runs-on: ubuntu-latest
     permissions:
       contents: write
