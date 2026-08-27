@@ -99,7 +99,7 @@ jobs:
           cargo build --release -p docket-mcp-launcher --target ${{ env.target }}
           cargo build --release -p docket-cc-launcher --target ${{ env.target }}
 
-      - uses: iyulab/code-sign@main
+      - uses: iyulab/code-sign@693f7261b2e4aef517ff8972db7d07eb53ffc623 # main @ 2026-08-27
         with:
           files: |
             target/${{ env.target }}/release/docket-core.exe
