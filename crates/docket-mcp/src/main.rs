@@ -147,6 +147,14 @@ struct ListItemsParams {
     /// the tail via `offset`. See ADR-0020.
     #[serde(default)]
     order: Option<String>,
+    /// When `true`, each returned item also resolves its own `related:<id>`
+    /// tags (both directions) into a `related` field — the same expansion
+    /// `get_item` offers for a single item, applied per row here after
+    /// `limit`/`offset`, so the cost is bounded by the returned page, not
+    /// the unpaged total. Defaults to `false` (no `related` field on any
+    /// item). See [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    #[serde(default)]
+    expand_related: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -204,6 +212,12 @@ struct SearchItemsParams {
     /// `list_items`'s field of the same name. See ADR-0020.
     #[serde(default)]
     order: Option<String>,
+    /// Same semantics as `list_items`'s field of the same name — resolves
+    /// each returned item's `related:<id>` tags into a `related` field,
+    /// bounded by the returned page. See
+    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    #[serde(default)]
+    expand_related: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -584,7 +598,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-awaiting-my-approval OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss (see docket-works#35). Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-awaiting-my-approval OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss (see docket-works#35). Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item"
     )]
     async fn list_items(
         &self,
@@ -594,6 +608,7 @@ impl DocketMcp {
         let limit = p.limit.map(|l| l.to_string());
         let offset = p.offset.map(|o| o.to_string());
         let summary = p.summary.map(|s| s.to_string());
+        let expand_related = p.expand_related.map(|b| b.to_string());
         let resp = self
             .http
             .get(format!("{}/items", self.base_url))
@@ -609,6 +624,7 @@ impl DocketMcp {
                 ("offset", offset.as_deref()),
                 ("summary", summary.as_deref()),
                 ("order", p.order.as_deref()),
+                ("expand_related", expand_related.as_deref()),
             ])
             .send()
             .await
@@ -617,7 +633,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse)"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page"
     )]
     async fn search_items(
         &self,
@@ -669,6 +685,10 @@ impl DocketMcp {
         }
         if let Some(o) = p.order.as_deref() {
             query_pairs.push(("order", o));
+        }
+        let expand_related = p.expand_related.map(|b| b.to_string());
+        if let Some(e) = expand_related.as_deref() {
+            query_pairs.push(("expand_related", e));
         }
         let resp = self
             .http
@@ -921,7 +941,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Add tags to an item (idempotent — adding an already-present tag is a no-op)"
+        description = "Add tags to an item (idempotent — adding an already-present tag is a no-op). If you use the related:<id> convention (see get_item/list_items' expand_related), tag with the target's canonical id, not its seq alias (e.g. #142) — reverse lookup (\"referenced_by\") only matches the literal canonical-id string, so a seq-alias-tagged reference is found in the forward direction but never shows up on the other item's referenced_by list"
     )]
     async fn add_tags(
         &self,
@@ -1179,6 +1199,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -1721,6 +1742,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -1818,6 +1840,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -1842,6 +1865,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -1930,6 +1954,7 @@ mod tests {
                 offset: Some(1),
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -1974,6 +1999,7 @@ mod tests {
                 offset: None,
                 summary: Some(true),
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2031,6 +2057,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2153,6 +2180,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2176,6 +2204,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: None,
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2237,6 +2266,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: Some("asc".to_string()),
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2260,6 +2290,7 @@ mod tests {
                 offset: None,
                 summary: None,
                 order: Some("asc".to_string()),
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2405,6 +2436,102 @@ mod tests {
             .unwrap();
         let with_expand_body = json_value(&with_expand);
         let related = with_expand_body["related"].as_array().unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0]["id"], b_id);
+        assert_eq!(related[0]["relation"], "references");
+    }
+
+    /// The same `expand_related` forwarding `get_item` gets (above), proven
+    /// on `list_items` too — a batch-expand follow-on to docket-works#33.
+    #[tokio::test]
+    async fn list_items_expand_related_is_forwarded_through_the_real_request() {
+        let dir = std::env::temp_dir().join(format!(
+            "docket-mcp-test-list-expand-related-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("list-expand-related.db");
+        let core = spawn_core(18439, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let a = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let a_id = field(&a, "id");
+
+        let b = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "b".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let b_id = field(&b, "id");
+
+        server
+            .add_tags(Parameters(TagsParams {
+                item_id: a_id.clone(),
+                tags: vec![format!("related:{b_id}")],
+            }))
+            .await
+            .unwrap();
+
+        let without_expand = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+            }))
+            .await
+            .unwrap();
+        let without_expand_body = json_value(&without_expand);
+        for item in without_expand_body["items"].as_array().unwrap() {
+            assert!(item.get("related").is_none());
+        }
+
+        let with_expand = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: Some(true),
+            }))
+            .await
+            .unwrap();
+        let with_expand_body = json_value(&with_expand);
+        let items = with_expand_body["items"].as_array().unwrap();
+        let a_row = items.iter().find(|i| i["id"] == a_id).unwrap();
+        let related = a_row["related"].as_array().unwrap();
         assert_eq!(related.len(), 1);
         assert_eq!(related[0]["id"], b_id);
         assert_eq!(related[0]["relation"], "references");

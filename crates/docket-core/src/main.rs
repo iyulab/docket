@@ -321,6 +321,15 @@ struct ListItemsQuery {
     /// See [ADR-0020](../../../docs/decisions/ADR-0020-list-search-order-parameter.md).
     #[serde(default)]
     order: Option<String>,
+    /// When `true`, each returned item also resolves its own `related:<id>`
+    /// tags (both directions) into a `related` field — the same expansion
+    /// `get_item` offers for a single item, applied per row here after
+    /// pagination (so the cost is bounded by `limit`, not the unpaged
+    /// total). Defaults to `false` (byte-identical response to before, no
+    /// `related` key on any item). See
+    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    #[serde(default)]
+    expand_related: Option<bool>,
 }
 
 /// See ADR-0014: keeps a single-topic or unfiltered query well under the
@@ -439,6 +448,18 @@ async fn list_items(
             item.body = None;
         }
     }
+    let expand_related = q.expand_related.unwrap_or(false);
+    let items: Vec<ItemWithRelated> = items
+        .into_iter()
+        .map(|item| -> Result<ItemWithRelated, StoreError> {
+            let related = if expand_related {
+                Some(store.related_items(&item.id)?)
+            } else {
+                None
+            };
+            Ok(ItemWithRelated { item, related })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
     let mut headers = HeaderMap::new();
     headers.insert(
         "X-Total-Count",
@@ -459,9 +480,12 @@ struct GetItemQuery {
 }
 
 /// Wraps `Item` so `related` is only ever present in the response when
-/// asked for (`skip_serializing_if`) — every other route returning `Item`
-/// (list/search/create/claim/...) is completely unaffected, since `Item`
-/// itself never gained this field.
+/// asked for (`skip_serializing_if`) — a request that doesn't set
+/// `expand_related` gets a byte-identical response to before this wrapper
+/// existed, since `Item` itself never gained this field. Used by `get_item`
+/// and, per-row after pagination, by `list_items`/`search_items`
+/// (`ListItemsQuery::expand_related`) — every other route returning `Item`
+/// (create/claim/...) is unaffected.
 #[derive(Serialize)]
 struct ItemWithRelated {
     #[serde(flatten)]
@@ -2082,6 +2106,100 @@ mod tests {
         assert_eq!(related.len(), 1);
         assert_eq!(related[0]["id"], a_id);
         assert_eq!(related[0]["relation"], "referenced_by");
+    }
+
+    /// The same `expand_related` expansion `get_item` offers for a single
+    /// item, applied per row on `list_items` — a batch-expand follow-on to
+    /// docket-works#33. Defaults off (byte-identical rows); when requested,
+    /// only the returned page is expanded, not the unpaged total — proven
+    /// here by tagging `a` (referencing `b`) *before* creating `c`, so the
+    /// default (`updated_at` descending) page-2 result is `[c, a]`, excluding
+    /// `b` entirely, yet `a`'s `related` still resolves correctly since the
+    /// lookup queries the store directly rather than the page's own rows.
+    #[tokio::test]
+    async fn list_items_expand_related_defaults_off_and_expands_only_the_returned_page() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "a"}),
+            ))
+            .await
+            .unwrap();
+        let a_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "b"}),
+            ))
+            .await
+            .unwrap();
+        let b_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{a_id}/tags"),
+                serde_json::json!({"tags": [format!("related:{b_id}")]}),
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        // Created last, after a's tag write — most recently updated.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "c"}),
+            ))
+            .await
+            .unwrap();
+        let c_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        // Default: no `related` key on any row.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let items = json_body(resp).await;
+        for item in items.as_array().unwrap() {
+            assert!(!item.as_object().unwrap().contains_key("related"));
+        }
+
+        // expand_related=true, page 1 of 2 (default order: updated_at desc)
+        // — c (created last) then a (tagged last) — b is paged out.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items?topic=iyulab/docket&limit=2&expand_related=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let items = json_body(resp).await;
+        let items = items.as_array().unwrap();
+        let ids: Vec<&str> = items.iter().map(|i| i["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec![c_id.as_str(), a_id.as_str()]);
+        assert_eq!(items[0]["related"].as_array().unwrap().len(), 0);
+        assert_eq!(items[1]["related"].as_array().unwrap().len(), 1);
+        assert_eq!(items[1]["related"][0]["id"], b_id);
+        assert_eq!(items[1]["related"][0]["relation"], "references");
     }
 
     #[tokio::test]
