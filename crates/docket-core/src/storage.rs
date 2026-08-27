@@ -5,7 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::domain::{
-    Comment, Item, Resolution, SortOrder, State, TagCount, TagMatch, TopicCount, Worker,
+    Comment, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder, State, TagCount,
+    TagMatch, TopicCount, Worker,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -764,6 +765,79 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Free-form `related:<id>` tag convention this parses — see
+    /// [`RelatedItemRef`]. Deliberately not exposed as a public API on the
+    /// tag vocabulary itself (P-1: tags stay opaque strings); this is the
+    /// one place the core interprets this specific shape, and only for the
+    /// read-only `related_items` helper below (docket-works#33).
+    const RELATED_TAG_PREFIX: &str = "related:";
+
+    /// Items linked to `id` via the `related:<id>` tag convention, both
+    /// directions: this item's own tags naming another item
+    /// (`RelatedRelation::References`), and other items' tags naming this
+    /// one back (`RelatedRelation::ReferencedBy`). Best-effort — a
+    /// `related:` tag whose target doesn't resolve to an existing item
+    /// (typo, or the target was since deleted) is silently skipped rather
+    /// than erroring, since this is a convenience view over free-form tags,
+    /// not a referential-integrity check. See [`RelatedItemRef`].
+    pub fn related_items(&self, id: &str) -> Result<Vec<RelatedItemRef>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
+        require_item(&conn, id)?;
+
+        let mut related = Vec::new();
+
+        // references: parse this item's own tags for the `related:` prefix,
+        // resolve each target (seq alias or bare id, same as any other
+        // item-id-accepting call), and look up its seq/title. Both
+        // resolution failure (e.g. a `related:` tag naming a seq that never
+        // existed) and lookup failure (target id well-formed but no longer
+        // present) are skipped, not propagated.
+        for tag in tags_for_item(&conn, id)? {
+            let Some(target) = tag.strip_prefix(Self::RELATED_TAG_PREFIX) else {
+                continue;
+            };
+            let Ok(target_id) = resolve_item_id(&conn, target) else {
+                continue;
+            };
+            if let Some((seq, title)) = fetch_seq_and_title(&conn, &target_id)? {
+                related.push(RelatedItemRef {
+                    id: target_id,
+                    seq,
+                    title,
+                    relation: RelatedRelation::References,
+                });
+            }
+        }
+
+        // referenced_by: other items whose tags name this item's *canonical*
+        // id exactly. A relating item that used the seq-alias form
+        // (`related:#42`) instead of the canonical id isn't found here —
+        // forward resolution above accepts both forms, but this reverse
+        // lookup can only match the literal tag text stored on the other
+        // item.
+        let reverse_tag = format!("{}{id}", Self::RELATED_TAG_PREFIX);
+        let mut stmt = conn.prepare(
+            "SELECT items.id, items.seq, items.title FROM items
+             JOIN item_tags ON items.id = item_tags.item_id
+             WHERE item_tags.tag = ?1 AND items.id != ?2",
+        )?;
+        let rows = stmt.query_map(params![reverse_tag, id], |row| {
+            Ok(RelatedItemRef {
+                id: row.get(0)?,
+                seq: row.get(1)?,
+                title: row.get(2)?,
+                relation: RelatedRelation::ReferencedBy,
+            })
+        })?;
+        for row in rows {
+            related.push(row?);
+        }
+
+        Ok(related)
+    }
+
     /// The topic vocabulary, most-populated first — lets a caller discover
     /// which topics exist instead of enumerating candidate names one at a
     /// time (ADR-0014). Same `archived_at IS NULL` default as
@@ -1171,6 +1245,17 @@ fn tags_for_item(conn: &Connection, item_id: &str) -> rusqlite::Result<Vec<Strin
     let mut stmt = conn.prepare("SELECT tag FROM item_tags WHERE item_id = ?1 ORDER BY tag")?;
     let rows = stmt.query_map(params![item_id], |row| row.get::<_, String>(0))?;
     rows.collect()
+}
+
+/// `None` if `id` doesn't exist — used by `related_items` to silently skip
+/// a `related:` tag whose target no longer resolves to a real item.
+fn fetch_seq_and_title(conn: &Connection, id: &str) -> rusqlite::Result<Option<(i64, String)>> {
+    conn.query_row(
+        "SELECT seq, title FROM items WHERE id = ?1",
+        params![id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
 }
 
 fn tag_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TagCount> {
@@ -2447,6 +2532,82 @@ mod tests {
         let scoped = store.list_tags(Some("iyulab/router")).unwrap();
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].tag, "deferred");
+    }
+
+    /// docket-works#33: `related_items` resolves the forward direction
+    /// (this item's own `related:` tags) whether the target is named by
+    /// seq alias or canonical id, silently skips a tag whose target doesn't
+    /// exist, and resolves the reverse direction (another item's tag naming
+    /// this one back) — but *only* when that other tag used the canonical
+    /// id, not a seq alias, matching the documented reverse-lookup
+    /// limitation.
+    #[test]
+    fn related_items_resolves_both_directions_and_skips_dangling_references() {
+        let store = open_test_store();
+        let a = store
+            .create_item("iyulab/docket", "a", None, &[], None)
+            .unwrap();
+        let b = store
+            .create_item("iyulab/docket", "b", None, &[], None)
+            .unwrap();
+        let c = store
+            .create_item("iyulab/docket", "c", None, &[], None)
+            .unwrap();
+
+        // a -> b via b's seq alias, a -> c via c's canonical id, plus a
+        // dangling reference to an item that never existed.
+        store
+            .add_tags(
+                &a.id,
+                &[
+                    format!("related:#{}", b.seq),
+                    format!("related:{}", c.id),
+                    "related:00000000-not-a-real-item".to_string(),
+                ],
+            )
+            .unwrap();
+
+        let from_a = store.related_items(&a.id).unwrap();
+        assert_eq!(from_a.len(), 2, "dangling reference must be skipped");
+        assert!(
+            from_a
+                .iter()
+                .all(|r| r.relation == RelatedRelation::References)
+        );
+        let from_a_ids: Vec<&str> = from_a.iter().map(|r| r.id.as_str()).collect();
+        assert!(from_a_ids.contains(&b.id.as_str()));
+        assert!(from_a_ids.contains(&c.id.as_str()));
+
+        // b was only referenced via its *seq alias* — the reverse lookup
+        // matches literal tag text against the canonical id, so it does not
+        // find this reference (documented limitation).
+        assert!(store.related_items(&b.id).unwrap().is_empty());
+
+        // c was referenced via its *canonical id* — the reverse lookup
+        // finds it.
+        let from_c = store.related_items(&c.id).unwrap();
+        assert_eq!(from_c.len(), 1);
+        assert_eq!(from_c[0].id, a.id);
+        assert_eq!(from_c[0].title, "a");
+        assert_eq!(from_c[0].relation, RelatedRelation::ReferencedBy);
+    }
+
+    #[test]
+    fn related_items_on_an_item_with_no_related_tags_is_empty() {
+        let store = open_test_store();
+        let a = store
+            .create_item("iyulab/docket", "lonely", None, &[], None)
+            .unwrap();
+        assert!(store.related_items(&a.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn related_items_unknown_item_is_not_found() {
+        let store = open_test_store();
+        assert!(matches!(
+            store.related_items("no-such-id"),
+            Err(StoreError::NotFound)
+        ));
     }
 
     #[test]

@@ -273,13 +273,17 @@ struct ListItemsQuery {
     /// completion criteria. Was `owned_by`, split and renamed by ADR-0010.
     topic_scope: Option<String>,
     /// A worker id — narrows the list to items that worker actually holds a
-    /// live stake in right now: either it currently holds the item
-    /// (`assignee` match) or it filed the item and the item is sitting in
-    /// `resolved` waiting on that requester's approval. Combines two
-    /// single-field filters (`assignee`, `requester`) that a caller
-    /// otherwise has to know to run separately and merge themselves — see
-    /// the "docket-mcp에 '내가 지금 쥐고 있는 것'..." issue. Deliberately excludes
-    /// `topic_scope`: jurisdiction over a topic isn't holding an item.
+    /// live stake in right now, OR should be looking at because nobody has
+    /// claimed it yet within its own topic jurisdiction: it currently holds
+    /// the item (`assignee` match), or it filed the item and the item is
+    /// sitting in `resolved` waiting on that requester's approval, or the
+    /// item is `open` (unclaimed) under a topic this worker is registered
+    /// for (same jurisdiction test as `topic_scope`, above — this is the
+    /// one case where `mine` *does* consult topic jurisdiction, since an
+    /// unclaimed item in your topic has no other owner to be "held" by).
+    /// Combines what a caller otherwise has to know to run as three
+    /// separate queries and merge themselves — see
+    /// [docket-works#35](https://github.com/iyulab/docket-works/issues/35).
     /// ANDs with every other filter on this struct, same as `assignee`/
     /// `requester` do individually.
     mine: Option<String>,
@@ -401,14 +405,28 @@ async fn list_items(
         None => items,
     };
     let items: Vec<Item> = match q.mine {
-        Some(worker_id) => items
-            .into_iter()
-            .filter(|item| {
-                item.assignee.as_deref() == Some(worker_id.as_str())
-                    || (item.requester.as_deref() == Some(worker_id.as_str())
-                        && item.state == ItemState::Resolved)
-            })
-            .collect(),
+        Some(worker_id) => {
+            // Same not-found-is-empty treatment as `topic_scope`, above — an
+            // unregistered worker simply has no topics to match against.
+            let topics = match store.get_worker(&worker_id) {
+                Ok(worker) => worker.topics,
+                Err(StoreError::NotFound) => Vec::new(),
+                Err(e) => return Err(e.into()),
+            };
+            items
+                .into_iter()
+                .filter(|item| {
+                    item.assignee.as_deref() == Some(worker_id.as_str())
+                        || (item.requester.as_deref() == Some(worker_id.as_str())
+                            && item.state == ItemState::Resolved)
+                        || (item.state == ItemState::Open
+                            && item.assignee.is_none()
+                            && topics.iter().any(|owned| {
+                                docket_core::domain::topic_matches(owned, &item.topic)
+                            }))
+                })
+                .collect()
+        }
         None => items,
     };
     // Applied last, after every filter above — a SQL-level LIMIT would be
@@ -429,11 +447,41 @@ async fn list_items(
     Ok((headers, Json(items)))
 }
 
+#[derive(Deserialize)]
+struct GetItemQuery {
+    /// When `true`, also resolves the item's `related:<id>` tags (both
+    /// directions) into a `related` field — see
+    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    /// Defaults to `false`, in which case the response is byte-identical to
+    /// today's (no `related` key at all, not even an empty array).
+    #[serde(default)]
+    expand_related: Option<bool>,
+}
+
+/// Wraps `Item` so `related` is only ever present in the response when
+/// asked for (`skip_serializing_if`) — every other route returning `Item`
+/// (list/search/create/claim/...) is completely unaffected, since `Item`
+/// itself never gained this field.
+#[derive(Serialize)]
+struct ItemWithRelated {
+    #[serde(flatten)]
+    item: Item,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    related: Option<Vec<docket_core::domain::RelatedItemRef>>,
+}
+
 async fn get_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.get_item(&id)?))
+    Query(q): Query<GetItemQuery>,
+) -> Result<Json<ItemWithRelated>, ApiError> {
+    let item = store.get_item(&id)?;
+    let related = if q.expand_related.unwrap_or(false) {
+        Some(store.related_items(&item.id)?)
+    } else {
+        None
+    };
+    Ok(Json(ItemWithRelated { item, related }))
 }
 
 #[derive(Deserialize)]
@@ -980,6 +1028,17 @@ mod tests {
     async fn mine_filter_ors_assignee_and_pending_approval_requester() {
         let app = test_app();
 
+        // w1 is registered for `iyulab` — makes it eligible for the
+        // unclaimed-inbox branch (docket-works#35) under that jurisdiction.
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/workers",
+                serde_json::json!({"id": "w1", "topics": ["iyulab"]}),
+            ))
+            .await
+            .unwrap();
+
         // Held by w1 (assignee), filed by someone else — matches mine=w1.
         let resp = app
             .clone()
@@ -1050,6 +1109,31 @@ mod tests {
             .await
             .unwrap();
 
+        // Open, unclaimed, under w1's topic jurisdiction (`iyulab`) — the new
+        // unclaimed-inbox branch (docket-works#35) — matches mine=w1 even
+        // though w1 never touched it.
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "unclaimed-in-scope"}),
+            ))
+            .await
+            .unwrap();
+        let unclaimed_in_scope_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        // Open, unclaimed, but under a topic w1 has no jurisdiction over —
+        // must NOT match mine=w1.
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "other-org/other-repo", "title": "unclaimed-out-of-scope"}),
+            ))
+            .await
+            .unwrap();
+
         let resp = app
             .clone()
             .oneshot(
@@ -1061,8 +1145,15 @@ mod tests {
             .await
             .unwrap();
         let listed = json_body(resp).await;
-        assert_eq!(listed.as_array().unwrap().len(), 1);
-        assert_eq!(listed[0]["id"], held_id);
+        let listed_ids: Vec<&str> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed_ids.len(), 2);
+        assert!(listed_ids.contains(&held_id.as_str()));
+        assert!(listed_ids.contains(&unclaimed_in_scope_id.as_str()));
 
         let resp = app
             .oneshot(
@@ -1906,6 +1997,91 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(json_body(resp).await, serde_json::json!([]));
+    }
+
+    /// docket-works#33: `expand_related` defaults to omitting the `related`
+    /// key entirely (byte-identical to the pre-existing response shape,
+    /// unlike an explicit `null`/`[]`), and only builds it out when asked.
+    #[tokio::test]
+    async fn get_item_expand_related_defaults_off_and_resolves_both_directions() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "a"}),
+            ))
+            .await
+            .unwrap();
+        let a_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "b"}),
+            ))
+            .await
+            .unwrap();
+        let b_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{a_id}/tags"),
+                serde_json::json!({"tags": [format!("related:{b_id}")]}),
+            ))
+            .await
+            .unwrap();
+
+        // Default (no query param): `related` key absent entirely.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{a_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert!(!body.as_object().unwrap().contains_key("related"));
+
+        // expand_related=true on the referencing side.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{a_id}?expand_related=true"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let related = body["related"].as_array().unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0]["id"], b_id);
+        assert_eq!(related[0]["relation"], "references");
+
+        // expand_related=true on the referenced-back side.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{b_id}?expand_related=true"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let related = body["related"].as_array().unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0]["id"], a_id);
+        assert_eq!(related[0]["relation"], "referenced_by");
     }
 
     #[tokio::test]

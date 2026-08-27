@@ -112,12 +112,15 @@ struct ListItemsParams {
     /// topic-jurisdiction filter, not an ownership filter.
     #[serde(default)]
     topic_scope: Option<String>,
-    /// A worker id — the one-shot "what do I currently hold" filter: matches
-    /// items this worker is the `assignee` of, OR items this worker filed
-    /// (`requester`) that are now `resolved` and waiting on its approval.
-    /// ANDs with every other filter here, same as `assignee`/`requester`
-    /// individually. Prefer this over manually combining `assignee` and
-    /// `requester`+`state=resolved` yourself.
+    /// A worker id — the one-shot "what should I be looking at" filter:
+    /// matches items this worker is the `assignee` of, OR items this worker
+    /// filed (`requester`) that are now `resolved` and waiting on its
+    /// approval, OR `open` (unclaimed) items under a topic this worker is
+    /// registered for (see docket-works#35 — the topic-jurisdiction test is
+    /// the same one `topic_scope` uses). ANDs with every other filter here,
+    /// same as `assignee`/`requester` individually. Prefer this over
+    /// manually combining `assignee`, `requester`+`state=resolved`, and
+    /// `topic_scope`+`state=open` yourself.
     #[serde(default)]
     mine: Option<String>,
     /// Excludes archived items by default; `true` returns only archived
@@ -285,14 +288,29 @@ struct AddCommentParams {
     body: String,
 }
 
-/// Shared by every tool whose only input is an item id (`get_item`,
-/// `list_comments`, `archive_item`).
+/// Shared by every tool whose only input is an item id (`list_comments`,
+/// `archive_item`). `get_item` has its own (`GetItemParams`, below) since it
+/// alone also takes `expand_related`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ItemIdParams {
     /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
     /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GetItemParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item.
+    item_id: String,
+    /// When `true`, also resolves the item's `related:<id>` tags (both
+    /// directions) into the response's `related` field. Defaults to
+    /// `false` (no `related` field at all). See
+    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    #[serde(default)]
+    expand_related: Option<bool>,
 }
 
 /// Mirrors `docket-core`'s item JSON shape. A separate type from
@@ -341,6 +359,22 @@ struct ItemDto {
     tags: Vec<String>,
     created_at: i64,
     updated_at: i64,
+    /// Only present when `get_item` was called with `expand_related=true`
+    /// against a server that supports it — omitted (not `null`/`[]`)
+    /// otherwise, same older-server-defaulting convention as `tags` above.
+    /// See [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    related: Option<Vec<RelatedItemRefDto>>,
+}
+
+/// Mirrors `docket-core`'s `RelatedItemRef` JSON shape (docket-works#33).
+#[derive(Debug, Serialize, Deserialize)]
+struct RelatedItemRefDto {
+    id: String,
+    seq: i64,
+    title: String,
+    /// `"references"` or `"referenced_by"`.
+    relation: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -550,7 +584,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker currently holds a live stake in (mine — assignee OR resolved-and-awaiting-my-approval), and/or archived status. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-awaiting-my-approval OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss (see docket-works#35). Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset"
     )]
     async fn list_items(
         &self,
@@ -827,15 +861,20 @@ impl DocketMcp {
             item_id accepts either the canonical id or the item's short numeric alias (seq, e.g. \
             142 or #142) — both returned on every item. Unaffected by list_items/search_items' \
             summary mode (body always included) and returns archived items too (get_item is a \
-            direct id lookup, not a list query)."
+            direct id lookup, not a list query). Pass expand_related=true to also resolve any \
+            related:<id> tags (both directions — this item referencing another, or another \
+            item referencing this one back) into a related field, instead of having to \
+            dereference each related:<id> tag yourself with a separate get_item call."
     )]
     async fn get_item(
         &self,
-        Parameters(p): Parameters<ItemIdParams>,
+        Parameters(p): Parameters<GetItemParams>,
     ) -> Result<CallToolResult, McpError> {
+        let expand_related = p.expand_related.map(|b| b.to_string());
         let resp = self
             .http
             .get(items_url(&self.base_url, &p.item_id, &[]))
+            .query(&[("expand_related", expand_related.as_deref())])
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -2262,8 +2301,9 @@ mod tests {
         let item_id = field(&created, "id");
 
         let fetched = server
-            .get_item(Parameters(ItemIdParams {
+            .get_item(Parameters(GetItemParams {
                 item_id: item_id.clone(),
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2279,8 +2319,9 @@ mod tests {
             .unwrap();
 
         let fetched_archived = server
-            .get_item(Parameters(ItemIdParams {
+            .get_item(Parameters(GetItemParams {
                 item_id: item_id.clone(),
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2288,12 +2329,85 @@ mod tests {
         assert_eq!(json_value(&fetched_archived)["id"], item_id);
 
         let missing = server
-            .get_item(Parameters(ItemIdParams {
+            .get_item(Parameters(GetItemParams {
                 item_id: "never-created".to_string(),
+                expand_related: None,
             }))
             .await
             .unwrap();
         assert_eq!(missing.is_error, Some(true));
+    }
+
+    /// docket-works#33: `expand_related` is forwarded end to end through the
+    /// real HTTP request (not just exercised against docket-core directly),
+    /// and defaults to omitting `related` when unset.
+    #[tokio::test]
+    async fn get_item_expand_related_is_forwarded_through_the_real_request() {
+        let dir = std::env::temp_dir().join(format!(
+            "docket-mcp-test-expand-related-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("expand-related.db");
+        let core = spawn_core(18438, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let a = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let a_id = field(&a, "id");
+
+        let b = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "b".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let b_id = field(&b, "id");
+
+        server
+            .add_tags(Parameters(TagsParams {
+                item_id: a_id.clone(),
+                tags: vec![format!("related:{b_id}")],
+            }))
+            .await
+            .unwrap();
+
+        let without_expand = server
+            .get_item(Parameters(GetItemParams {
+                item_id: a_id.clone(),
+                expand_related: None,
+            }))
+            .await
+            .unwrap();
+        assert!(json_value(&without_expand).get("related").is_none());
+
+        let with_expand = server
+            .get_item(Parameters(GetItemParams {
+                item_id: a_id.clone(),
+                expand_related: Some(true),
+            }))
+            .await
+            .unwrap();
+        let with_expand_body = json_value(&with_expand);
+        let related = with_expand_body["related"].as_array().unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0]["id"], b_id);
+        assert_eq!(related[0]["relation"], "references");
     }
 
     /// `item_id` accepts the bare numeric `seq` alias, or the same value
@@ -2335,8 +2449,9 @@ mod tests {
             .expect("seq is a number");
 
         let by_bare_seq = server
-            .get_item(Parameters(ItemIdParams {
+            .get_item(Parameters(GetItemParams {
                 item_id: seq.to_string(),
+                expand_related: None,
             }))
             .await
             .unwrap();
@@ -2344,8 +2459,9 @@ mod tests {
         assert_eq!(json_value(&by_bare_seq)["id"], item_id);
 
         let by_hash_seq = server
-            .get_item(Parameters(ItemIdParams {
+            .get_item(Parameters(GetItemParams {
                 item_id: format!("#{seq}"),
+                expand_related: None,
             }))
             .await
             .unwrap();

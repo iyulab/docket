@@ -240,6 +240,33 @@ impl SortOrder {
     }
 }
 
+/// Which side of a `related:<id>` tag pairing this row represents — see
+/// [`RelatedItemRef`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelatedRelation {
+    /// The item being described carries a `related:<this row's id>` tag —
+    /// it's pointing at this row.
+    References,
+    /// This row's item carries a `related:<the item being described's id>`
+    /// tag — it's pointing back.
+    ReferencedBy,
+}
+
+/// One item linked to another via the `related:<id>` free-form tag
+/// convention (docket-works#33), derived at request time by
+/// `Store::related_items` for `get_item(expand_related=true)` — not a
+/// stored concept, not part of [`Item`]. The core still treats tags as
+/// fully opaque strings (P-1); this is a best-effort helper that
+/// interprets one specific tag shape on top, entirely at read time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelatedItemRef {
+    pub id: String,
+    pub seq: i64,
+    pub title: String,
+    pub relation: RelatedRelation,
+}
+
 /// One row of `list_tags` — a tag and how many items currently carry it,
 /// so a caller can browse existing vocabulary before inventing a new tag
 /// string (avoids synonym drift, e.g. "release-pending" vs "awaiting-release").
