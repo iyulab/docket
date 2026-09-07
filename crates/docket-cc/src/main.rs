@@ -187,6 +187,30 @@ fn write_item_file(root: &Path, item: &ItemDto) -> std::io::Result<PathBuf> {
     Ok(final_path)
 }
 
+/// Builds a `docket-core` URL by pushing each path segment through
+/// `Url::path_segments_mut`, which percent-encodes it.
+///
+/// **Never build a request path with `format!`.** A worker id is
+/// conventionally `org/repo`, and an unencoded `/` silently changes the
+/// request's *shape*: `/workers/{org}/{repo}` is two segments, misses the
+/// single-segment route, and lands on docket-core's static console service —
+/// which used to answer `200 text/html`. For the registration check below that
+/// was worse than an error, because `is_success()` then reported an
+/// unregistered worker as registered
+/// ([docket-works#36](https://github.com/iyulab/docket-works/issues/36)).
+fn api_url(base_url: &str, segments: &[&str]) -> reqwest::Url {
+    let mut url = reqwest::Url::parse(base_url).expect("base_url is a valid absolute URL");
+    {
+        let mut path = url
+            .path_segments_mut()
+            .expect("http(s) base_url has path segments");
+        for segment in segments {
+            path.push(segment);
+        }
+    }
+    url
+}
+
 /// Fetches every item in `worker_id`'s owned topics and projects each to a
 /// file. Returns the projected items. `worker_id` must already be
 /// registered with `docket-core` — sync doesn't register on the caller's
@@ -204,7 +228,7 @@ async fn sync(
     // registration has to be confirmed separately, via the one endpoint
     // that fetches a specific worker by id and does 404 when it's missing.
     let worker_resp = client
-        .get(format!("{base_url}/workers/{worker_id}"))
+        .get(api_url(base_url, &["workers", worker_id]))
         .send()
         .await?;
     if !worker_resp.status().is_success() {
@@ -215,7 +239,7 @@ async fn sync(
     }
 
     let resp = client
-        .get(format!("{base_url}/items"))
+        .get(api_url(base_url, &["items"]))
         .query(&[("topic_scope", worker_id)])
         .send()
         .await?;
@@ -536,7 +560,7 @@ mod tests {
         let client = reqwest::Client::new();
         for _ in 0..50 {
             if client
-                .get(format!("{}/items", process.base_url))
+                .get(api_url(&process.base_url, &["items"]))
                 .send()
                 .await
                 .is_ok()
@@ -563,7 +587,7 @@ mod tests {
         let client = http_client();
 
         let created: serde_json::Value = client
-            .post(format!("{}/items", core.base_url))
+            .post(api_url(&core.base_url, &["items"]))
             .json(&serde_json::json!({"topic": "iyulab/docket", "title": "fix the thing", "body": "detail"}))
             .send()
             .await
@@ -573,16 +597,24 @@ mod tests {
             .unwrap();
         let item_id = created["id"].as_str().unwrap();
 
+        // `org/repo` shaped on purpose: that is the only form real worker ids
+        // take, and the `/` in it is what has to survive the URL round trip
+        // (docket-works#36). A slash-free `w1` fixture passes either way.
         client
-            .post(format!("{}/workers", core.base_url))
-            .json(&serde_json::json!({"id": "w1", "topics": ["iyulab"]}))
+            .post(api_url(&core.base_url, &["workers"]))
+            .json(&serde_json::json!({"id": "iyulab/docket-works", "topics": ["iyulab"]}))
             .send()
             .await
             .unwrap();
 
-        let synced = sync(&client, &core.base_url, "w1", &projection_root)
-            .await
-            .unwrap();
+        let synced = sync(
+            &client,
+            &core.base_url,
+            "iyulab/docket-works",
+            &projection_root,
+        )
+        .await
+        .unwrap();
         assert_eq!(synced.len(), 1);
 
         let expected_path = projection_root
@@ -603,8 +635,27 @@ mod tests {
         std::fs::remove_dir_all(&test_dir).unwrap();
     }
 
+    /// Pins the encoding contract itself, independently of docket-core — this
+    /// crate talks to whatever core the machine points at, which can be an
+    /// older deployment that still answers a mis-shaped path with
+    /// `200 text/html` (docket-works#36).
+    #[test]
+    fn api_url_encodes_a_path_segment_rather_than_splitting_it() {
+        assert_eq!(
+            api_url("http://127.0.0.1:8420", &["workers", "iyulab/docket-works"]).as_str(),
+            "http://127.0.0.1:8420/workers/iyulab%2Fdocket-works"
+        );
+    }
+
     /// A worker that was never registered must surface as a clear error,
     /// not a panic or a silently-empty projection.
+    ///
+    /// Both id shapes are checked because they used to fail differently. A
+    /// slash-free id 404s and was caught; an `org/repo` id made the check hit
+    /// the console fallback instead of the route, and a `200 text/html` reply
+    /// passed `is_success()` — so the one guard whose entire job is answering
+    /// "is this worker registered?" answered yes for every unregistered worker
+    /// anyone actually has (docket-works#36).
     #[tokio::test]
     async fn sync_for_unregistered_worker_is_an_error() {
         let test_dir = std::env::temp_dir().join(format!(
@@ -616,14 +667,10 @@ mod tests {
         let core = spawn_core(18431, &db_path).await;
         let client = http_client();
 
-        let result = sync(
-            &client,
-            &core.base_url,
-            "ghost",
-            &test_dir.join("projection"),
-        )
-        .await;
-        assert!(result.is_err());
+        for ghost in ["ghost", "iyulab/ghost"] {
+            let result = sync(&client, &core.base_url, ghost, &test_dir.join("projection")).await;
+            assert!(result.is_err(), "{ghost} must not read as registered");
+        }
 
         drop(core);
         std::fs::remove_dir_all(&test_dir).unwrap();
@@ -641,13 +688,13 @@ mod tests {
         let client = http_client();
 
         client
-            .post(format!("{}/items", core.base_url))
+            .post(api_url(&core.base_url, &["items"]))
             .json(&serde_json::json!({"topic": "iyulab/docket", "title": "hook me up"}))
             .send()
             .await
             .unwrap();
         client
-            .post(format!("{}/workers", core.base_url))
+            .post(api_url(&core.base_url, &["workers"]))
             .json(&serde_json::json!({"id": "w1", "topics": ["iyulab"]}))
             .send()
             .await

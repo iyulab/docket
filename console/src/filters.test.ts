@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Item } from './api'
-import { deriveTopics, matchesFilters, relationOf, sortItems } from './filters'
+import { deriveTopics, identityEq, matchesFilters, relationOf, sortItems } from './filters'
 
 function makeItem(overrides: Partial<Item> = {}): Item {
   return {
@@ -160,5 +160,36 @@ describe('deriveTopics', () => {
   it('also collects item.requester, even with no found-in tag', () => {
     const items = [makeItem({ topic: 'iyulab/docket', requester: 'iyulab/router', tags: [] })]
     expect(deriveTopics(items)).toEqual(['iyulab/docket', 'iyulab/router'])
+  })
+})
+
+describe('identity comparison (ADR-0021)', () => {
+  it('folds ASCII case, so the console classifies an item the way the server does', () => {
+    expect(identityEq('iyulab/Filer', 'iyulab/filer')).toBe(true)
+    expect(identityEq('iyu-devstack/Schemorph', 'iyu-devstack/schemorph')).toBe(true)
+    expect(identityEq('iyulab/Filer', 'iyulab/Filer2')).toBe(false)
+  })
+
+  it('leaves non-ASCII byte-exact, matching the server rather than out-folding it', () => {
+    expect(identityEq('acme/grün', 'acme/GRÜN')).toBe(false)
+  })
+
+  it('relationOf matches a perspective topic whose case drifted', () => {
+    const to = makeItem({ topic: 'iyulab/Docket' })
+    expect(relationOf(to, 'iyulab/docket')).toBe('to')
+
+    const from = makeItem({ topic: 'iyulab/docket', requester: 'iyulab/Filer' })
+    expect(relationOf(from, 'iyulab/filer')).toBe('from')
+
+    const legacy = makeItem({ topic: 'iyulab/docket', tags: ['found-in:iyulab/Filer'] })
+    expect(relationOf(legacy, 'iyulab/filer')).toBe('from')
+  })
+
+  it('deriveTopics collapses one identity into a single picker entry', () => {
+    const topics = deriveTopics([
+      makeItem({ topic: 'iyulab/docket', requester: 'iyulab/Filer' }),
+      makeItem({ topic: 'iyulab/docket', requester: 'iyulab/filer' }),
+    ])
+    expect(topics).toEqual(['iyulab/Filer', 'iyulab/docket'])
   })
 })

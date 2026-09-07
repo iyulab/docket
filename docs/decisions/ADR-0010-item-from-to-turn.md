@@ -137,3 +137,80 @@ rather than silently edited:
 - No wire/schema change — same three `Turn` values, same field. Every existing `turn` consumer
   (console, `docket-mcp`) picks this up automatically since they already render/branch on
   `assignee`/`requester`/`null` without assuming which state produces which.
+
+## 2026-09-08 update — `resolved` means "the requester's turn", not "done"
+
+The `resolved -> "from"` row in `turn`'s mapping above is unchanged, but the *meaning* the rest of
+this project attached to it has not held up, and is corrected here rather than silently edited.
+
+**What went wrong.** `turn` was defined as derived from `state`, and `resolved` was described
+everywhere else — the `submit_item` tool, `docs/usage.md`, the `mine` filter — as "submitted as
+done, awaiting approval". Those two readings are not the same claim, and an assignee eventually hit
+the gap: it had done a first pass and needed two decisions from the requester before it could go
+further. From that moment the item was waiting on the requester, but the only door into
+`turn = requester` was labelled *completion*, so the assignee judged that submitting would assert
+something false and left the item in `claimed`.
+
+That judgment made things strictly worse, because `claimed` is the one state the requester cannot
+see. `mine` matches items where the caller is the `assignee`, `resolved` items the caller filed, and
+unclaimed `open` items in the caller's topics — an item the *assignee* is holding appears in none of
+them. The questions sat in the comment thread, which nothing surfaces on its own. Recovery took a
+human noticing.
+
+So the accurate label and the visibility of the handoff had been put in tension, and following the
+documentation as written chose the side that loses the handoff — silently, with no query anywhere
+reporting that the item was waiting on anyone.
+
+**Decision.** `resolved` means: *the assignee cannot take this further; the requester decides what
+happens next.* Finished work is the common case, not the definition. Waiting on an answer only the
+requester can give is the same fact about whose turn it is, and belongs in the same state.
+
+Consequently:
+
+- **`submit_item` is a turn handoff, not a completion report.** Its `reason` (added with this
+  update, optional) is what says which one it is. An assignee blocked on a requester decision
+  submits, with the question as the reason.
+- **`reject_item` carries the answer back.** Its required `reason` already had the right shape; only
+  its framing was too narrow. Answering a question is as ordinary a use as sending back rework.
+- **No new state.** `awaiting-requester` was considered and rejected — see below.
+
+**Options considered.**
+
+- **A third state (`awaiting-requester`, `turn = requester`, still "open")** — the label would be
+  exactly right, and rejected for that being all it buys. `state` is read by `turn_for`, by `mine`'s
+  three-way OR, by `list_items(state=)`, by `resolution`'s "only meaningful while closed" rule, and
+  by the console; a fourth pre-closed state has to be threaded through every one of them, and every
+  future consumer inherits the wider vocabulary. `principles.md` ranks simplicity first, and the
+  handoff this state would express is already expressible.
+- **Redefine `resolved`, document the round trip (adopted)** — no schema change, no new vocabulary,
+  and the two transitions that carry the round trip already exist and already require the reasons
+  that carry it. What was missing was never a mechanism; it was a sentence saying this is what the
+  mechanism is for.
+- **Leave it, and surface `claimed` questions some other way** — rejected. Any such mechanism (a
+  tag convention, a comment-scanning heuristic, a fourth `mine` clause) reintroduces the
+  tag-archaeology this ADR replaced in the first place, and leaves `turn` — the field whose entire
+  job is answering "whose hand is this in" — still wrong about this item.
+
+**Given up.** A question-and-answer round trip now shows in the history as a `reject`. That reads as
+a verdict when it was an answer, and no amount of documentation makes the word stop looking like
+one. Accepted knowingly: the alternative was a fourth state bought purely for the label, and
+`submit_item`'s new `reason` puts the actual intent in the thread at the transition itself, where a
+reader meets it before the word "rejected".
+
+**Not changed.** `turn`'s derivation, its three values, the four states, the transition rules, and
+every wire field. This update is about what `resolved` *asserts*; nothing about how it is reached or
+represented moves.
+
+**Implemented** (2026-09-08, same day as this decision): `submit_item` gained an optional `reason`
+recorded as an atomic lifecycle comment (`storage.rs`, `POST /items/{id}/submit`, and the MCP tool
+— the same `insert_lifecycle_comment` pattern `reject`/`reopen`/`approve`/`close_with_resolution`
+already share). Tool descriptions for `submit_item`/`reject_item` and the `mine` filter, plus
+`docs/usage.md`'s `submit_item`/`reject_item` rows, `turn` derivation note, `mine` description and
+round-trip narrative, were rewritten to the definition above. `docket-console` needed no change: it
+renders raw `state` values and never carried an "awaiting approval" label of its own.
+
+## Re-open trigger (2026-09-08)
+
+If the `reject`-reads-as-verdict cost shows up as a real misreading — someone treating an answered
+question as rejected work in a way that changes what they do — the cheap next step is a distinct
+`resolution`-style label on the transition, not a new `state`. Revisit then, with that evidence.

@@ -181,16 +181,34 @@ impl Store {
         })
     }
 
+    /// Registers a worker, or updates the registration that already exists.
+    ///
+    /// Idempotent by design — every session calls this on startup. An id that
+    /// differs from a registered one only in case is *that* worker
+    /// ([ADR-0021](../../../docs/decisions/ADR-0021-case-insensitive-identity.md)),
+    /// so it lands on the existing row and the stored spelling wins; the
+    /// returned `id` is that canonical spelling, which is how a caller whose
+    /// derived id drifted learns the real one. Refusing the registration
+    /// instead was considered and rejected: it would stop exactly the session
+    /// whose id drifted from registering at all.
     pub fn register_worker(&self, id: &str, topics: &[String]) -> Result<Worker> {
         let topics_json = serde_json::to_string(topics).expect("Vec<String> always serializes");
         let conn = self.conn.lock().expect("store mutex poisoned");
+        let canonical: String = conn
+            .query_row(
+                "SELECT id FROM workers WHERE id = ?1 COLLATE NOCASE",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| id.to_string());
         conn.execute(
             "INSERT INTO workers (id, topics, online, registered_at) VALUES (?1, ?2, 1, ?3)
              ON CONFLICT(id) DO UPDATE SET topics = excluded.topics, online = 1",
-            params![id, topics_json, now_millis()],
+            params![canonical, topics_json, now_millis()],
         )?;
         Ok(Worker {
-            id: id.to_string(),
+            id: canonical,
             topics: topics.to_vec(),
             online: true,
         })
@@ -266,12 +284,27 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
-    /// Sets `requester` on an item that already exists — the one way to
-    /// give an item a requester after creation, for items filed before
-    /// ADR-0010 or before a requester identity was available.
-    /// State-independent (works on a closed item too — this corrects
-    /// metadata, it isn't a workflow transition).
-    pub fn set_item_requester(&self, id: &str, requester: &str) -> Result<Item> {
+    /// Corrects `requester` on an item that already exists — whether or not
+    /// it already has one.
+    ///
+    /// Two cases, and both have always been in scope: *backfilling* an item
+    /// filed before a requester identity was available (or left blank by a
+    /// migration), and *repairing* an identity that drifted — a typo, a
+    /// renamed repo, two consumers spelling the same identity differently.
+    /// [ADR-0019](../../../docs/decisions/ADR-0019-approve-reject-requester-match.md)
+    /// names this the mitigation for exactly that second case, since a drifted
+    /// `requester` otherwise hard-fails a legitimate `approve`/`reject`, and
+    /// `approve_reject_conflict` points a caller here when it sees one.
+    ///
+    /// State-independent (works on a closed item too — this corrects metadata,
+    /// it isn't a workflow transition). A change is recorded as a lifecycle
+    /// comment naming both values, the same way every other why-bearing
+    /// operation records its reason: this is the one edit that can silently
+    /// move an item between two parties, so "who changed it, from what"
+    /// belongs in the thread rather than only in `updated_at`. Setting the
+    /// value it already has is a no-op — same idempotency the tag operations
+    /// have, and it keeps a re-run from filling the thread with noise.
+    pub fn set_item_requester(&self, id: &str, author: &str, requester: &str) -> Result<Item> {
         let requester = requester.trim();
         if requester.is_empty() {
             return Err(StoreError::Validation(
@@ -281,13 +314,30 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
         let id = resolved.as_str();
+        let previous = row_to_item(&conn, id)?
+            .ok_or(StoreError::NotFound)?
+            .requester;
+        if previous.as_deref() == Some(requester) {
+            return row_to_item(&conn, id)?.ok_or(StoreError::NotFound);
+        }
+        let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET requester = ?1, updated_at = ?2 WHERE id = ?3",
-            params![requester, now_millis(), id],
+            params![requester, now, id],
         )?;
         if affected == 0 {
             return Err(StoreError::NotFound);
         }
+        insert_lifecycle_comment(
+            &conn,
+            id,
+            author,
+            &format!(
+                "requester: {} -> {requester}",
+                previous.as_deref().unwrap_or("(unset)")
+            ),
+            now,
+        )?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -338,7 +388,7 @@ impl Store {
     pub fn get_worker(&self, id: &str) -> Result<Worker> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
-            "SELECT id, topics, online FROM workers WHERE id = ?1",
+            "SELECT id, topics, online FROM workers WHERE id = ?1 COLLATE NOCASE",
             params![id],
             |row| {
                 let topics_json: String = row.get(1)?;
@@ -374,7 +424,7 @@ impl Store {
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(t) = topic {
-            sql.push_str(" AND topic = ?");
+            sql.push_str(" AND topic = ? COLLATE NOCASE");
             args.push(Box::new(t.to_string()));
         }
         if let Some(s) = state {
@@ -418,27 +468,49 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
-    /// Atomically transitions `claimed -> resolved`. Only the current
-    /// assignee may submit.
-    pub fn submit_item(&self, id: &str, worker_id: &str) -> Result<Item> {
+    /// Atomically transitions `claimed -> resolved` — handing the turn to the
+    /// requester. Only the current assignee may submit.
+    ///
+    /// `resolved` means "the assignee cannot take this further; the requester
+    /// decides what happens next", which covers finished work *and* work that
+    /// is blocked on an answer only the requester has. Both are the same fact
+    /// about whose turn it is, and this is the only transition that produces
+    /// it — see ADR-0010's 2026-09-08 update.
+    ///
+    /// `reason` is optional and recorded as an atomic lifecycle comment when
+    /// present, the same way `reject_item`/`reopen_item` record their required
+    /// ones. Optional rather than required because a submission often has
+    /// nothing to add beyond the transition itself ("done, as described"),
+    /// while a question does — and leaving that to a separate `add_comment`
+    /// call would put the intent outside the transition that carries it. Blank
+    /// or whitespace-only counts as absent, the same treatment every other
+    /// optional string in this crate gets.
+    pub fn submit_item(&self, id: &str, worker_id: &str, reason: Option<&str>) -> Result<Item> {
+        let reason = reason.map(str::trim).filter(|r| !r.is_empty());
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
         let id = resolved.as_str();
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'resolved', updated_at = ?1
-             WHERE id = ?2 AND state = 'claimed' AND assignee = ?3",
+             WHERE id = ?2 AND state = 'claimed' AND assignee = ?3 COLLATE NOCASE",
             params![now, id, worker_id],
         )?;
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "submit")?);
         }
+        if let Some(reason) = reason {
+            insert_lifecycle_comment(&conn, id, worker_id, reason, now)?;
+        }
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
-    /// Atomically transitions `resolved -> claimed` — the requester sending
-    /// a not-yet-acceptable item back to the assignee for rework. `assignee`
-    /// is unchanged. `reason` is required and recorded as an atomic comment
+    /// Atomically transitions `resolved -> claimed` — the requester handing
+    /// the turn back to the assignee. Rework is one reason; *answering a
+    /// question the assignee submitted* is another, and both are ordinary use
+    /// (ADR-0010's 2026-09-08 update). `assignee` is unchanged. `reason` is
+    /// required and recorded as an atomic comment — which is what carries the
+    /// answer, so the round trip needs no state beyond these two transitions
     /// (same two-`execute`-under-one-lock pattern as `add_comment` — no
     /// separate `conn.transaction()` needed, since no other thread can
     /// interleave while this lock is held). See ADR-0012.
@@ -460,7 +532,7 @@ impl Store {
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'claimed', updated_at = ?1
-             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3)",
+             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3 COLLATE NOCASE)",
             params![now, id, author],
         )?;
         if affected == 0 {
@@ -524,7 +596,7 @@ impl Store {
         let now = now_millis();
         let affected = conn.execute(
             "UPDATE items SET state = 'closed', resolution = 'done', updated_at = ?1
-             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3)",
+             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3 COLLATE NOCASE)",
             params![now, id, author],
         )?;
         if affected == 0 {
@@ -934,7 +1006,7 @@ impl Store {
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(t) = topic {
-            sql.push_str(" AND i.topic = ?");
+            sql.push_str(" AND i.topic = ? COLLATE NOCASE");
             args.push(Box::new(t.to_string()));
         }
         if let Some(s) = state {
@@ -1170,10 +1242,10 @@ fn require_item(conn: &Connection, item_id: &str) -> Result<()> {
 }
 
 /// Records `author`/`body` as an atomic comment on `item_id`, sharing the
-/// same `now` as the state-changing `UPDATE` it's paired with — the four
-/// lifecycle operations that call this write the comment as part of the
-/// same transition, not as separate activity. Shared by
-/// `reject_item`/`reopen_item`/`approve_item`/`close_with_resolution`.
+/// same `now` as the `UPDATE` it's paired with — the operations that call
+/// this write the comment as part of the same change, not as separate
+/// activity. Shared by `reject_item`/`reopen_item`/`approve_item`/
+/// `close_with_resolution`/`set_item_requester`.
 fn insert_lifecycle_comment(
     conn: &Connection,
     item_id: &str,
@@ -1296,7 +1368,7 @@ mod tests {
         assert_eq!(claimed.state, State::Claimed);
         assert_eq!(claimed.assignee.as_deref(), Some("w1"));
 
-        let resolved = store.submit_item(&item.id, "w1").unwrap();
+        let resolved = store.submit_item(&item.id, "w1", None).unwrap();
         assert_eq!(resolved.state, State::Resolved);
 
         let closed = store.approve_item(&item.id, "requester-1").unwrap();
@@ -1361,7 +1433,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let rejected = store
             .reject_item(&item.id, "requester-1", "not done yet, missing tests")
@@ -1397,7 +1469,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let err = store
             .reject_item(&item.id, "requester-1", "   ")
@@ -1415,7 +1487,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let err = store.approve_item(&item.id, "someone-else").unwrap_err();
         let StoreError::Conflict(msg) = &err else {
@@ -1433,7 +1505,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let closed = store.approve_item(&item.id, "requester-1").unwrap();
         assert_eq!(closed.state, State::Closed);
@@ -1449,7 +1521,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let closed = store.approve_item(&item.id, "anyone-at-all").unwrap();
         assert_eq!(closed.state, State::Closed);
@@ -1462,7 +1534,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let err = store
             .reject_item(&item.id, "someone-else", "reason")
@@ -1482,7 +1554,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], Some("requester-1"))
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let rejected = store
             .reject_item(&item.id, "requester-1", "not done yet")
@@ -1497,7 +1569,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let rejected = store
             .reject_item(&item.id, "anyone-at-all", "not done yet")
@@ -1512,7 +1584,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
         store.approve_item(&item.id, "requester-1").unwrap();
 
         let reopened = store
@@ -1583,7 +1655,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
         store.approve_item(&item.id, "requester-1").unwrap();
 
         let err = store.reopen_item(&item.id, "requester-1", "").unwrap_err();
@@ -1597,7 +1669,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        store.submit_item(&item.id, "w1").unwrap();
+        store.submit_item(&item.id, "w1", None).unwrap();
 
         let closed = store.force_close_item(&item.id, "admin").unwrap();
         assert_eq!(closed.state, State::Closed);
@@ -1757,7 +1829,7 @@ mod tests {
             .create_item("iyulab/docket", "a", None, &[], None)
             .unwrap();
         store.claim_item(&a.id, "w1").unwrap();
-        store.submit_item(&a.id, "w1").unwrap();
+        store.submit_item(&a.id, "w1", None).unwrap();
         store.approve_item(&a.id, "requester-1").unwrap();
         assert_eq!(store.list_comments(&a.id).unwrap()[0].author, "requester-1");
 
@@ -1786,7 +1858,7 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         store.claim_item(&item.id, "w1").unwrap();
-        let err = store.submit_item(&item.id, "w2").unwrap_err();
+        let err = store.submit_item(&item.id, "w2", None).unwrap_err();
         assert!(matches!(err, StoreError::Conflict(_)));
     }
 
@@ -2201,6 +2273,129 @@ mod tests {
         assert_eq!(second.seq, 2);
     }
 
+    /// `submit_item`'s `reason` is what distinguishes "done" from "I need a
+    /// decision from you" — both are the same transition, because both are the
+    /// same fact about whose turn it is (ADR-0010's 2026-09-08 update). Without
+    /// a reason nothing is recorded, so an ordinary completed submission stays
+    /// as quiet as it was before.
+    /// ADR-0021: an identity that drifted in case is still the same identity,
+    /// so the two-party handshake must not hard-fail on it. This is the exact
+    /// shape observed in production — 21 items under `iyulab/Filer`, 2 under
+    /// `iyulab/filer` — where the only way to approve was to pass the wrong
+    /// spelling back (docket-works#37).
+    #[test]
+    fn approve_and_reject_match_a_requester_that_drifted_in_case() {
+        let store = open_test_store();
+        for (spelling, author) in [
+            ("iyulab/Filer", "iyulab/filer"),
+            ("iyulab/filer", "iyulab/Filer"),
+        ] {
+            let item = store
+                .create_item("iyulab/docket", "t", None, &[], Some(spelling))
+                .unwrap();
+            store.claim_item(&item.id, "acme/worker").unwrap();
+            store.submit_item(&item.id, "acme/worker", None).unwrap();
+            let rejected = store
+                .reject_item(&item.id, author, "one more pass")
+                .unwrap();
+            assert_eq!(rejected.state, State::Claimed);
+
+            store.submit_item(&item.id, "acme/worker", None).unwrap();
+            let approved = store.approve_item(&item.id, author).unwrap();
+            assert_eq!(approved.state, State::Closed);
+            // Storage is untouched by the comparison — the stored spelling
+            // stays what was written.
+            assert_eq!(approved.requester.as_deref(), Some(spelling));
+        }
+    }
+
+    /// The assignee half of the same handshake — a second, independent drift
+    /// (`iyu-devstack/Schemorph` vs `.../schemorph`) was found in the same audit.
+    #[test]
+    fn submit_matches_an_assignee_that_drifted_in_case() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store
+            .claim_item(&item.id, "iyu-devstack/Schemorph")
+            .unwrap();
+        let submitted = store
+            .submit_item(&item.id, "iyu-devstack/schemorph", None)
+            .unwrap();
+        assert_eq!(submitted.state, State::Resolved);
+        assert_eq!(
+            submitted.assignee.as_deref(),
+            Some("iyu-devstack/Schemorph")
+        );
+    }
+
+    /// `register_worker` is an every-session upsert, so a drifted id must land
+    /// on the existing row rather than fail or fork it. The returned `id` is the
+    /// canonical spelling — that response is how a caller learns its own id
+    /// drifted. See ADR-0021's rejected 409 option.
+    #[test]
+    fn registering_a_case_variant_id_updates_the_existing_worker() {
+        let store = open_test_store();
+        store
+            .register_worker("iyulab/Filer", &["iyulab/a".to_string()])
+            .unwrap();
+
+        let again = store
+            .register_worker("iyulab/filer", &["iyulab/b".to_string()])
+            .unwrap();
+        assert_eq!(again.id, "iyulab/Filer", "canonical spelling is returned");
+        assert_eq!(again.topics, vec!["iyulab/b".to_string()]);
+
+        // One worker, not two — and reachable under either spelling.
+        for spelling in ["iyulab/Filer", "iyulab/filer"] {
+            let found = store.get_worker(spelling).unwrap();
+            assert_eq!(found.id, "iyulab/Filer");
+            assert_eq!(found.topics, vec!["iyulab/b".to_string()]);
+        }
+    }
+
+    #[test]
+    fn submit_item_records_a_reason_only_when_one_is_given() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], Some("acme/filer"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/worker").unwrap();
+
+        store.submit_item(&item.id, "acme/worker", None).unwrap();
+        assert!(store.list_comments(&item.id).unwrap().is_empty());
+
+        store
+            .reject_item(&item.id, "acme/filer", "not yet")
+            .unwrap();
+        store
+            .submit_item(
+                &item.id,
+                "acme/worker",
+                Some("  which of the two schemas should this follow?  "),
+            )
+            .unwrap();
+
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[1].author, "acme/worker");
+        assert_eq!(
+            comments[1].body,
+            "which of the two schemas should this follow?"
+        );
+
+        // Whitespace-only counts as absent, same as every other optional
+        // string in this crate.
+        store
+            .reject_item(&item.id, "acme/filer", "the first one")
+            .unwrap();
+        store
+            .submit_item(&item.id, "acme/worker", Some("   "))
+            .unwrap();
+        assert_eq!(store.list_comments(&item.id).unwrap().len(), 3);
+    }
+
     #[test]
     fn set_item_requester_updates_requester_and_bumps_updated_at() {
         let store = open_test_store();
@@ -2212,10 +2407,63 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         let updated = store
-            .set_item_requester(&item.id, "  backfilled-reporter  ")
+            .set_item_requester(&item.id, "admin", "  backfilled-reporter  ")
             .unwrap();
         assert_eq!(updated.requester.as_deref(), Some("backfilled-reporter"));
         assert!(updated.updated_at > created_updated_at);
+    }
+
+    /// Repairing an identity that is already set is the *other* half of what
+    /// this operation is for, and the half ADR-0019 leans on: a drifted
+    /// `requester` hard-fails a legitimate approve, and the only correct answer
+    /// is to fix the item — not to approve under the wrong spelling. Pinned
+    /// here because the tool description said "doesn't have one yet" long after
+    /// the behavior and ADR-0019 both said otherwise, and a reader believed the
+    /// description (docket-works#37).
+    #[test]
+    fn set_item_requester_repairs_an_identity_that_is_already_set() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], Some("acme/widget"))
+            .unwrap();
+
+        let updated = store
+            .set_item_requester(&item.id, "acme/widget", "acme/Widget")
+            .unwrap();
+        assert_eq!(updated.requester.as_deref(), Some("acme/Widget"));
+    }
+
+    /// The correction is the one edit that can silently move an item between
+    /// two parties, so it leaves a record naming both values — the same way
+    /// every other why-bearing operation records its reason.
+    #[test]
+    fn set_item_requester_records_the_change_as_a_comment_and_no_ops_when_unchanged() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+
+        store
+            .set_item_requester(&item.id, "acme/fixer", "acme/widget")
+            .unwrap();
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author, "acme/fixer");
+        assert_eq!(comments[0].body, "requester: (unset) -> acme/widget");
+
+        store
+            .set_item_requester(&item.id, "acme/fixer", "acme/Widget")
+            .unwrap();
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[1].body, "requester: acme/widget -> acme/Widget");
+
+        // Re-running the same correction adds nothing — a repeated call must
+        // not fill the thread with noise.
+        store
+            .set_item_requester(&item.id, "acme/fixer", "acme/Widget")
+            .unwrap();
+        assert_eq!(store.list_comments(&item.id).unwrap().len(), 2);
     }
 
     #[test]
@@ -2226,7 +2474,9 @@ mod tests {
             .unwrap();
         store.remove_item(&item.id, "admin").unwrap();
 
-        let updated = store.set_item_requester(&item.id, "reporter-1").unwrap();
+        let updated = store
+            .set_item_requester(&item.id, "admin", "reporter-1")
+            .unwrap();
         assert_eq!(updated.state, State::Closed);
         assert_eq!(updated.requester.as_deref(), Some("reporter-1"));
     }
@@ -2238,11 +2488,11 @@ mod tests {
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
         assert!(matches!(
-            store.set_item_requester(&item.id, "   "),
+            store.set_item_requester(&item.id, "admin", "   "),
             Err(StoreError::Validation(_))
         ));
         assert!(matches!(
-            store.set_item_requester("nonexistent-id", "reporter-1"),
+            store.set_item_requester("nonexistent-id", "admin", "reporter-1"),
             Err(StoreError::NotFound)
         ));
     }

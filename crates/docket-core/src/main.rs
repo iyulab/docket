@@ -94,6 +94,47 @@ async fn api_not_found() -> impl IntoResponse {
     )
 }
 
+/// What the static service falls back to when no file matches the request path.
+///
+/// A browser navigating a client-side console route must get `index.html` back.
+/// An API client must not: handing it a `200 text/html` shell turns a
+/// mis-shaped path into a *successful* call whose body then fails to parse,
+/// which is strictly worse than a 404 — it can't be told apart from a broken
+/// transport. That is how an unencoded `/` inside a worker id surfaced
+/// (docket-works#36): `GET /workers/{org}/{repo}` is two segments, misses the
+/// single-segment `/workers/{id}` route, and lands here.
+///
+/// [`api_not_found`] already guards the `/api` nest, but the same routes are
+/// also merged at the root (where every client actually calls them), and there
+/// the router's fallback is this static service. Content negotiation is what
+/// covers the root without giving up SPA routing: only a request that asks for
+/// HTML gets the shell, everything else gets the same JSON 404 the nest
+/// returns. A 404'd asset fetch (`Accept: */*`) now reports itself as missing
+/// instead of silently resolving to the shell, too.
+fn spa_fallback(console_dir: &std::path::Path) -> axum::routing::MethodRouter {
+    let index_path = console_dir.join("index.html");
+    axum::routing::any(move |headers: HeaderMap| {
+        let index_path = index_path.clone();
+        async move {
+            let wants_html = headers
+                .get(axum::http::header::ACCEPT)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|accept| accept.contains("text/html"));
+            // Read per request rather than at startup so a console rebuilt
+            // under a running server can't serve fresh assets against a stale
+            // shell (mismatched asset hashes render as a blank page).
+            match (wants_html, tokio::fs::read(&index_path).await) {
+                (true, Ok(html)) => (
+                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    html,
+                )
+                    .into_response(),
+                _ => api_not_found().await.into_response(),
+            }
+        }
+    })
+}
+
 /// Tracks when `docket-core` last handled a request, using a monotonic
 /// clock so system-time adjustments never skew the idle calculation.
 /// `/status` itself is deliberately excluded from touching this (see
@@ -143,8 +184,8 @@ async fn status_handler(Extension(last_request): Extension<Arc<LastRequest>>) ->
 /// `ServeDir`/`ServeFile` defer file I/O to request time, so a missing directory
 /// only produces 404s per-request, not a server startup failure.
 fn build_router(store: Arc<Store>, console_dir: &std::path::Path) -> Router {
-    let index_file = tower_http::services::ServeFile::new(console_dir.join("index.html"));
-    let static_service = tower_http::services::ServeDir::new(console_dir).fallback(index_file);
+    let static_service =
+        tower_http::services::ServeDir::new(console_dir).fallback(spa_fallback(console_dir));
     let last_request = Arc::new(LastRequest::new());
 
     let tracked = Router::new()
@@ -399,17 +440,24 @@ async fn list_items(
         }
         None => items,
     };
+    // Identity comparisons fold case here and everywhere else — see ADR-0021.
+    // These filters live in Rust, over rows SQL already returned, which is why
+    // a column collation could not have covered them.
     let items = match q.assignee {
         Some(worker_id) => items
             .into_iter()
-            .filter(|item| item.assignee.as_deref() == Some(worker_id.as_str()))
+            .filter(|item| {
+                docket_core::domain::identity_eq_opt(item.assignee.as_deref(), &worker_id)
+            })
             .collect(),
         None => items,
     };
     let items: Vec<Item> = match q.requester {
         Some(requester) => items
             .into_iter()
-            .filter(|item| item.requester.as_deref() == Some(requester.as_str()))
+            .filter(|item| {
+                docket_core::domain::identity_eq_opt(item.requester.as_deref(), &requester)
+            })
             .collect(),
         None => items,
     };
@@ -425,9 +473,11 @@ async fn list_items(
             items
                 .into_iter()
                 .filter(|item| {
-                    item.assignee.as_deref() == Some(worker_id.as_str())
-                        || (item.requester.as_deref() == Some(worker_id.as_str())
-                            && item.state == ItemState::Resolved)
+                    docket_core::domain::identity_eq_opt(item.assignee.as_deref(), &worker_id)
+                        || (docket_core::domain::identity_eq_opt(
+                            item.requester.as_deref(),
+                            &worker_id,
+                        ) && item.state == ItemState::Resolved)
                         || (item.state == ItemState::Open
                             && item.assignee.is_none()
                             && topics.iter().any(|owned| {
@@ -510,13 +560,18 @@ async fn get_item(
 
 #[derive(Deserialize)]
 struct UpdateItemRequest {
-    /// Sets `requester` on an existing item — the only field this covers so
-    /// far. `requester` is normally set once at creation (ADR-0010); this
-    /// exists for the case an item was filed before a requester identity
-    /// was available and needs it added after the fact. Editing
-    /// `title`/`body`/`topic` post-creation is a separate, not-yet-built
-    /// gap (see ROADMAP.md).
+    /// Corrects `requester` on an existing item — the only field this covers
+    /// so far. `requester` is normally set once at creation (ADR-0010); this
+    /// covers both an item that never got one and one whose identity drifted
+    /// (ADR-0019). Editing `title`/`body`/`topic` post-creation is a separate,
+    /// not-yet-built gap (see ROADMAP.md).
     requester: String,
+    /// Who made the correction, recorded on the lifecycle comment the change
+    /// writes. Optional here and defaulting to `"unknown"`, the same treatment
+    /// `POST /items/{id}/comments` gives a direct HTTP caller — `docket-mcp`
+    /// requires it be resolvable at its own layer instead.
+    #[serde(default)]
+    author: Option<String>,
 }
 
 async fn update_item(
@@ -524,7 +579,12 @@ async fn update_item(
     Path(id): Path<String>,
     Json(req): Json<UpdateItemRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.set_item_requester(&id, &req.requester)?))
+    let author = req.author.as_deref().unwrap_or("unknown");
+    Ok(Json(store.set_item_requester(
+        &id,
+        author,
+        &req.requester,
+    )?))
 }
 
 #[derive(Deserialize)]
@@ -540,12 +600,26 @@ async fn claim_item(
     Ok(Json(store.claim_item(&id, &req.worker_id)?))
 }
 
+#[derive(Deserialize)]
+struct SubmitItemRequest {
+    worker_id: String,
+    /// Optional note recorded as a lifecycle comment with the transition —
+    /// what the assignee is handing back, when that isn't just "done". See
+    /// ADR-0010's 2026-09-08 update.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 async fn submit_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-    Json(req): Json<WorkerScopedRequest>,
+    Json(req): Json<SubmitItemRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    Ok(Json(store.submit_item(&id, &req.worker_id)?))
+    Ok(Json(store.submit_item(
+        &id,
+        &req.worker_id,
+        req.reason.as_deref(),
+    )?))
 }
 
 #[derive(Deserialize)]
@@ -1048,6 +1122,129 @@ mod tests {
     /// item is sitting in `resolved` waiting on their approval, but a
     /// requester whose item is still `claimed` does not (nothing to approve
     /// yet). See the "docket-mcp에 '내가 지금 쥐고 있는 것'..." issue.
+    /// The reported failure, asserted end to end: a requester's own "what should
+    /// I look at" sweep must return its items under either spelling. Before
+    /// ADR-0021 `mine="iyulab/Filer"` returned the `Filer` items and never the
+    /// `filer` ones, and the requester did not see two of its own resolved items
+    /// for six days (docket-works#37).
+    #[tokio::test]
+    async fn mine_and_the_ownership_filters_fold_identity_case() {
+        let app = test_app();
+        for spelling in ["iyulab/Filer", "iyulab/filer"] {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({
+                        "topic": "iyulab/docket",
+                        "title": spelling,
+                        "requester": spelling,
+                    }),
+                ))
+                .await
+                .unwrap();
+            let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    &format!("/items/{id}/claim"),
+                    serde_json::json!({"worker_id": "acme/Worker"}),
+                ))
+                .await
+                .unwrap();
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    &format!("/items/{id}/submit"),
+                    serde_json::json!({"worker_id": "acme/worker"}),
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Either spelling of the requester sees both items — the split is gone
+        // in both directions, not just the majority one.
+        for spelling in ["iyulab/Filer", "iyulab/filer", "IYULAB/FILER"] {
+            for filter in ["mine", "requester"] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/items?{filter}={spelling}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let items = json_body(resp).await;
+                assert_eq!(
+                    items.as_array().unwrap().len(),
+                    2,
+                    "{filter}={spelling} must see both spellings"
+                );
+            }
+        }
+
+        // Same for the assignee side, which drifted independently in the wild.
+        for spelling in ["acme/Worker", "acme/worker"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/items?assignee={spelling}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(json_body(resp).await.as_array().unwrap().len(), 2);
+        }
+    }
+
+    /// `topic_scope`/`mine`'s unclaimed-inbox arm resolves jurisdiction through
+    /// the worker's registered topics, so folding has to reach that path too.
+    /// No drift has been observed here — this is the identity class being
+    /// consistent, per ADR-0021.
+    #[tokio::test]
+    async fn topic_jurisdiction_folds_case() {
+        let app = test_app();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/workers",
+                serde_json::json!({"id": "acme/scout", "topics": ["IYULAB"]}),
+            ))
+            .await
+            .unwrap();
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+
+        for filter in ["topic_scope=acme/Scout", "mine=acme/SCOUT"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/items?{filter}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                json_body(resp).await.as_array().unwrap().len(),
+                1,
+                "{filter}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn mine_filter_ors_assignee_and_pending_approval_requester() {
         let app = test_app();
@@ -2606,8 +2803,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A browser navigating a client-side route announces `text/html`, and only
+    /// that gets the SPA shell — a caller that didn't ask for HTML gets the same
+    /// JSON 404 the API returns. See `spa_fallback` / docket-works#36.
     #[tokio::test]
-    async fn spa_fallback_serves_index_for_unknown_client_route() {
+    async fn spa_fallback_serves_index_only_when_html_is_requested() {
         let dir = temp_console_dir("spa-fallback");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -2621,9 +2821,11 @@ mod tests {
             &dir,
         );
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/some/client/side/route")
+                    .header("accept", "text/html,application/xhtml+xml")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2632,6 +2834,19 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(String::from_utf8_lossy(&bytes).contains("docket-console-test-marker"));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/some/client/side/route")
+                    .header("accept", "*/*")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(resp).await["error"], "not found");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2683,8 +2898,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// A misspelled API path at the root used to answer `200 text/html` while
+    /// the same path under `/api` answered a JSON 404 — the asymmetry behind
+    /// docket-works#36, since every client calls the root-merged routes. The
+    /// two now agree for any caller that isn't a browser.
     #[tokio::test]
-    async fn bare_unmatched_path_falls_back_to_html_unlike_api() {
+    async fn bare_unmatched_path_matches_api_404_for_non_browser_callers() {
         let dir = temp_console_dir("bare-vs-api-asymmetry");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -2697,18 +2916,92 @@ mod tests {
             Arc::new(Store::open(":memory:").expect("in-memory store opens")),
             &dir,
         );
+        for uri in ["/itemz", "/api/itemz"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(json_body(resp).await["error"], "not found", "{uri}");
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Regression for docket-works#36. A worker id is conventionally `org/repo`,
+    /// so an unencoded id makes `/workers/{id}` a *two*-segment path that misses
+    /// the route entirely and lands on the static fallback. Before the fix that
+    /// answered `200 text/html`, which every JSON client read as a broken
+    /// transport rather than a wrong path — and it did so whether or not the
+    /// worker existed, so `get_worker` never worked for a real id at all.
+    ///
+    /// Note the fixture id: a slash-free id (`w1`, as the older tests use) can
+    /// never reproduce this, which is why it shipped green.
+    #[tokio::test]
+    async fn worker_id_with_slash_needs_encoding_and_never_returns_html() {
+        let dir = temp_console_dir("worker-id-slash");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("index.html"),
+            "<html>docket-console-test-marker</html>",
+        )
+        .unwrap();
+
+        let app = build_router(
+            Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+            &dir,
+        );
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/workers",
+                serde_json::json!({"id": "acme/widget", "topics": ["acme"]}),
+            ))
+            .await
+            .unwrap();
+
+        // Encoded: one segment, matches the route, resolves the registration.
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/itemz")
+                    .uri("/workers/acme%2Fwidget")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&bytes).contains("docket-console-test-marker"));
+        assert_eq!(json_body(resp).await["id"], "acme/widget");
+
+        // Unencoded: still unroutable (the route is single-segment by design),
+        // but it must fail as a JSON 404 — never as a 200 HTML shell.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/workers/acme/widget")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(resp).await["error"], "not found");
+
+        // Same for an id that was never registered — the caller can tell
+        // "no such worker" from "the server is broken" in both cases now.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/workers/acme%2Fghost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

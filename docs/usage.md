@@ -115,19 +115,29 @@ e.g. `142` or `#142` — returned alongside `id` on every item ([ADR-0016](decis
 Both forms resolve to the same item; `id` stays canonical everywhere (stored references like
 `merge_item`'s `duplicate_of_id` tag are unaffected).
 
+**Identifiers compare case-insensitively.** A worker id, `requester`, `assignee` and `topic` name
+the same thing whichever case they are written in, so `mine=iyulab/Filer` and `mine=iyulab/filer`
+return the same items, and `approve_item` matches a `requester` that drifted in case rather than
+failing. **Storage keeps what was written** — an item filed with `iyulab/Filer` reads back as
+`iyulab/Filer`, so grouping returned values by string can still show two spellings for one identity.
+`register_worker` is the exception worth knowing: a drifted id lands on the registration that
+already exists and the response returns that row's spelling, which is how a session whose derived id
+drifted learns the canonical one. ASCII only; tags are deliberately *not* folded (they stay opaque
+to core). See [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md).
+
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id?`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5. `id` **resolvable-required** at this tool layer (cycle-58, same pattern as `claim_item` above) — omit it to use this session's `DOCKET_WORKER_ID`; a tool-level error only if neither is present |
-| `get_worker` | `id?` | `GET /workers/{id}` | The only way to positively confirm a worker is registered — see the read/write not-found note below. 404s on an unregistered id. `id` **resolvable-required** at this tool layer (HD-18, cycle-59, same pattern as `register_worker` above) — omit it to look up this session's own registration via `DOCKET_WORKER_ID`; a tool-level error only if neither is present |
+| `get_worker` | `id?` | `GET /workers/{id}` | The only way to positively confirm a worker is registered — see the read/write not-found note below. 404s on an unregistered id. `id` **resolvable-required** at this tool layer (HD-18, cycle-59, same pattern as `register_worker` above) — omit it to look up this session's own registration via `DOCKET_WORKER_ID`; a tool-level error only if neither is present. **Direct HTTP callers must percent-encode the id**: a worker id is conventionally `org/repo`, and an unencoded `/` makes the path two segments, which misses this single-segment route entirely (`GET /workers/iyulab%2Fdocket`, not `/workers/iyulab/docket`). The MCP tool does this for you — see [docket-works#36](https://github.com/iyulab/docket-works/issues/36), where it did not and every `org/repo` id was unlookupable. An unmatched path now answers a JSON 404 like any other, rather than the console's HTML shell |
 | `create_item` | `topic`, `title`, `body?`, `tags[]?`, `requester?` | `POST /items` | **Call `search_items` first** to avoid filing a duplicate. `requester` is who this item is being worked for — optional (see [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) / [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md)) |
-| `set_item_requester` | `item_id`, `requester` | `PATCH /items/{id} {"requester"}` | Backfills `requester` on an item that doesn't have one yet — the one way to correct an item filed before a requester identity was available, or one a migration left blank. State-unrestricted (works on a closed item too — this corrects metadata, not a workflow transition). `requester` must not be blank. Does not cover `assignee`/`turn` or `title`/`body`/`topic` — those have no edit path yet |
-| `list_items` | `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `mine?`, `archived?`, `limit?`, `offset?`, `summary?`, `order?`, `expand_related?` | `GET /items?topic=&state=&assignee=&requester=&topic_scope=&mine=&archived=&limit=&offset=&summary=&order=&expand_related=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `assignee`/`requester` match the current assignee/requester exactly. `mine=<worker id>` is the one-shot "what should I be looking at" filter — `assignee=<id>` OR (`requester=<id>` AND `state=resolved`) OR (`state=open` AND unclaimed AND under a topic `<id>` is registered for), so you don't have to know to run and merge those three yourself; ANDs with every other filter here, same as `assignee`/`requester` individually — see §5 and [docket-works#35](https://github.com/iyulab/docket-works/issues/35) for the third case. `archived` defaults to `false` (today's behavior); `true` browses only the archive — see §4's archiving note. **Tool result is `{items, total}`, not a bare array** — `limit` defaults to 50, capped at 200; `total` is the row count before that cap, so a `total` above `items.length` means page further with `offset` ([ADR-0014](decisions/ADR-0014-list-search-pagination-and-list-topics.md)). Over HTTP the body stays a bare `Item[]`; `total` comes back as the `X-Total-Count` header instead. `summary=true` nulls every returned item's `body` — use it when you only need enough of each row to decide which item (if any) to fetch in full next via `get_item`/`GET /items/{id}`, which is unaffected. **Rows are ordered by `updated_at`, `desc` (most-recently-touched first) by default** — pass `order=asc` to get the *oldest*-untouched items directly, without paging to the tail via `offset`; an unrecognized `order` value falls back to `desc` rather than erroring, same treatment an unrecognized `tag_match` gets below (see [ADR-0020](decisions/ADR-0020-list-search-order-parameter.md)). `expand_related=true` applies `get_item`'s `related` expansion to every row in the returned page (not the unpaged total) — same both-directions semantics, same caveat about a seq-alias-tagged reference not showing up as `referenced_by` ([docket-works#33](https://github.com/iyulab/docket-works/issues/33)) |
+| `set_item_requester` | `item_id`, `requester`, `author?` | `PATCH /items/{id} {"requester","author"}` | Corrects `requester` on an existing item — **whether or not it already has one**. Two cases, both in scope since ADR-0011: *backfilling* an item filed before a requester identity was available (or one a migration left blank), and *repairing* an identity that drifted afterwards — a typo, a renamed repo, two consumers spelling the same identity differently. The second is what `approve_item`/`reject_item` point here for when their requester match fails ([ADR-0019](decisions/ADR-0019-approve-reject-requester-match.md) names it the mitigation): correct the item, never retry the call under the wrong spelling. State-unrestricted (works on a closed item too — this corrects metadata, not a workflow transition) and idempotent — setting the value it already has changes nothing and records nothing. `requester` must not be blank. A real change writes a lifecycle comment naming both values (`requester: (unset) → acme/widget`), atomically with the update, the same way `reject_item`/`reopen_item`/`block_item`/`defer_item` record theirs — this is the one edit that can move an item between two parties, so who changed it and from what belongs in the thread. `author` is **resolvable-required** at the MCP tool layer (omit it to use this session's `DOCKET_WORKER_ID`); a direct HTTP caller may omit it and gets docket-core's `"unknown"` default, the same asymmetry `add_comment` has. Does not cover `assignee`/`turn` or `title`/`body`/`topic` — those have no edit path yet |
+| `list_items` | `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `mine?`, `archived?`, `limit?`, `offset?`, `summary?`, `order?`, `expand_related?` | `GET /items?topic=&state=&assignee=&requester=&topic_scope=&mine=&archived=&limit=&offset=&summary=&order=&expand_related=` | `topic_scope=<worker id>` is how a worker discovers its own queue (§5) — matches by topic jurisdiction, not who currently holds any given item. `assignee`/`requester` match the item's current assignee/requester — case-insensitively, like every identifier comparison ([ADR-0021](decisions/ADR-0021-case-insensitive-identity.md)). `mine=<worker id>` is the one-shot "what should I be looking at" filter — `assignee=<id>` OR (`requester=<id>` AND `state=resolved`, i.e. waiting on *your* decision: approve it, or answer what the assignee asked and hand it back with `reject_item`) OR (`state=open` AND unclaimed AND under a topic `<id>` is registered for), so you don't have to know to run and merge those three yourself; ANDs with every other filter here, same as `assignee`/`requester` individually — see §5 and [docket-works#35](https://github.com/iyulab/docket-works/issues/35) for the third case. `archived` defaults to `false` (today's behavior); `true` browses only the archive — see §4's archiving note. **Tool result is `{items, total}`, not a bare array** — `limit` defaults to 50, capped at 200; `total` is the row count before that cap, so a `total` above `items.length` means page further with `offset` ([ADR-0014](decisions/ADR-0014-list-search-pagination-and-list-topics.md)). Over HTTP the body stays a bare `Item[]`; `total` comes back as the `X-Total-Count` header instead. `summary=true` nulls every returned item's `body` — use it when you only need enough of each row to decide which item (if any) to fetch in full next via `get_item`/`GET /items/{id}`, which is unaffected. **Rows are ordered by `updated_at`, `desc` (most-recently-touched first) by default** — pass `order=asc` to get the *oldest*-untouched items directly, without paging to the tail via `offset`; an unrecognized `order` value falls back to `desc` rather than erroring, same treatment an unrecognized `tag_match` gets below (see [ADR-0020](decisions/ADR-0020-list-search-order-parameter.md)). `expand_related=true` applies `get_item`'s `related` expansion to every row in the returned page (not the unpaged total) — same both-directions semantics, same caveat about a seq-alias-tagged reference not showing up as `referenced_by` ([docket-works#33](https://github.com/iyulab/docket-works/issues/33)) |
 | `search_items` | `query?`, `tags[]?`, `tag_match?`, `topic?`, `state?`, `assignee?`, `requester?`, `topic_scope?`, `mine?`, `archived?`, `limit?`, `offset?`, `summary?`, `order?`, `expand_related?` | `GET /items?q=&tag=&tag=&tag_match=&topic=&state=&assignee=&requester=&topic_scope=&mine=&archived=&limit=&offset=&summary=&order=&expand_related=` | `query` full-text matches title+body+comments — matched word-by-word (each word independently, not as one exact adjacent phrase), so word order doesn't matter and a query word also prefix-matches a token carrying a suffix it doesn't have (e.g. a stemmed or CJK-particle-suffixed form). `tag_match` is `any` (default) or `all`; `assignee`/`requester`/`topic_scope`/`mine`/`archived`/`limit`/`offset`/`summary`/`order`/`expand_related`/response shape/ordering same as `list_items` above — full-text search and an ownership filter combine in one call |
 | `get_item` | `item_id`, `expand_related?` | `GET /items/{id}?expand_related=` | Fetch one item by id — the way to resolve an id from a shared link or a comment into its current state/resolution/requester/assignee/turn/tags/body. Unaffected by `list_items`/`search_items`' `summary` mode (`body` always included), and returns archived items too (a direct id lookup, not a list query). `expand_related=true` also resolves the item's `related:<id>` tags (see [glossary.md](glossary.md)) into a `related` field, both directions (`references` this item's own tags name; `referenced_by` — another item's tag naming this one back, only found if that tag used the canonical id, not a seq alias). Defaults to `false` — the `related` key is then entirely absent, not `null`/`[]` ([docket-works#33](https://github.com/iyulab/docket-works/issues/33)) |
 | `claim_item` | `item_id`, `worker_id?` | `POST /items/{id}/claim {"worker_id"}` | `open → claimed`. Exclusive — loser gets a tool-level error, not a crash. **Call this before starting any work** — it's the only thing that moves `turn` off its `open` default; narrating the work through `add_comment` alone never does. `worker_id` **resolvable-required** at this tool layer (HD-16/HD-17, cycle-57) — omit it to use this session's `DOCKET_WORKER_ID` (`docket-cc-launcher` injects it every session); a tool-level error only if neither is present |
-| `submit_item` | `item_id`, `worker_id?` | `POST /items/{id}/submit {"worker_id"}` | `claimed → resolved`. Only the current assignee may submit. `worker_id` resolvable-required, same as `claim_item` above |
+| `submit_item` | `item_id`, `worker_id?`, `reason?` | `POST /items/{id}/submit {"worker_id","reason"}` | `claimed → resolved` — **the only transition that moves `turn` to the requester**, and it means "the assignee can't take this further, the requester decides what happens next". That covers finished work *and* work waiting on an answer only the requester has; **submit in both cases** ([ADR-0010](decisions/ADR-0010-item-from-to-turn.md)'s 2026-09-08 update). Holding a question in `claimed` instead hides it: `mine` matches items assigned to the requester, `resolved` items they filed, and unclaimed items in their topics — never one the assignee is holding — so the question sits unread in the thread. `reason` is optional, recorded as a lifecycle comment atomically with the transition; put the question in it. The requester answers with `reject_item`, whose required `reason` carries the answer back. Only the current assignee may submit. `worker_id` resolvable-required, same as `claim_item` above |
 | `approve_item` | `item_id`, `author?` | `POST /items/{id}/approve {"author"}` | `resolved → closed`, `resolution=done`. The requester's sign-off. `author` **resolvable-required** at this tool layer (HD-16/HD-17, cycle-57) — omit it to use this session's `DOCKET_WORKER_ID`; a tool-level error only if neither is present. Separately, **`author` must match the item's `requester` if one is set** — a core-enforced invariant, not just an MCP-layer requirement (ADR-0019, mirrors `submit_item`'s `assignee` match on the other side of the handshake); passes through unchanged when `requester` is `null`. A mismatch is a `conflict` distinguishing "wrong state" from "wrong requester", pointing at `set_item_requester` for a drifted identity. Direct HTTP callers get the exact same requester check — it is not MCP-layer-only |
-| `reject_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reject {"reason","author"}` | `resolved → claimed`. The requester sending it back for more work — **not** done yet. `reason` is required (recorded as a comment, atomically with the state change). `author` resolvable-required, and must match the item's `requester` if one is set, same as `approve_item` above |
+| `reject_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reject {"reason","author"}` | `resolved → claimed`. The requester handing the turn back to the assignee — **not** done yet. Rework is one use; **answering a question the assignee submitted is an equally ordinary one**, since `reason` is what carries the answer (ADR-0010's 2026-09-08 update). The name reads as a verdict, but the transition is a turn handoff — see that update on why no third state was added for it. `reason` is required (recorded as a comment, atomically with the state change). `author` resolvable-required, and must match the item's `requester` if one is set, same as `approve_item` above |
 | `reopen_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/reopen {"reason","author"}` | `closed → claimed` (or `→ open`, if the item was closed before anyone ever claimed it), clears `resolution` back to `null`. For a close that turns out to have been premature or mistaken, or for un-parking a `block_item`/`defer_item`. `reason` is required, same as `reject_item`. `author` resolvable-required, same as `approve_item` above |
 | `block_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/block {"reason","author"}` | `(any pre-closed state) → closed`, `resolution=blocked`. For a concrete external dependency nothing on either side can move forward on right now (no access to a paywalled standard, waiting on a third party). Not an admin override — any worker calls this on its own judgment, same as `reject_item`/`reopen_item`. `reason` is required, recorded as the lifecycle comment verbatim — it's the only record of *why* for whoever reopens it later. `author` resolvable-required, same as `approve_item` above. See [ADR-0018](decisions/ADR-0018-blocked-deferred-resolution.md) |
 | `defer_item` | `item_id`, `reason`, `author?` | `POST /items/{id}/defer {"reason","author"}` | `(any pre-closed state) → closed`, `resolution=deferred`. Same shape as `block_item`, for a softer reason than a hard external block (e.g. cross-consumer demand not yet proven). See [ADR-0018](decisions/ADR-0018-blocked-deferred-resolution.md) |
@@ -159,6 +169,28 @@ reopen_item(item_id, reason="the fix regressed a different case")
 Neither transition adds a new `state` value — both land back on an ordinary existing one, and
 *why* the item bounced lives in the comment `reason` records, not in `state` itself. See
 [ADR-0012](decisions/ADR-0012-item-reject-reopen-transitions.md).
+
+The same two transitions carry a **question and its answer**, which is the other thing a round trip
+is for. An assignee who needs the requester to decide something submits with the question as
+`reason`; the requester answers with `reject_item`, whose `reason` is the answer:
+
+```
+submit_item(item_id, worker_id, reason="need the failing input to reproduce — can you attach it?")
+                                              # claimed  -> resolved, turn -> requester
+reject_item(item_id, reason="attached below; it's the empty-topic case")
+                                              # resolved -> claimed,  turn -> assignee
+```
+
+Do **not** stay in `claimed` while waiting for that answer. `resolved` does not assert the work is
+finished — it asserts whose turn it is (see `turn`, below) — and it is the only state that puts the
+item in front of the requester at all: `mine` matches items assigned to them, `resolved` items they
+filed, and unclaimed items in their topics, but never one the assignee is still holding. A question
+left in `claimed` is therefore invisible to every query the requester runs, and waits on someone who
+has no way to know they are being waited on. The cost of the alternative is that `reject_item` reads
+as a verdict in the history when it was really an answer — accepted deliberately, because the
+transitions already exist and a third state would have to be threaded through `turn`, `mine`,
+`resolution` and the console to buy only a better label. See
+[ADR-0010](decisions/ADR-0010-item-from-to-turn.md)'s 2026-09-08 update.
 
 `GET /items/{id}` (fetch one item by id) has an MCP tool — `get_item`, table above. Prefer it over
 `list_items`/`search_items` plus a filter whenever you already have the id (e.g. from a shared link
@@ -200,9 +232,11 @@ item `duplicate-of:<id>` (a free-form-tag reference, not a schema column — see
 [ADR-0015](decisions/ADR-0015-merge-duplicate-of-reference.md)). No referential check that
 `duplicate_of_id` names a real item — tags stay opaque, caller-defined strings to the store.
 
-> **`submit_item` is the only door into `resolved` — repeated "done" comments never substitute for
-> it.** A worker that reports completion purely through `add_comment` (however many times) leaves
-> `state` exactly where it was; `approve_item` stays unreachable until `submit_item` actually runs.
+> **`submit_item` is the only door into `resolved` — repeated comments never substitute for it.**
+> A worker that reports through `add_comment` alone (however many times, and whether it is reporting
+> completion or asking a question) leaves `state` exactly where it was; `approve_item` stays
+> unreachable until `submit_item` actually runs, and until then the item is not in front of the
+> requester at all.
 > If a worker skips `claim_item`/`submit_item` entirely, the requester's only way to close the item
 > as done is the admin-side `force-approve` above — there is no worker-side or MCP-side path.
 
@@ -244,7 +278,8 @@ An `Item` looks like:
 worked for, `assignee` is the current holder (was `owner`), `turn` is derived from `state` and tells
 you whose hand it's in right now: `"assignee"` while `open` (unclaimed, but still squarely waiting on
 the assignee side to look at it) or `claimed` (the assignee's turn to act), `"requester"` while
-`resolved` (awaiting approval), `null` only while `closed` (done — nobody's turn). See
+`resolved` (the requester's turn to decide — approve, or answer and hand back), `null` only
+while `closed` (done — nobody's turn). See
 [ADR-0010](decisions/ADR-0010-item-from-to-turn.md) /
 [ADR-0011](decisions/ADR-0011-requester-assignee-naming.md).
 
@@ -290,8 +325,11 @@ against `assignee`/`requester` on items, which exist independently of any worker
 This is the pattern an agent repeats:
 
 1. **Once per session**: `register_worker(id, topics)` — `topics` are prefixes (`"iyulab"` owns every
-   topic starting `iyulab/…`, exact match or `/`-delimited prefix; see `topic_matches` in
-   [glossary.md](glossary.md)).
+   topic starting `iyulab/…`, exact match or `/`-delimited prefix, compared case-insensitively;
+   see `topic_matches` in [glossary.md](glossary.md) and
+   [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md)).
+   Re-registering under a differently-cased id updates the registration you already have and returns
+   its canonical spelling — it does not create a second worker.
 2. **Check what you need to act on**: `list_items(mine=<your id>)` — one call covers everything:
    an item claimed in a prior session, one waiting on your approval as requester, *and* any `open`
    (unclaimed) item under a topic you're registered for. That third case was added by
@@ -321,9 +359,14 @@ This is the pattern an agent repeats:
 4. **Take an item**: `claim_item(item_id, worker_id)`. If it 409s, someone else got there first — go
    back to step 2.
 5. Do the actual work.
-6. **Finish**: `submit_item(item_id, worker_id)` — moves it to `resolved`, waiting on the requester.
+6. **Hand it back**: `submit_item(item_id, worker_id, reason?)` — moves it to `resolved`, which
+   means the requester's turn, not necessarily "done". Do this both when the work is finished and
+   when you need a decision only the requester can make; put the question in `reason`. Staying in
+   `claimed` while you wait hides the item from every query the requester runs (ADR-0010's
+   2026-09-08 update).
 7. The requester (whoever wanted the item done — may be a different worker, or a human via
-   `docket-console`) calls `approve_item(item_id)` once satisfied, closing it.
+   `docket-console`) calls `approve_item(item_id)` once satisfied, closing it — or answers with
+   `reject_item(item_id, reason=…)`, which hands the turn back to you with the answer attached.
 
 Tags and comments are asynchronous side-channels on top of this loop — attach them whenever relevant,
 they don't gate any state transition.

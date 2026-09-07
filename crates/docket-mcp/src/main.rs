@@ -26,18 +26,38 @@ struct DocketMcp {
 /// request is ever sent*, turning `#142` into a request for an empty id
 /// (docket-core then 404s) instead of the intended lookup. Building through
 /// `Url` keeps every reserved character correctly encoded, not just `#`.
-fn items_url(base_url: &str, item_id: &str, suffix: &[&str]) -> reqwest::Url {
+/// Builds a `docket-core` URL by pushing each path segment through
+/// `Url::path_segments_mut`, which percent-encodes it.
+///
+/// **Never build a request path with `format!`.** A value carrying a `/` or a
+/// `#` would otherwise change the request's *shape* instead of travelling as
+/// one segment — and the failure is silent rather than a 404: a two-segment
+/// path misses its single-segment route, falls through to docket-core's static
+/// console service, and comes back as a `200 text/html` that this tool then
+/// fails to parse as JSON. `get_worker` hit exactly that, so every `org/repo`
+/// worker id was unlookupable regardless of whether it was registered
+/// ([docket-works#36](https://github.com/iyulab/docket-works/issues/36)). Both
+/// values are routine here: a worker id is conventionally `org/repo`, and an
+/// item accepts its `seq` alias in `#142` form.
+fn api_url(base_url: &str, segments: &[&str]) -> reqwest::Url {
     let mut url = reqwest::Url::parse(base_url).expect("base_url is a valid absolute URL");
     {
-        let mut segments = url
+        let mut path = url
             .path_segments_mut()
             .expect("http(s) base_url has path segments");
-        segments.push("items").push(item_id);
-        for s in suffix {
-            segments.push(s);
+        for segment in segments {
+            path.push(segment);
         }
     }
     url
+}
+
+fn items_url(base_url: &str, item_id: &str, suffix: &[&str]) -> reqwest::Url {
+    let mut segments = Vec::with_capacity(2 + suffix.len());
+    segments.push("items");
+    segments.push(item_id);
+    segments.extend_from_slice(suffix);
+    api_url(base_url, &segments)
 }
 
 // Every tool-parameter struct below denies unknown fields — a caller
@@ -93,17 +113,20 @@ struct CreateItemParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListItemsParams {
-    /// Exact-match topic filter.
+    /// Topic filter — matches one topic, case-insensitively like every
+    /// identifier comparison (ADR-0021).
     #[serde(default)]
     topic: Option<String>,
     /// One of open/claimed/resolved/closed.
     #[serde(default)]
     state: Option<String>,
     /// A worker id — narrows the list to items whose `assignee` (current
-    /// holder) is exactly this worker.
+    /// holder) is this worker. Compared case-insensitively, like every
+    /// identifier (ADR-0021).
     #[serde(default)]
     assignee: Option<String>,
-    /// Exact-match on `requester` — symmetric to `assignee`, above.
+    /// Matches the item's `requester` — symmetric to `assignee` above, and
+    /// case-insensitive like it (ADR-0021).
     #[serde(default)]
     requester: Option<String>,
     /// A registered worker id — narrows the list to items under any topic
@@ -114,10 +137,12 @@ struct ListItemsParams {
     topic_scope: Option<String>,
     /// A worker id — the one-shot "what should I be looking at" filter:
     /// matches items this worker is the `assignee` of, OR items this worker
-    /// filed (`requester`) that are now `resolved` and waiting on its
-    /// approval, OR `open` (unclaimed) items under a topic this worker is
-    /// registered for (see docket-works#35 — the topic-jurisdiction test is
-    /// the same one `topic_scope` uses). ANDs with every other filter here,
+    /// filed (`requester`) that are now `resolved` and waiting on *its*
+    /// decision — approve it, or answer what the assignee asked and hand it
+    /// back with `reject_item` (ADR-0010's 2026-09-08 update) — OR `open`
+    /// (unclaimed) items under a topic this worker is registered for (see
+    /// docket-works#35 — the topic-jurisdiction test is the same one
+    /// `topic_scope` uses). ANDs with every other filter here,
     /// same as `assignee`/`requester` individually. Prefer this over
     /// manually combining `assignee`, `requester`+`state=resolved`, and
     /// `topic_scope`+`state=open` yourself.
@@ -178,7 +203,8 @@ struct SearchItemsParams {
     /// field of the same name.
     #[serde(default)]
     assignee: Option<String>,
-    /// Exact-match on `requester` — symmetric to `assignee`, above.
+    /// Matches the item's `requester` — symmetric to `assignee` above, and
+    /// case-insensitive like it (ADR-0021).
     #[serde(default)]
     requester: Option<String>,
     /// A registered worker id — narrows results to items under any topic
@@ -269,12 +295,36 @@ struct TagsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SubmitParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    item_id: String,
+    /// The submitting worker. Omit to use this session's `DOCKET_WORKER_ID`
+    /// (see `resolve_identity`).
+    #[serde(default)]
+    worker_id: Option<String>,
+    /// What is being handed back, when it isn't simply "done" — most usefully
+    /// the question the requester has to answer. Recorded as a comment with
+    /// the transition itself, so the thread says why the turn moved rather
+    /// than leaving that to a separate `add_comment` the reader has to
+    /// correlate. Optional; omit it for an ordinary completed submission.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetRequesterParams {
     /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
     /// `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     /// The corrected requester identity. Must not be blank.
     requester: String,
+    /// Who is making the correction — recorded on the lifecycle comment the
+    /// change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
+    /// `resolve_identity`), same treatment as every other authored operation.
+    #[serde(default)]
+    author: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -441,14 +491,42 @@ fn unreachable_error(e: reqwest::Error) -> McpError {
 /// Turns a `docket-core` HTTP response into a tool result: a non-2xx status
 /// becomes a tool-level error (the model sees it and can react — e.g. retry
 /// `list_items` after losing a claim race) rather than a protocol error.
+fn content_type(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none")
+        .to_string()
+}
+
+/// Message for a 2xx whose body isn't the JSON this tool expected.
+///
+/// The bare serde text ("expected value at line 1 column 1") leaves the caller
+/// unable to tell a real not-found from a broken transport — the complaint in
+/// [docket-works#36](https://github.com/iyulab/docket-works/issues/36), where a
+/// mis-shaped path quietly returned docket-core's console HTML with a 200. The
+/// status and content-type are what separate the two, so they travel with the
+/// parse error.
+fn unparseable_body(
+    status: reqwest::StatusCode,
+    content_type: &str,
+    error: &serde_json::Error,
+) -> String {
+    format!(
+        "docket-core returned {status} with a body this tool could not parse          (content-type: {content_type}) — check DOCKET_CORE_URL and the request path: {error}"
+    )
+}
+
 async fn respond<T: Serialize + for<'de> Deserialize<'de>>(
     resp: reqwest::Response,
 ) -> Result<CallToolResult, McpError> {
     let status = resp.status();
+    let content_type = content_type(&resp);
     let bytes = resp.bytes().await.map_err(unreachable_error)?;
     if status.is_success() {
-        let value: T = serde_json::from_slice(&bytes)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let value: T = serde_json::from_slice(&bytes).map_err(|e| {
+            McpError::internal_error(unparseable_body(status, &content_type, &e), None)
+        })?;
         let block = ContentBlock::json(&value)?;
         Ok(CallToolResult::success(vec![block]))
     } else {
@@ -480,10 +558,12 @@ async fn respond_paginated(resp: reqwest::Response) -> Result<CallToolResult, Mc
         .get("X-Total-Count")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
+    let content_type = content_type(&resp);
     let bytes = resp.bytes().await.map_err(unreachable_error)?;
     if status.is_success() {
-        let items: Vec<ItemDto> = serde_json::from_slice(&bytes)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let items: Vec<ItemDto> = serde_json::from_slice(&bytes).map_err(|e| {
+            McpError::internal_error(unparseable_body(status, &content_type, &e), None)
+        })?;
         // Falls back to the page length rather than failing the whole call
         // if the header is ever missing/malformed — a caller still gets a
         // correct, if unconfirmed-total, result instead of an opaque error.
@@ -554,7 +634,7 @@ impl DocketMcp {
         };
         let resp = self
             .http
-            .post(format!("{}/workers", self.base_url))
+            .post(api_url(&self.base_url, &["workers"]))
             .json(&serde_json::json!({ "id": id, "topics": p.topics }))
             .send()
             .await
@@ -575,7 +655,7 @@ impl DocketMcp {
         };
         let resp = self
             .http
-            .get(format!("{}/workers/{}", self.base_url, id))
+            .get(api_url(&self.base_url, &["workers", &id]))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -589,7 +669,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .post(format!("{}/items", self.base_url))
+            .post(api_url(&self.base_url, &["items"]))
             .json(&p)
             .send()
             .await
@@ -598,7 +678,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-awaiting-my-approval OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss (see docket-works#35). Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss (see docket-works#35). Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item"
     )]
     async fn list_items(
         &self,
@@ -611,7 +691,7 @@ impl DocketMcp {
         let expand_related = p.expand_related.map(|b| b.to_string());
         let resp = self
             .http
-            .get(format!("{}/items", self.base_url))
+            .get(api_url(&self.base_url, &["items"]))
             .query(&[
                 ("topic", p.topic.as_deref()),
                 ("state", p.state.as_deref()),
@@ -692,7 +772,7 @@ impl DocketMcp {
         }
         let resp = self
             .http
-            .get(format!("{}/items", self.base_url))
+            .get(api_url(&self.base_url, &["items"]))
             .query(&query_pairs)
             .send()
             .await
@@ -722,11 +802,20 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Submit a claimed item as done, moving it to resolved for the requester to approve. worker_id may be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Hand a claimed item back to the requester — claimed -> resolved. This is \
+            the ONLY transition that moves turn to the requester, and it means \"the assignee \
+            can't take this further, the requester decides what happens next\" — which covers \
+            finished work AND work waiting on an answer only the requester has. Submit in both \
+            cases: an item you leave in claimed while you wait for an answer is invisible to \
+            every query the requester runs (mine surfaces items assigned to them, resolved items \
+            they filed, and unclaimed items in their topics — never one you are holding), so the \
+            question sits unread in the thread. Put the question in reason; the requester answers \
+            with reject_item, which hands the turn back to you with their answer attached. \
+            worker_id may be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn submit_item(
         &self,
-        Parameters(p): Parameters<ClaimOrSubmitParams>,
+        Parameters(p): Parameters<SubmitParams>,
     ) -> Result<CallToolResult, McpError> {
         let worker_id = match resolve_identity(p.worker_id, docket_worker_id(), "worker_id") {
             Ok(id) => id,
@@ -735,7 +824,7 @@ impl DocketMcp {
         let resp = self
             .http
             .post(items_url(&self.base_url, &p.item_id, &["submit"]))
-            .json(&serde_json::json!({ "worker_id": worker_id }))
+            .json(&serde_json::json!({ "worker_id": worker_id, "reason": p.reason }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -745,8 +834,8 @@ impl DocketMcp {
     #[tool(
         description = "Approve a resolved item as the requester, closing it with resolution=done. \
             If the item has a requester set, author must match it or the call fails — use \
-            set_item_requester to correct a drifted identity. author may be omitted if this \
-            session's DOCKET_WORKER_ID is set"
+            set_item_requester to correct a drifted identity — correct it, never retry under \
+            the wrong spelling. author may be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn approve_item(
         &self,
@@ -768,8 +857,10 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Reject a resolved item, sending it back to the assignee for rework. \
-            Requires a reason, recorded as a comment atomically with the state change. If the \
+        description = "Hand a resolved item back to the assignee — resolved -> claimed. \
+            Rework is one use; ANSWERING a question the assignee submitted is an equally normal \
+            one, since reason is what carries the answer. Requires a reason, recorded as a \
+            comment atomically with the state change. If the \
             item has a requester set, author must match it or the call fails — use \
             set_item_requester to correct a drifted identity. author may be omitted if this \
             session's DOCKET_WORKER_ID is set"
@@ -920,20 +1011,30 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Set requester on an item that doesn't have one yet — the one way to \
-            correct an item filed before a requester identity was available, or one a \
-            migration left blank. State-independent (works on a closed item too — this \
-            corrects metadata, it isn't a workflow transition). Does not cover assignee/turn \
-            or title/body/topic; those have no edit path yet."
+        description = "Correct an item's requester — whether it has one already or not. Covers \
+            both an item filed before a requester identity was available (or left blank by a \
+            migration) and an identity that drifted afterwards: a typo, a renamed repo, or two \
+            consumers spelling the same identity differently. That second case is what \
+            approve_item/reject_item point here for when their requester match fails — correct \
+            the item, do not impersonate the wrong spelling. State-independent (works on a \
+            closed item too — this corrects metadata, it isn't a workflow transition) and \
+            idempotent (setting the value it already has changes nothing). A real change is \
+            recorded as a comment naming the old and new value. Does not cover assignee/turn or \
+            title/body/topic; those have no edit path yet. author may be omitted if this \
+            session's DOCKET_WORKER_ID is set"
     )]
     async fn set_item_requester(
         &self,
         Parameters(p): Parameters<SetRequesterParams>,
     ) -> Result<CallToolResult, McpError> {
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
         let resp = self
             .http
             .patch(items_url(&self.base_url, &p.item_id, &[]))
-            .json(&serde_json::json!({ "requester": p.requester }))
+            .json(&serde_json::json!({ "requester": p.requester, "author": author }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -983,7 +1084,7 @@ impl DocketMcp {
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .get(format!("{}/tags", self.base_url))
+            .get(api_url(&self.base_url, &["tags"]))
             .query(&[("topic", p.topic.as_deref())])
             .send()
             .await
@@ -997,7 +1098,7 @@ impl DocketMcp {
     async fn list_topics(&self) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
-            .get(format!("{}/topics", self.base_url))
+            .get(api_url(&self.base_url, &["topics"]))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -1114,7 +1215,7 @@ mod tests {
         let client = reqwest::Client::new();
         for _ in 0..50 {
             if client
-                .get(format!("{}/items", process.base_url))
+                .get(api_url(&process.base_url, &["items"]))
                 .send()
                 .await
                 .is_ok()
@@ -1219,9 +1320,10 @@ mod tests {
         assert_eq!(field(&claimed, "state"), "claimed");
 
         let submitted = server
-            .submit_item(Parameters(ClaimOrSubmitParams {
+            .submit_item(Parameters(SubmitParams {
                 item_id: item_id.clone(),
                 worker_id: Some("w1".to_string()),
+                reason: None,
             }))
             .await
             .unwrap();
@@ -1280,9 +1382,10 @@ mod tests {
             .await
             .unwrap();
         server
-            .submit_item(Parameters(ClaimOrSubmitParams {
+            .submit_item(Parameters(SubmitParams {
                 item_id: item_id.clone(),
                 worker_id: Some("w1".to_string()),
+                reason: None,
             }))
             .await
             .unwrap();
@@ -1299,9 +1402,10 @@ mod tests {
         assert_eq!(json_value(&rejected)["open"], serde_json::json!(true));
 
         server
-            .submit_item(Parameters(ClaimOrSubmitParams {
+            .submit_item(Parameters(SubmitParams {
                 item_id: item_id.clone(),
                 worker_id: Some("w1".to_string()),
+                reason: None,
             }))
             .await
             .unwrap();
@@ -2039,6 +2143,7 @@ mod tests {
             .set_item_requester(Parameters(SetRequesterParams {
                 item_id: item_id.clone(),
                 requester: "backfilled-reporter".to_string(),
+                author: Some("acme/fixer".to_string()),
             }))
             .await
             .unwrap();
@@ -2071,17 +2176,196 @@ mod tests {
 
         let rejected = server
             .set_item_requester(Parameters(SetRequesterParams {
-                item_id,
+                item_id: item_id.clone(),
                 requester: "   ".to_string(),
+                author: Some("acme/fixer".to_string()),
             }))
             .await
             .unwrap();
         assert_eq!(rejected.is_error, Some(true));
+
+        // The other half of what this tool is for: repairing a requester that
+        // is already set. The tool used to describe itself as covering only
+        // the blank case, which is what sent a reader looking for a primitive
+        // that already existed (docket-works#37).
+        let repaired = server
+            .set_item_requester(Parameters(SetRequesterParams {
+                item_id: item_id.clone(),
+                requester: "Backfilled-Reporter".to_string(),
+                author: Some("acme/fixer".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(repaired.is_error, Some(true));
+        assert_eq!(json_value(&repaired)["requester"], "Backfilled-Reporter");
+
+        let comments = server
+            .list_comments(Parameters(ItemIdParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+        let rendered = text_of(&comments);
+        assert!(
+            rendered.contains("requester: backfilled-reporter -> Backfilled-Reporter"),
+            "correction must be recorded in the thread, got: {rendered}"
+        );
+    }
+
+    /// Pins the encoding contract itself, independently of docket-core.
+    ///
+    /// The end-to-end tests here run against a core built from this same
+    /// workspace, so they would also pass on core's fix alone — but this crate
+    /// talks to whatever core a machine is pointed at, which can be an older
+    /// deployment that still answers a mis-shaped path with `200 text/html`.
+    /// Encoding the segment on the way out is what makes the request correct
+    /// regardless (docket-works#36).
+    #[test]
+    fn api_url_encodes_a_path_segment_rather_than_splitting_it() {
+        assert_eq!(
+            api_url("http://127.0.0.1:8420", &["workers", "iyulab/docket-works"]).as_str(),
+            "http://127.0.0.1:8420/workers/iyulab%2Fdocket-works"
+        );
+        // An item's `seq` alias arrives as `#142`; unencoded, `#` would make
+        // the rest a URL fragment and the path just `/items/`.
+        assert_eq!(
+            items_url("http://127.0.0.1:8420", "#142", &["claim"]).as_str(),
+            "http://127.0.0.1:8420/items/%23142/claim"
+        );
+    }
+
+    /// The question-and-answer round trip ADR-0010's 2026-09-08 update makes
+    /// explicit — and specifically the visibility claim behind it.
+    ///
+    /// An assignee that needs a requester decision must submit rather than sit
+    /// on `claimed`, because `claimed` is the one state no query of the
+    /// requester's reaches: `mine` matches items assigned to *them*, `resolved`
+    /// items they filed, and unclaimed items in their topics. This asserts the
+    /// gap directly — the item is absent from the requester's `mine` while the
+    /// assignee holds it, and present the moment it is handed back — so the
+    /// reasoning stays checkable instead of living only in prose
+    /// (docket-works#39).
+    #[tokio::test]
+    async fn a_question_reaches_the_requester_only_after_submit() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-question-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("question.db");
+        let core = spawn_core(18440, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/thing".to_string(),
+                title: "t".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/filer".to_string()),
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: item_id.clone(),
+                worker_id: Some("acme/worker".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let mine = |who: &str| {
+            let server = &server;
+            let who = who.to_string();
+            async move {
+                server
+                    .list_items(Parameters(ListItemsParams {
+                        topic: None,
+                        state: None,
+                        assignee: None,
+                        requester: None,
+                        topic_scope: None,
+                        mine: Some(who),
+                        archived: None,
+                        limit: None,
+                        offset: None,
+                        summary: None,
+                        order: None,
+                        expand_related: None,
+                    }))
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Held by the assignee: invisible to the requester. This is why
+        // parking a question in `claimed` loses it.
+        let held = mine("acme/filer").await;
+        assert_eq!(json_value(&held)["total"], 0);
+
+        let submitted = server
+            .submit_item(Parameters(SubmitParams {
+                item_id: item_id.clone(),
+                worker_id: Some("acme/worker".to_string()),
+                reason: Some("which of the two schemas should this follow?".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&submitted, "state"), "resolved");
+        assert_eq!(json_value(&submitted)["turn"], "requester");
+
+        // Handed back: now it is in front of the requester, question and all.
+        let waiting = mine("acme/filer").await;
+        assert_eq!(json_value(&waiting)["total"], 1);
+        assert_eq!(json_value(&waiting)["items"][0]["id"], item_id);
+
+        let comments = server
+            .list_comments(Parameters(ItemIdParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            text_of(&comments).contains("which of the two schemas should this follow?"),
+            "the question travels with the transition, got: {}",
+            text_of(&comments)
+        );
+
+        // The answer comes back through `reject_item` — a turn handoff here,
+        // not a verdict on the work.
+        let answered = server
+            .reject_item(Parameters(ReasonedParams {
+                item_id: item_id.clone(),
+                author: Some("acme/filer".to_string()),
+                reason: "the first one".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(field(&answered, "state"), "claimed");
+        assert_eq!(json_value(&answered)["turn"], "assignee");
+        assert_eq!(json_value(&answered)["resolution"], serde_json::Value::Null);
+
+        let back_to_worker = mine("acme/worker").await;
+        assert_eq!(json_value(&back_to_worker)["total"], 1);
     }
 
     /// `get_worker` is the only positive-confirmation path for registration
     /// — round-trips a real registration and 404s a never-registered id,
     /// per docs/usage.md's read/write not-found asymmetry.
+    ///
+    /// The fixture ids are deliberately `org/repo` shaped, which is the only
+    /// form real callers use and the one that broke: a worker id is the single
+    /// value this crate puts in a *path segment*, so an unencoded `/` made the
+    /// request miss its route and come back as docket-core's console HTML with
+    /// a `200`, for registered and unregistered ids alike
+    /// ([docket-works#36](https://github.com/iyulab/docket-works/issues/36)).
+    /// A slash-free id can't reproduce that, which is how the earlier version
+    /// of this very test passed against a tool that never worked. Registering
+    /// then reading back is what proves the segment round-trips: `api_url`
+    /// encodes the `/` and axum's `Path` extractor decodes it.
     #[tokio::test]
     async fn get_worker_confirms_registration_and_404s_when_unknown() {
         let dir =
@@ -2096,29 +2380,32 @@ mod tests {
 
         server
             .register_worker(Parameters(RegisterWorkerParams {
-                id: Some("w1".to_string()),
-                topics: vec!["iyulab".to_string()],
+                id: Some("acme/widget".to_string()),
+                topics: vec!["acme".to_string()],
             }))
             .await
             .unwrap();
 
         let found = server
             .get_worker(Parameters(GetWorkerParams {
-                id: Some("w1".to_string()),
+                id: Some("acme/widget".to_string()),
             }))
             .await
             .unwrap();
         assert_ne!(found.is_error, Some(true));
-        assert_eq!(json_value(&found)["id"], "w1");
-        assert_eq!(json_value(&found)["topics"][0], "iyulab");
+        assert_eq!(json_value(&found)["id"], "acme/widget");
+        assert_eq!(json_value(&found)["topics"][0], "acme");
 
+        // A never-registered id must be a readable tool error, not a parse
+        // failure the caller can't tell apart from a broken transport.
         let missing = server
             .get_worker(Parameters(GetWorkerParams {
-                id: Some("never-registered".to_string()),
+                id: Some("acme/never-registered".to_string()),
             }))
             .await
             .unwrap();
         assert_eq!(missing.is_error, Some(true));
+        assert_eq!(text_of(&missing), "not found");
     }
 
     /// `mine` ORs assignee and pending-approval-requester — verifies the

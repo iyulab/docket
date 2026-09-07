@@ -160,15 +160,41 @@ impl Item {
     }
 }
 
+/// Whether two identifiers name the same thing.
+///
+/// `worker id`, `requester`, `assignee` and `topic` exist only to be compared,
+/// and two spellings differing in case are the same identity — see
+/// [ADR-0021](../../../docs/decisions/ADR-0021-case-insensitive-identity.md).
+/// Byte-exact comparison silently split one identity in two, which no query
+/// anywhere reported.
+///
+/// **ASCII only.** `eq_ignore_ascii_case` leaves every non-ASCII codepoint
+/// byte-exact, which covers the `org/repo` convention these follow entirely and
+/// costs no allocation. Every site that compares an identifier routes through
+/// here precisely so widening that to full Unicode stays a one-place change.
+pub fn identity_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// Whether `a` names the same thing as `b`, for optional identifiers — `None`
+/// never matches, the same way a `NULL` column never matched an exact filter.
+pub fn identity_eq_opt(a: Option<&str>, b: &str) -> bool {
+    a.is_some_and(|a| identity_eq(a, b))
+}
+
 /// Prefix match on `/`-separated topic paths: a worker owning `iyulab` is a
 /// candidate for an item in front of `iyulab/docket`, but not `iyulab2/x`.
+/// Case-insensitive on both arms, since a topic is an identifier like any other
+/// (ADR-0021) — no drift has been observed here, this is consistency of the
+/// class rather than a fix for something seen.
 pub fn topic_matches(owned: &str, item_topic: &str) -> bool {
-    if owned == item_topic {
+    if identity_eq(owned, item_topic) {
         return true;
     }
     item_topic
-        .strip_prefix(owned)
-        .is_some_and(|rest| rest.starts_with('/'))
+        .get(..owned.len())
+        .is_some_and(|head| identity_eq(head, owned))
+        && item_topic.as_bytes().get(owned.len()) == Some(&b'/')
 }
 
 /// How `search_items`'s `tags` filter combines multiple tags. See
@@ -301,6 +327,40 @@ pub struct Comment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0021. The fixtures use the two spellings actually observed drifting
+    /// in the running dataset, not invented ones — a `w1`-shaped fixture cannot
+    /// reproduce this class at all.
+    #[test]
+    fn identity_comparison_folds_ascii_case() {
+        assert!(identity_eq("iyulab/Filer", "iyulab/filer"));
+        assert!(identity_eq(
+            "iyu-devstack/Schemorph",
+            "iyu-devstack/schemorph"
+        ));
+        assert!(!identity_eq("iyulab/Filer", "iyulab/Filer2"));
+
+        assert!(identity_eq_opt(Some("iyulab/Filer"), "iyulab/filer"));
+        assert!(!identity_eq_opt(None, "iyulab/filer"));
+    }
+
+    /// Non-ASCII stays byte-exact — the documented limit of `identity_eq`, kept
+    /// visible so widening it later is a deliberate change rather than a
+    /// surprise about what was already covered.
+    #[test]
+    fn identity_comparison_does_not_fold_non_ascii() {
+        assert!(!identity_eq("acme/gr\u{fc}n", "acme/GR\u{dc}N"));
+    }
+
+    #[test]
+    fn topic_prefix_matches_ignoring_case_on_both_arms() {
+        assert!(topic_matches("IYULAB", "iyulab/docket"));
+        assert!(topic_matches("iyulab", "IYULAB/Docket"));
+        assert!(topic_matches("iyulab/Docket", "iyulab/docket"));
+        // Folding must not loosen the segment boundary the prefix match is for.
+        assert!(!topic_matches("IYULAB", "iyulab2/docket"));
+        assert!(!topic_matches("iyulab/Docket", "iyulab/dock"));
+    }
 
     #[test]
     fn topic_prefix_matches_segment_boundary() {

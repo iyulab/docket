@@ -152,6 +152,18 @@ Every current and future `docket-core` caller inherits the guarantee without rei
 item, inconsistent naming convention between two consumers) now hard-fails a legitimate approve —
 mitigated by `set_item_requester` and a clear error message, not eliminated.
 
+> **2026-09-08 note — that mitigation was unreadable for a year.** The behavior above has always
+> worked: `set_item_requester` overwrites a `requester` that is already set, which is the only way
+> the mitigation named here can function. But the tool description and `docs/usage.md` still carried
+> the ADR-0011-era wording, "set requester on an item that doesn't have one yet", so a reader
+> concluded no repair path existed and approved under the wrong spelling instead — the exact
+> workaround this clause exists to prevent
+> ([docket-works#37](https://github.com/iyulab/docket-works/issues/37)). Both texts now describe
+> backfill and repair as the two cases they always were, and a correction records a lifecycle
+> comment naming the old and new value. The lesson generalizes: when an ADR gives an existing
+> primitive a new job, that primitive's tool description and usage row are part of implementing the
+> ADR, not follow-up work.
+
 **Implemented** (2026-08-24, same day as this decision): `storage.rs`'s `approve_item`/
 `reject_item` add the `requester` match with a dedicated `approve_reject_conflict` helper that
 distinguishes wrong-state from wrong-requester in the error message; six new `docket-core` tests
