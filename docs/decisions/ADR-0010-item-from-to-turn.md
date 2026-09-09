@@ -214,3 +214,42 @@ renders raw `state` values and never carried an "awaiting approval" label of its
 If the `reject`-reads-as-verdict cost shows up as a real misreading — someone treating an answered
 question as rejected work in a way that changes what they do — the cheap next step is a distinct
 `resolution`-style label on the transition, not a new `state`. Revisit then, with that evidence.
+
+## 2026-09-09 update — comment does not flip `turn`; that gap is a different fact, not this ADR's
+
+A real production instance (`docket-works` owner, watching the console live) surfaced what looked
+like a regression of the 2026-09-08 fix: `iyulab/FastFind.NET` (assignee) answered all three of
+`iyulab/Filer`'s (requester) questions in a comment, and a comment after that reported the fix
+committed but not yet released — "stays claimed until the release ships". `turn` stayed `assignee`
+through both. Filer has no query that surfaces this: `mine` doesn't match an item the caller neither
+holds nor filed-and-resolved.
+
+**This is not the 2026-09-08 gap recurring.** That gap was an assignee avoiding `submit_item` because
+submitting asserted something false ("done") when the truth was "blocked on your decision" —
+fixed by redefining what `resolved` asserts. Here, the discriminating question is: *at the second
+comment, what should `turn` be?* The assignee still holds real, unfinished work (a release to ship) —
+if `turn` moved to `requester`, it would be on a party with nothing to do while the assignee keeps
+working. `turn = assignee` is correct here, by this ADR's own model, not a bug in it.
+
+What Filer actually lacks is not "whose turn is it" — that answer is already right — but a different
+fact: *a reply exists that I have not read.* Turn is a workflow-ownership field; "unread" is an
+activity-log field. Conflating them is what produces designs like the one below.
+
+**Considered and rejected: make `add_comment` flip `turn` to the other party.** Superficially
+attractive — it would have surfaced Filer's answer immediately. Rejected because it answers the
+*read* question by corrupting the *ownership* question: at the second comment above, this rule would
+move `turn` to `requester` while the assignee is still mid-work, so `mine` would tell Filer it's their
+move when it structurally isn't. There is no threshold or heuristic that fixes this without either
+(a) also inspecting comment content to guess intent — the "tag-archaeology" this ADR already rejected
+once, in worse form, or (b) accepting that turn thrashes on ordinary progress narration. It also adds
+a second, implicit path to a value `submit_item`/`reject_item` already own explicitly — two writers of
+one field is exactly the ambiguity `principles.md`'s simplicity ranking argues against.
+
+**Direction, not decided here:** an activity/event log a worker can poll independently of `turn` —
+`GET /events?for=<worker>&since=<cursor>` per the 2026-09-09 identity-alias design plan's Part 2 —
+answers "what's new since I looked" without touching `state`/`turn` at all, so it does not reintroduce
+the parallel-surfacing problem the 2026-09-08 update rejected: that update rejected a *mine* clause
+standing in for a *correct* `turn`; an event log doesn't stand in for `turn`, it answers a question
+`turn` was never designed to answer. Consistent with P-3 (a worker still pulls the log on its own
+schedule; nothing is pushed or auto-distributed). Design/implementation is its own plan, not this ADR.
+
