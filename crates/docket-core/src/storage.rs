@@ -5,8 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::domain::{
-    Alias, AliasMap, Comment, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder, State,
-    TagCount, TagMatch, TopicCount, Worker,
+    Alias, AliasMap, Comment, Event, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder,
+    State, TagCount, TagMatch, TopicCount, Worker,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -732,6 +732,94 @@ impl Store {
         )?;
         let items: Vec<Item> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         attach_tags(&conn, items).map_err(Into::into)
+    }
+
+    /// Returns events relevant to `for_worker` — its resolved identity
+    /// (folding declared aliases, ADR-0022) as assignee or requester, OR
+    /// the event's item falls under a topic `for_worker` is registered
+    /// for (same jurisdiction test `topic_scope`/`mine` use,
+    /// [`crate::domain::topic_matches_with`]) — mirrors `mine`'s own
+    /// three-way OR, minus the `resolved`-only restriction on the
+    /// requester leg: an event feed's whole point is surfacing activity
+    /// on items the caller doesn't currently hold, so it isn't narrowed
+    /// to "state = resolved" the way `mine`'s snapshot view is.
+    ///
+    /// `since`/the returned cursor is `event_seq_counter` output, always
+    /// the seq **scanned up to**, not the seq of the last *matching* row
+    /// — an unrelated event between two relevant ones must not stall the
+    /// cursor. Errors `NotFound` if `for_worker` isn't registered
+    /// ([`Store::get_worker`]) — an event feed for topic-scope relevance
+    /// is meaningless without a registration to read topics from, unlike
+    /// `mine`/`topic_scope` on `list_items`, which silently return empty
+    /// for an unknown id (this is a deliberate asymmetry: those filters
+    /// are optional narrowing on an otherwise-valid query, this is the
+    /// query's only axis).
+    pub fn list_events(
+        &self,
+        for_worker: &str,
+        since: i64,
+        limit: usize,
+    ) -> Result<(Vec<Event>, i64)> {
+        let aliases = self.alias_map()?;
+        let worker = self.get_worker(for_worker)?;
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT e.seq, e.item_id, e.kind, e.actor, e.created_at,
+                    i.topic, i.requester, i.assignee
+             FROM item_events e JOIN items i ON i.id = e.item_id
+             WHERE e.seq > ?1 ORDER BY e.seq ASC",
+        )?;
+        let mut rows = stmt.query(params![since])?;
+        let mut matched = Vec::new();
+        let mut cursor = since;
+        // Bounds worst-case latency on a long catch-up scan without
+        // silently truncating relevant results below `limit` -- if this
+        // cap is hit before `limit` matches are found, the returned
+        // cursor still reflects real progress and the caller polls again.
+        const MAX_SCANNED: usize = 5_000;
+        let mut scanned = 0usize;
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let item_id: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let actor: String = row.get(3)?;
+            let created_at: i64 = row.get(4)?;
+            let topic: String = row.get(5)?;
+            let requester: Option<String> = row.get(6)?;
+            let assignee: Option<String> = row.get(7)?;
+
+            cursor = seq;
+            scanned += 1;
+
+            let is_stakeholder =
+                crate::domain::identity_eq_opt_with(&aliases, requester.as_deref(), for_worker)
+                    || crate::domain::identity_eq_opt_with(
+                        &aliases,
+                        assignee.as_deref(),
+                        for_worker,
+                    );
+            let is_in_scope = worker
+                .topics
+                .iter()
+                .any(|owned| crate::domain::topic_matches_with(&aliases, owned, &topic));
+
+            if is_stakeholder || is_in_scope {
+                matched.push(Event {
+                    seq,
+                    item_id,
+                    kind,
+                    actor,
+                    created_at,
+                });
+                if matched.len() >= limit {
+                    break;
+                }
+            }
+            if scanned >= MAX_SCANNED {
+                break;
+            }
+        }
+        Ok((matched, cursor))
     }
 
     /// Atomically transitions `open -> claimed` for `worker_id`. Fails with
@@ -2148,6 +2236,152 @@ mod tests {
             )
             .unwrap();
         assert_eq!(item1_count, 5);
+    }
+
+    #[test]
+    fn list_events_matches_assignee_requester_and_topic_scope_like_mine_does() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/bot", &["acme/widget".to_string()])
+            .unwrap();
+        let by_assignee = store
+            .create_item("acme/other-topic", "t1", None, &[], None)
+            .unwrap();
+        store.claim_item(&by_assignee.id, "acme/bot").unwrap();
+        store
+            .add_comment(&by_assignee.id, "acme/someone", "note")
+            .unwrap();
+
+        let by_topic = store
+            .create_item("acme/widget", "t2", None, &[], None)
+            .unwrap();
+
+        let unrelated = store
+            .create_item("acme/other-topic", "t3", None, &[], None)
+            .unwrap();
+
+        let (events, _cursor) = store.list_events("acme/bot", 0, 50).unwrap();
+        let seen_items: std::collections::HashSet<String> =
+            events.iter().map(|e| e.item_id.clone()).collect();
+        assert!(seen_items.contains(&by_assignee.id));
+        assert!(
+            seen_items.contains(&by_topic.id),
+            "open item under registered topic_scope must be seen, mirroring mine's own-topic clause"
+        );
+        assert!(!seen_items.contains(&unrelated.id));
+    }
+
+    #[test]
+    fn list_events_folds_declared_aliases_into_the_worker_group() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/bot", &["acme/widget".to_string()])
+            .unwrap();
+        store.put_alias("bot-old-name", "acme/bot").unwrap();
+        let item = store
+            .create_item("acme/other-topic", "t1", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "acme/bot").unwrap();
+        // Look the events up under the *alias*, not the registered spelling
+        // -- get_worker itself already folds aliases (ADR-0022), so this
+        // proves list_events' NotFound gate also resolves through it rather
+        // than requiring the registration's exact spelling.
+        let (events, _) = store.list_events("bot-old-name", 0, 50).unwrap();
+        assert!(events.iter().any(|e| e.item_id == item.id));
+    }
+
+    #[test]
+    fn list_events_cursor_advances_past_irrelevant_events_without_losing_relevant_ones() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/bot", &["acme/widget".to_string()])
+            .unwrap();
+        let relevant = store
+            .create_item("acme/widget", "mine", None, &[], None)
+            .unwrap();
+        for _ in 0..5 {
+            let noise = store
+                .create_item("acme/other-topic", "noise", None, &[], None)
+                .unwrap();
+            store.claim_item(&noise.id, "acme/someone-else").unwrap();
+        }
+        let (events, cursor) = store.list_events("acme/bot", 0, 50).unwrap();
+        assert!(events.iter().any(|e| e.item_id == relevant.id));
+        let max_seq: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT MAX(seq) FROM item_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cursor, max_seq);
+    }
+
+    #[test]
+    fn list_events_since_the_current_cursor_returns_nothing_new() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/bot", &["acme/widget".to_string()])
+            .unwrap();
+        store
+            .create_item("acme/widget", "t1", None, &[], None)
+            .unwrap();
+        let (_first, cursor) = store.list_events("acme/bot", 0, 50).unwrap();
+        let (second, cursor2) = store.list_events("acme/bot", cursor, 50).unwrap();
+        assert!(second.is_empty());
+        assert_eq!(
+            cursor2, cursor,
+            "polling with no new activity is idempotent"
+        );
+    }
+
+    #[test]
+    fn list_events_unregistered_worker_returns_not_found() {
+        let store = open_test_store();
+        let result = store.list_events("acme/never-registered", 0, 50);
+        assert!(matches!(result, Err(StoreError::NotFound)));
+    }
+
+    /// The MAX_SCANNED safety cap must never lose a relevant event -- it may
+    /// only delay finding it to a later poll. 6,001 events (well past the
+    /// 5,000 cap) with the relevant one last: the first call exhausts the
+    /// cap without matching anything and still advances the cursor; the
+    /// second call, starting from that cursor, finds it.
+    #[test]
+    fn list_events_scan_cap_delays_but_never_loses_a_relevant_event() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/bot", &["acme/widget".to_string()])
+            .unwrap();
+        // create_item alone is enough noise -- one event per item, no
+        // requester/assignee/matching topic, so is_stakeholder and
+        // is_in_scope are both false regardless of claim state. Not
+        // claiming keeps the count at exactly 6,000 noise events (claiming
+        // too would double it to 12,000 and this test's two-poll math
+        // below assumes 6,000 -- ceil(6000 / MAX_SCANNED=5000) = 2 polls).
+        for _ in 0..6_000 {
+            store
+                .create_item("acme/other-topic", "noise", None, &[], None)
+                .unwrap();
+        }
+        let relevant = store
+            .create_item("acme/widget", "mine", None, &[], None)
+            .unwrap();
+
+        let (first, cursor1) = store.list_events("acme/bot", 0, 50).unwrap();
+        assert!(
+            !first.iter().any(|e| e.item_id == relevant.id),
+            "the scan cap must stop before reaching the relevant event on the first call"
+        );
+        assert!(
+            cursor1 > 0,
+            "cursor must still advance even with zero matches"
+        );
+
+        let (second, _cursor2) = store.list_events("acme/bot", cursor1, 50).unwrap();
+        assert!(
+            second.iter().any(|e| e.item_id == relevant.id),
+            "a second poll from the advanced cursor must find the event the cap deferred"
+        );
     }
 
     #[test]
