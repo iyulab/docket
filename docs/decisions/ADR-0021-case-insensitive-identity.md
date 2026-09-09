@@ -135,3 +135,9 @@ gate rather than executed by the change that made it optional.
 
 A non-ASCII identity appearing in any of the four fields (see "Given up"), or evidence that a
 deliberate case distinction between two identities is actually wanted.
+
+## Related
+
+[ADR-0022](ADR-0022-identity-alias.md) generalizes this same seam: case folding is a *fixed* rule
+for when two spellings are the same identity, and ADR-0022 adds a *declared* one, on the same
+comparison primitive and the same four-field identity class.

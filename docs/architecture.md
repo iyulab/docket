@@ -36,6 +36,13 @@ The core knows exactly four concepts.
 - **item** — a single unit of work waiting to be processed. Created in front of a topic; it's fine for it to have no owner at creation time.
 - **claim** — a worker picking up an item to become its owner. **Exclusive** — concurrent claims by multiple workers aren't allowed (single-claim only, settled — [ADR-0002](decisions/ADR-0002-four-layer-architecture.md)).
 
+A `worker id`, `requester`, `assignee`, and `topic` are all one identity class: strings whose only
+job is to say whether two references mean the same thing. Comparison folds two kinds of variation
+before checking equality — case ([ADR-0021](decisions/ADR-0021-case-insensitive-identity.md)) and a
+declared **alias**, a caller-asserted "these two spellings name the same identity"
+([ADR-0022](decisions/ADR-0022-identity-alias.md)). Both fold at comparison time only; storage
+always keeps whichever spelling was actually written.
+
 A `claim` is a pull a worker performs on its own. An admin's "force-assign" is just an entry point at the application/permission layer where the admin triggers that same `claim` on the worker's behalf — the core doesn't need a separate `assign` concept.
 
 ## Item identity
@@ -164,8 +171,11 @@ MCP when a worker can safely call it on its own judgment — reversible, or dest
 something disposable (a claim, a tag). An operation stays HTTP/console-only when it is
 irreversible against durable history, or represents an admin/human value judgment about an
 item's disposition: `remove`, `merge`, `force-close`, `force-approve`, and `delete` all stay
-HTTP-only under this rule; `claim`/`submit`/`approve`/`reject`/`reopen`/`archive`/`block`/`defer`
-are all MCP tools. `force-approve` in particular must stay off MCP — exposing it there would let
+HTTP-only under this rule, as do `PATCH /items/{id}` (correcting an item's `requester` or `topic`
+is a judgment call about metadata, not a worker acting on its own item) and the alias endpoints
+`POST`/`GET`/`DELETE /aliases` (declaring an alias is a judgment about identity that changes who
+may `approve`/`reject` items under it — see [ADR-0022](decisions/ADR-0022-identity-alias.md)).
+`claim`/`submit`/`approve`/`reject`/`reopen`/`archive`/`block`/`defer` are all MCP tools. `force-approve` in particular must stay off MCP — exposing it there would let
 a worker approve its own (or another item's) completion without ever reaching `resolved`, exactly
 the shortcut the `claim → submit → approve` split exists to prevent (see
 [ADR-0017](decisions/ADR-0017-item-force-approve.md)). `block`/`defer` are MCP tools precisely

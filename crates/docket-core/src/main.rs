@@ -307,17 +307,22 @@ struct ListItemsQuery {
     topic: Option<String>,
     state: Option<String>,
     /// A worker id — narrows the list to items whose `assignee` is exactly
-    /// this worker. See
+    /// this worker, folding both case ([ADR-0021](../../../docs/decisions/ADR-0021-case-insensitive-identity.md))
+    /// and any declared alias of it ([ADR-0022](../../../docs/decisions/ADR-0022-identity-alias.md))
+    /// into the same identity before comparing. See
     /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     assignee: Option<String>,
-    /// Exact-match on `requester` — symmetric to `assignee`, above.
+    /// Exact-match on `requester` — symmetric to `assignee`, above, folding
+    /// case and declared aliases the same way.
     requester: Option<String>,
     /// A registered worker's id — narrows the list to items under any topic
     /// that worker is registered for (prefix match, see
-    /// [`docket_core::domain::topic_matches`]) — this is a topic-jurisdiction
+    /// [`docket_core::domain::topic_matches_with`]) — this is a topic-jurisdiction
     /// filter, unrelated to who currently holds any given item (that's
     /// `assignee`, above). This is the "discover it via list" step of the M1
     /// completion criteria. Was `owned_by`, split and renamed by ADR-0010.
+    /// Both the worker's own topics and the item's topic fold case and
+    /// declared aliases before the prefix comparison runs (ADR-0021/ADR-0022).
     topic_scope: Option<String>,
     /// A worker id — narrows the list to items that worker actually holds a
     /// live stake in right now, OR should be looking at because nobody has
@@ -332,7 +337,10 @@ struct ListItemsQuery {
     /// separate queries and merge themselves — see
     /// [docket-works#35](https://github.com/iyulab/docket-works/issues/35).
     /// ANDs with every other filter on this struct, same as `assignee`/
-    /// `requester` do individually.
+    /// `requester` do individually. Every identity comparison here — the
+    /// `assignee` match, the `requester` match, and the topic-jurisdiction
+    /// test — folds case and declared aliases the same way `assignee`/
+    /// `requester`/`topic_scope` do individually (ADR-0021/ADR-0022).
     mine: Option<String>,
     /// Excludes archived items by default (`None`/`Some(false)`); `Some(true)`
     /// returns only archived items. See ADR-0013.

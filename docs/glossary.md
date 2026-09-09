@@ -17,12 +17,13 @@ This is the discipline that keeps layer boundaries from leaking. If a term from 
 | budget | token budget |
 | tag | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
 | comment | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
+| alias | (none — an opaque `(alias, canonical)` identifier pair declaring two spellings the same identity, not translated; see [ADR-0022](decisions/ADR-0022-identity-alias.md)) |
 
 Concepts in the right-hand column get translated into the left-hand column at layer 3 before reaching the core. Wherever that translation happens is the layer boundary.
 
 ## Term notes
 
-- **`topic`**: not a JMS-style topic (pub-sub, fan-out to every subscriber). It means Kafka's topic + consumer group (competing consumers, only one gets the message). docket's items are picked up by exactly one worker, which matches the latter.
+- **`topic`**: not a JMS-style topic (pub-sub, fan-out to every subscriber). It means Kafka's topic + consumer group (competing consumers, only one gets the message). docket's items are picked up by exactly one worker, which matches the latter. Two topic spellings declared the same identity via an `alias` fold together everywhere a topic is matched or listed — `list_topics` reports the folded count under the canonical spelling with the variants that folded into it — without either spelling's items being rewritten. See [ADR-0022](decisions/ADR-0022-identity-alias.md).
 - **`claim` vs `assign`**: `claim` is a worker picking up work on its own (pull). `assign` (application-layer term, "force-assign" in the admin console) is an admin triggering that on someone's behalf (push). The core primitive is `claim` alone — `assign` is the application layer's entry point for triggering that same `claim` under admin authority.
 - **`state` vs `resolution`**: `state` is the workflow stage (`open/claimed/resolved/closed`); `resolution` is why it closed (`done/duplicate/wontfix/invalid`). Splitting the two follows Bugzilla/Jira practice — one fewer state, and each admin action gets its own clear meaning.
 - **`task` vs `question`**: `task` is an item with a state machine (stays on the board). `question` fails immediately with no state machine (does not stay on the board). See [vision.md](vision.md) S3.

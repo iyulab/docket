@@ -125,6 +125,12 @@ already exists and the response returns that row's spelling, which is how a sess
 drifted learns the canonical one. ASCII only; tags are deliberately *not* folded (they stay opaque
 to core). See [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md).
 
+**Beyond case, an admin can *declare* two spellings the same identity** — a rename, a short form,
+an org migration — via `POST /aliases` (below). A declared alias folds the same way case does,
+including in `approve_item`/`reject_item`'s requester check, but only once declared: an undeclared
+lookalike is still refused, so this never widens who may act on an item by accident. See
+[ADR-0022](decisions/ADR-0022-identity-alias.md).
+
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id?`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5. `id` **resolvable-required** at this tool layer (cycle-58, same pattern as `claim_item` above) — omit it to use this session's `DOCKET_WORKER_ID`; a tool-level error only if neither is present |
@@ -200,13 +206,52 @@ the same kind of MCP tool — `get_worker`, table above — it's the only way to
 worker is registered, since every list-style filter answers an unregistered id the same as a
 registered one with no matches (see the read/write not-found note below).
 
-`PATCH /items/{id} {"requester": "…"}` sets `requester` on an item that already exists — the only
-field this covers so far, and the only way to give an item a requester after creation (`requester` is
-normally set once at creation, ADR-0010/ADR-0011). Meant for backfilling items filed before a
-requester identity was available, not routine editing — there's no MCP tool for it (same admin-only
-reasoning as the admin operations below) and no way yet to edit `title`/`body`/`topic` after
-creation. State-independent (works on a closed item too — it corrects metadata, not a workflow
-transition). Rejects a blank `requester` with `400`, a missing item with `404`.
+`PATCH /items/{id} {"requester": "…", "topic": "…", "author": "…"}` corrects `requester` and/or
+`topic` on an item that already exists — at least one of the two is required, both may be given
+together. Neither has an MCP tool (same admin-only reasoning as the admin operations below).
+State-independent for both (works on a closed item too — this corrects metadata, not a workflow
+transition). Rejects a blank value with `400`, a missing item with `404`.
+
+- **`requester`** is the only way to give an item a requester after creation (`requester` is
+  normally set once at creation, ADR-0010/ADR-0011) — see `set_item_requester`'s row above for the
+  backfill/repair distinction.
+- **`topic`** corrects an item filed against the wrong topic — the item-level counterpart to
+  declaring an alias (below): an alias is for a spelling people actually use across many items,
+  declaring one for a single mistyped item would make that typo permanent schema, so this is the
+  one-off fix instead. There is still no way to edit `title`/`body` after creation.
+
+When both are given, they are applied **in sequence — `requester` first, then `topic` — not as one
+transaction**: if the `topic` half then fails validation, the `requester` half has already been
+committed, the response is a flat `400` naming which field failed, and a `GET` on the item is the
+only way to confirm what landed. Each successful field change is recorded as its own lifecycle
+comment naming the old and new value.
+
+**Declaring an alias** says two spellings name the same identity — a rename, a short form, an org
+migration — not something a folding rule can derive on its own the way case is folded automatically
+([ADR-0021](decisions/ADR-0021-case-insensitive-identity.md)). Like `PATCH /items/{id}`, this has
+no MCP tool: it changes who may `approve_item`/`reject_item` on every item under that identity, an
+admin judgment, not a worker decision (see [ADR-0022](decisions/ADR-0022-identity-alias.md)'s
+MCP-exposure note). Once declared, the effect is retroactive and immediate — no migration, nothing
+to backfill — because every comparison (`assignee`/`requester`/`topic_scope`/`mine`, `list_topics`,
+and the `approve`/`reject` requester check) resolves through the alias table at the moment it runs.
+
+| HTTP | Notes |
+|---|---|
+| `POST /aliases {"alias","canonical"}` | Declares `alias` the same identity as `canonical`. Idempotent for re-declaring the same pair. `409` if `alias` is already declared pointing elsewhere, or if either side of the pair would form a chain (an alias can't itself be a canonical, and a canonical can't itself be an alias — resolution is always one hop). `400` for a blank or self-referential pair |
+| `GET /aliases?canonical=` | Lists declared aliases, newest first; `canonical` narrows to one identity's variants (folds case, like every identifier comparison) |
+| `DELETE /aliases?alias=` | Withdraws a declaration — not destructive to any item, it just stops folding into the canonical. Takes `alias` as a **query parameter, not a path segment**, since an alias is `org/repo`-shaped and an unencoded `/` in a path segment misses the route entirely (the same failure `GET /workers/{id}` shipped with, see the `get_worker` row above). `404` if not declared |
+
+**`GET /topics/candidates?topic=`** flags a topic that is probably mistargeted — a typo, or a topic
+worth declaring an alias for. Two conditions, both exact, no similarity scoring: the given `topic`
+is **unserved** (no registered worker's topics match it), and some other topic that already has
+items **is** served and shares its last `/`-delimited segment. Always advisory — sharing a last
+segment is common and legitimate (`acme/widget` and `other-org/widget` are unrelated), so nothing
+here rejects or rewrites anything; it only surfaces a candidate for `set_item_topic` (one-off fix)
+or `put_alias` (standing declaration) to act on. Returns `{"unserved": bool, "candidates": [topic,
+...]}`. `create_item` calls this automatically and, when it fires, attaches the result as a
+`topic_advisory` string in the tool result — there is no separate MCP tool for it. See
+[ADR-0022](decisions/ADR-0022-identity-alias.md) for why exact segment matching is the right amount
+of guessing and edit distance is not.
 
 Four more HTTP-only operations close an item early, bypassing the normal
 `claimed → resolved → closed` path — they're console/admin actions (`docket-console` exposes them as
@@ -329,7 +374,14 @@ This is the pattern an agent repeats:
    see `topic_matches` in [glossary.md](glossary.md) and
    [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md)).
    Re-registering under a differently-cased id updates the registration you already have and returns
-   its canonical spelling — it does not create a second worker.
+   its canonical spelling — it does not create a second worker. **A session responsible for several
+   repositories should register every topic it owns, not just the one it happened to start in** —
+   `register_worker` takes `topics` as an array, and `topic_scope`/`mine` (step 2) then cover all of
+   them in one call instead of one per repository. `docket-cc topic --all` (§6) is what produces that
+   full list for an umbrella-and-submodules tree — pass its output straight into `topics[]`. Passing
+   only the topic of the repository you happened to run `topic` from is not a missing feature, it's
+   an easy-to-miss step: the under-registered session's `topic_scope`/`mine` queries simply return
+   fewer rows than they should, silently, for every topic left out.
 2. **Check what you need to act on**: `list_items(mine=<your id>)` — one call covers everything:
    an item claimed in a prior session, one waiting on your approval as requester, *and* any `open`
    (unclaimed) item under a topic you're registered for. That third case was added by
