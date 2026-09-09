@@ -200,21 +200,24 @@ case-insensitive, fuzzy, or backed by a real registered-worker reference rather 
 compare — that would be a schema-level change to how `requester` is stored, not just this
 invariant's check.
 
-> **2026-09-09 update — the match is equality of identity, not of spelling**
-> ([ADR-0022](ADR-0022-identity-alias.md)). This ADR's original text and the case-insensitivity
-> extension above ([ADR-0021](ADR-0021-case-insensitive-identity.md)) both address the requester
-> match resolving *automatic* spelling variation (case). ADR-0022 goes one step further: a
-> caller can now *declare* two spellings the same identity (a rename, a short form, an org
-> migration) that no folding rule could derive on its own, and `approve_item`/`reject_item` widen
-> to accept a declared alias of the item's `requester` the same way they already accept a
-> case-drifted spelling of it.
->
-> This widening is **opt-in, not automatic** — the risk this ADR exists to close was one worker's
-> session self-approving under a spelling nobody declared equivalent, and that risk is unchanged
-> for any two spellings without a `put_alias` declaration between them. `approve_still_refuses_an_
-> undeclared_identity` and `submit_still_refuses_an_undeclared_identity` pin exactly this: two
-> similarly-named but undeclared identities (`acme/gadget` vs `widget`) still conflict, with no
-> special-casing for how close the strings look. Declaring the alias is what changes the outcome,
-> and it is the same admin-level act ADR-0022 keeps off MCP for exactly this reason — widening who
-> may approve an item is a deliberate decision, never a side effect of a query matching more
-> loosely.
+## 2026-09-09 update — the match is equality of identity, not of spelling
+
+[ADR-0022](ADR-0022-identity-alias.md). This ADR's original text and the case-insensitivity
+extension above ([ADR-0021](ADR-0021-case-insensitive-identity.md)) both address the requester
+match resolving *automatic* spelling variation (case). ADR-0022 goes one step further: a
+caller can now *declare* two spellings the same identity (a rename, a short form, an org
+migration) that no folding rule could derive on its own, and `approve_item`/`reject_item` widen
+to accept a declared alias of the item's `requester` the same way they already accept a
+case-drifted spelling of it.
+
+This widening is **opt-in, not automatic** — the risk this ADR exists to close was one worker's
+session self-approving under a spelling nobody declared equivalent, and that risk is unchanged
+for any two spellings without a `put_alias` declaration between them.
+`approve_still_refuses_an_undeclared_identity` pins exactly this on the requester side this ADR
+is about: two similarly-named but undeclared identities (`acme/gadget` requester vs `widget`
+caller) still conflict, with no special-casing for how close the strings look.
+`submit_still_refuses_an_undeclared_identity` pins the same guarantee on `submit_item`'s
+*assignee* check — a separate predicate on the other side of the handshake, not a second test of
+this one. Declaring the alias is what changes the outcome, and it is the same admin-level act
+ADR-0022 keeps off MCP for exactly this reason — widening who may approve an item is a deliberate
+decision, never a side effect of a query matching more loosely.

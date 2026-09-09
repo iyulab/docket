@@ -1092,8 +1092,9 @@ impl DocketMcp {
             the item, do not impersonate the wrong spelling. State-independent (works on a \
             closed item too — this corrects metadata, it isn't a workflow transition) and \
             idempotent (setting the value it already has changes nothing). A real change is \
-            recorded as a comment naming the old and new value. Does not cover assignee/turn or \
-            title/body/topic; those have no edit path yet. author may be omitted if this \
+            recorded as a comment naming the old and new value. Does not cover assignee/turn/ \
+            title/body. topic can also be corrected on the same PATCH /items/{id} request but \
+            has no MCP tool of its own (docs/usage.md). author may be omitted if this \
             session's DOCKET_WORKER_ID is set"
     )]
     async fn set_item_requester(

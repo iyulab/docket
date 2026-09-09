@@ -106,8 +106,9 @@ Full decision rationale: [ADR-0003](decisions/ADR-0003-item-state-schema.md).
 ```
 requester: string | null   # who this item is being worked for. Optional, set at creation —
                              # or after the fact via `PATCH /items/{id} {"requester": "…"}`
-                             # (admin-only, no MCP tool, for backfilling items filed before a
-                             # requester was known).
+                             # (also exposed as the `set_item_requester` MCP tool), for
+                             # backfilling items filed before a requester was known, or
+                             # repairing one that drifted.
 assignee:  string | null   # the current holder (was `owner`) — set by claim, checked by submit.
 turn: requester | assignee | null   # derived from `state`, never stored — see below.
 ```
@@ -171,10 +172,11 @@ MCP when a worker can safely call it on its own judgment — reversible, or dest
 something disposable (a claim, a tag). An operation stays HTTP/console-only when it is
 irreversible against durable history, or represents an admin/human value judgment about an
 item's disposition: `remove`, `merge`, `force-close`, `force-approve`, and `delete` all stay
-HTTP-only under this rule, as do `PATCH /items/{id}` (correcting an item's `requester` or `topic`
-is a judgment call about metadata, not a worker acting on its own item) and the alias endpoints
-`POST`/`GET`/`DELETE /aliases` (declaring an alias is a judgment about identity that changes who
-may `approve`/`reject` items under it — see [ADR-0022](decisions/ADR-0022-identity-alias.md)).
+HTTP-only under this rule. `PATCH /items/{id}` splits by field: `requester` is exposed
+(`set_item_requester`), while `topic` and the alias endpoints (`POST`/`GET`/`DELETE /aliases`)
+stay HTTP-only — declaring an alias, in particular, is a judgment about identity that changes who
+may `approve`/`reject` every item under it, not metadata on one item (see
+[ADR-0022](decisions/ADR-0022-identity-alias.md)).
 `claim`/`submit`/`approve`/`reject`/`reopen`/`archive`/`block`/`defer` are all MCP tools. `force-approve` in particular must stay off MCP — exposing it there would let
 a worker approve its own (or another item's) completion without ever reaching `resolved`, exactly
 the shortcut the `claim → submit → approve` split exists to prevent (see

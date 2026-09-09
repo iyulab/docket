@@ -96,19 +96,28 @@ files, with no separate decision ever having been made to grant that.
 This relation — one identity legitimately acting on another's behalf, without the two being the
 same identity — is out of scope for this mechanism, deliberately: it is a delegation concept, and
 declaring a delegation as an alias would corrupt every other place aliasing is trusted to mean "one
-identity, however spelled." **Re-open trigger**: an actual observed failure where a legitimate
-caller cannot approve or query against an item filed by a distinct but related identity (e.g. a
-separate clone of the same repository), evidenced concretely rather than anticipated — at which
-point the right primitive is very likely a distinct delegation concept, not a widened alias.
+identity, however spelled." **Re-open trigger**: an actual observed case where one identity
+genuinely needs standing authority over a distinct identity's items and no existing mechanism
+covers it — evidenced concretely, not anticipated. No such case has been observed yet, and this ADR
+deliberately does not invent one to fill the gap; a vague-but-honest trigger is worth more than a
+precise-but-wrong example (a same-identity case like two clones of one repository, for instance,
+is already covered by aliasing itself and would not belong here). At that point the right primitive
+is very likely a distinct delegation concept, not a widened alias.
 
 ### MCP exclusion
 
-`POST /aliases`, `GET /aliases`, and `DELETE /aliases` have **no MCP tool**. Declaring an alias
-changes who may `approve_item`/`reject_item` on every item under that identity — an admin judgment
-about identity and disposition, not something a worker decides for itself in the course of doing
-its own work. This is the same reasoning [architecture.md](../architecture.md)'s MCP-exposure rule
-already applies to `PATCH /items/{id}`: an operation that reversibly affects a worker's own claim
-or tags is safe to expose; one that changes who holds authority over items it doesn't own is not.
+`POST /aliases`, `GET /aliases`, and `DELETE /aliases` have **no MCP tool**. The precedent this
+follows is `force-approve`
+([architecture.md](../architecture.md)'s MCP-exposure rule): `force-approve` stays off MCP because
+exposing it would let a worker grant itself (or another item) an approval it never earned by
+reaching `resolved` the normal way. Declaring an alias is the same shape of risk, one level up —
+instead of one item's disposition, it changes who counts as the `requester` for every item filed
+under that identity, past and future, on a server with no authentication yet to limit who can call
+it. That is a standing grant of approval authority across a whole class of items, decided once and
+applied everywhere, which is exactly the kind of admin judgment a worker should not be able to make
+for itself in the course of doing its own work — not merely "changes metadata," which `PATCH
+/items/{id}`'s `requester` field also does and *is* exposed (`set_item_requester`) because
+correcting one item's own field carries none of that blast radius.
 
 ### The mistargeting detector's segment-equality rule
 
@@ -120,13 +129,22 @@ no edit distance, no fuzzy match.
 This is not a violation of the core's rule that a topic is opaque
 ([principles.md](../principles.md) P-1, [architecture.md](../architecture.md) "Domain model"): the
 core already knows a topic is a `/`-separated path and that segment boundaries are meaningful —
-that knowledge is what prefix matching (`topic_matches`) has always relied on. Segment equality
-uses exactly that existing knowledge to compare one well-defined substring against another; it
-adds nothing the core didn't already know about the shape of a topic. Edit distance is a different
-kind of knowledge — it would compare topics as arbitrary strings with no regard for where their
-structure actually is, which is knowledge the core has deliberately chosen not to have. That is why
-edit-distance guessing stays out of scope here rather than being an obvious next step: it isn't a
-finer-grained version of the same rule, it's a different, unprincipled one.
+that knowledge is what prefix matching (`topic_matches`) has always relied on. Comparing one
+well-defined segment against another uses only that existing knowledge; it adds nothing the core
+didn't already know about the shape of a topic.
+
+Choosing the **last** segment specifically, rather than any segment or the whole string, is a
+narrower claim than "the core knows segments exist" alone justifies — it is informed by the
+`org/repo` convention this codebase's topics happen to follow, where the last segment is the part
+most likely to be reused verbatim across a rename or a scope change. What earns that choice a place
+in the core, rather than pushing it up to the application layer, is that it stays exact rather than
+fuzzy: comparing the last segment for equality is a single well-defined test with no scoring
+involved, and matching against *any* segment (not just the last) would be considerably noisier —
+common leaf-level names collide constantly, but a full segment match at a specific, fixed position
+is a much rarer coincidence. Edit distance is a different kind of knowledge entirely — it would
+compare topics as arbitrary strings with no regard for where their structure actually is. That is
+why edit-distance guessing stays out of scope here rather than being an obvious next step: it isn't
+a finer-grained version of the same rule, it's a different, unprincipled one.
 
 The detector is always advisory. Two topics legitimately sharing a last segment (`acme/widget` and
 `other-org/widget`) are a normal, unremarkable occurrence, so nothing here rejects, rewrites, or
