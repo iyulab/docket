@@ -381,8 +381,15 @@ pub struct TagCount {
 /// [ADR-0014](../../../docs/decisions/ADR-0014-list-search-pagination-and-list-topics.md).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopicCount {
+    /// The canonical spelling. Variants declared in `identity_aliases` fold
+    /// into this row rather than standing as rows of their own (ADR-0022).
     pub topic: String,
     pub count: i64,
+    /// Which declared spellings folded into this row. Empty for a topic with
+    /// no aliases. Exposed so an owner can see what was folded — without it,
+    /// a folded variant would vanish from the vocabulary view with no trace.
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 /// A declared spelling variant of one identity — `alias` names the same thing

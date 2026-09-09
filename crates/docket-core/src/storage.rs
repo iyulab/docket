@@ -1166,15 +1166,48 @@ impl Store {
     /// `list_items`/`search_items`; unlike those, there is no `archived`
     /// toggle here — a topic's existence in the vocabulary doesn't depend on
     /// whether every item under it happens to be archived.
+    ///
+    /// Declared aliases fold into their canonical row (ADR-0022), so this is
+    /// also the discovery surface for a mistargeted spelling: a variant that
+    /// nobody has declared yet still stands as its own row, which is the
+    /// signal that it needs either an alias or a correction.
     pub fn list_topics(&self) -> Result<Vec<TopicCount>> {
+        let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT topic, COUNT(*) FROM items WHERE archived_at IS NULL
-             GROUP BY topic ORDER BY COUNT(*) DESC, topic ASC",
+            "SELECT topic, COUNT(*) FROM items WHERE archived_at IS NULL GROUP BY topic",
         )?;
-        let rows = stmt.query_map([], topic_count_from_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+        let raw: Vec<TopicCount> = stmt
+            .query_map([], topic_count_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        drop(conn);
+
+        let mut folded: Vec<TopicCount> = Vec::new();
+        for row in raw {
+            let canonical = aliases.resolve(&row.topic).to_string();
+            match folded
+                .iter_mut()
+                .find(|t| crate::domain::identity_eq(&t.topic, &canonical))
+            {
+                Some(existing) => existing.count += row.count,
+                None => folded.push(TopicCount {
+                    topic: canonical,
+                    count: row.count,
+                    aliases: Vec::new(),
+                }),
+            }
+        }
+        for row in &mut folded {
+            row.aliases = aliases
+                .group_of(&row.topic)
+                .into_iter()
+                .filter(|s| !crate::domain::identity_eq(s, &row.topic))
+                .collect();
+            row.aliases.sort();
+        }
+        folded.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.topic.cmp(&b.topic)));
+        Ok(folded)
     }
 
     /// A comment is always new activity (no idempotency to consider, unlike
@@ -1640,6 +1673,7 @@ fn topic_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TopicCount> {
     Ok(TopicCount {
         topic: row.get(0)?,
         count: row.get(1)?,
+        aliases: Vec::new(),
     })
 }
 
@@ -3284,6 +3318,34 @@ mod tests {
         let topics = store.list_topics().unwrap();
         assert_eq!(topics.len(), 1);
         assert_eq!(topics[0].topic, "iyulab/node-packages");
+    }
+
+    #[test]
+    fn list_topics_folds_variants_into_the_canonical_row() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        store.create_item("widget", "a", None, &[], None).unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], None)
+            .unwrap();
+        store
+            .create_item("acme/gadget", "c", None, &[], None)
+            .unwrap();
+
+        let topics = store.list_topics().unwrap();
+        let widget = topics.iter().find(|t| t.topic == "acme/widget").unwrap();
+        assert_eq!(widget.count, 2, "counts sum across every declared spelling");
+        assert_eq!(
+            widget.aliases,
+            vec!["widget"],
+            "the owner can see what folded in"
+        );
+        assert!(
+            !topics.iter().any(|t| t.topic == "widget"),
+            "a folded variant no longer stands as its own row"
+        );
+        let gadget = topics.iter().find(|t| t.topic == "acme/gadget").unwrap();
+        assert!(gadget.aliases.is_empty());
     }
 
     #[test]

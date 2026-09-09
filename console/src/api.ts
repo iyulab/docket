@@ -58,6 +58,7 @@ export interface TagCount {
 export interface TopicCount {
   topic: string
   count: number
+  aliases?: string[]
 }
 
 // `docket-core` now defaults `/items` to a bounded page (ADR-0014) instead
