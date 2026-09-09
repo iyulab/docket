@@ -8,7 +8,7 @@ Covers only Type-1 (hard-to-reverse) decisions. Everything else is deliberately 
 
 | # | Name | Responsibility | Knows its consumer? |
 |---|---|---|---|
-| 1 | `docket-core` | Headless work queue. Worker/topic/item/claim/stall/budget. HTTP API + real-time stream | No |
+| 1 | `docket-core` | Headless work queue. Worker/topic/item/claim/stall/budget. HTTP API, poll-only | No |
 | 2 | `docket-mcp` | Exposes the core over MCP. Active (pull) surface | AI in general |
 | 3 | `docket-cc` | Claude Code adapter. Local daemon, hook endpoints, file representation, identifier mapping. Passive (push) surface | Claude Code |
 | 4 | `docket-console` | Admin UI. A pure client of the core API | Human |
