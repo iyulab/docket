@@ -1249,7 +1249,13 @@ impl Store {
     /// Whether some registered worker's topics match `topic` — the same
     /// served-ness `topic_candidates` needs, extracted so both share one
     /// definition instead of two that could drift apart.
+    ///
+    /// Trims the same way `topic_candidates` does: both are called from the
+    /// same handler on the same raw query parameter, and if only one of them
+    /// normalized whitespace, a padded topic would make `unserved` and
+    /// `candidates` disagree about the very same input.
     pub fn topic_is_served(&self, topic: &str) -> Result<bool> {
+        let topic = topic.trim();
         let aliases = self.alias_map()?;
         let workers = self.list_workers()?;
         Ok(Self::served_by(&aliases, &workers, topic))
@@ -1280,10 +1286,23 @@ impl Store {
             return Ok(Vec::new());
         }
         let wanted = last_segment(aliases.resolve(topic));
+        if wanted.is_empty() {
+            // A degenerate topic (e.g. "/", reachable since `create_item`
+            // only rejects blank topics) has no real last segment to share.
+            // Without this, two such topics would match each other purely
+            // because both collapse to the same empty string, which is not
+            // a shared identity signal -- it's the absence of one.
+            return Ok(Vec::new());
+        }
         let mut candidates: Vec<String> = self
             .list_topics()?
             .into_iter()
             .map(|t| t.topic)
+            // Defensive: a candidate that resolves to `topic`'s own identity
+            // would already have made `topic` itself served, so the early
+            // `served_by` return above normally catches this first. Kept so
+            // the no-self-candidate invariant doesn't depend on that
+            // ordering staying true.
             .filter(|t| !crate::domain::identity_eq(aliases.resolve(t), aliases.resolve(topic)))
             .filter(|t| crate::domain::identity_eq(last_segment(t), wanted))
             .filter(|t| Self::served_by(&aliases, &workers, t))
@@ -1760,9 +1779,16 @@ fn topic_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TopicCount> {
     })
 }
 
-/// The part after the last `/` — the whole string when there is no separator.
+/// The part after the last `/` — the whole string when there is no
+/// separator. Trailing slashes are stripped first, so `"acme/widget/"`
+/// yields `"widget"`, not the empty string a naive `rsplit` would give
+/// (which would make it match any other trailing-slash topic).  A topic
+/// that is nothing but slashes (or empty) has no real segment to strip down
+/// to and correctly yields `""` — callers must not treat that as a segment
+/// worth matching on (see the guard in `topic_candidates`).
 fn last_segment(topic: &str) -> &str {
-    topic.rsplit('/').next().unwrap_or(topic)
+    let trimmed = topic.trim_end_matches('/');
+    trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
 #[cfg(test)]
@@ -3559,6 +3585,97 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "an unserved lookalike is no better a target than the one given"
+        );
+    }
+
+    #[test]
+    fn topic_candidates_strips_a_trailing_slash_before_matching_the_last_segment() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        let candidates = store.topic_candidates("other-org/widget/").unwrap();
+        assert_eq!(candidates, vec!["acme/widget"]);
+    }
+
+    /// A trailing slash must not collapse two topics with genuinely
+    /// different content down to the same empty "last segment" -- "gadget"
+    /// and "widget" stay distinct regardless of a stray trailing `/`.
+    #[test]
+    fn topic_candidates_does_not_match_two_unrelated_trailing_slash_topics() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget/", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget/", &["acme/widget/".to_string()])
+            .unwrap();
+        assert!(
+            store
+                .topic_candidates("other-org/gadget/")
+                .unwrap()
+                .is_empty(),
+            "a trailing slash must not collapse distinct last segments to the same empty string"
+        );
+    }
+
+    /// A degenerate topic with no real last segment (built entirely of `/`
+    /// characters) must not match another equally degenerate topic just
+    /// because both collapse to an empty segment -- neither has a segment
+    /// to share, so an empty match is not a signal.
+    #[test]
+    fn topic_candidates_is_empty_when_the_query_has_no_real_last_segment() {
+        let store = open_test_store();
+        store.create_item("///", "served", None, &[], None).unwrap();
+        store
+            .register_worker("acme/scout", &["///".to_string()])
+            .unwrap();
+        assert!(
+            store.topic_candidates("//").unwrap().is_empty(),
+            "an empty last segment must not match another empty last segment"
+        );
+    }
+
+    /// `topic_is_served` must normalize whitespace the same way
+    /// `topic_candidates` does -- otherwise the two fields of the
+    /// `/topics/candidates` response can disagree about the same input.
+    #[test]
+    fn topic_is_served_trims_the_same_as_topic_candidates() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        assert!(store.topic_is_served(" acme/widget ").unwrap());
+        assert_eq!(
+            store.topic_is_served(" acme/widget ").unwrap(),
+            store.topic_is_served("acme/widget").unwrap(),
+        );
+    }
+
+    /// An alias and its canonical are one identity -- proposing one as a
+    /// candidate for the other would be nonsense advice, not a
+    /// mistargeting signal. Pins the observable outcome, not which internal
+    /// guard produces it (here, the early `served_by` return in
+    /// `topic_candidates`, not its self-exclusion filter).
+    #[test]
+    fn topic_candidates_excludes_a_declared_alias_of_the_query_itself() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        assert!(
+            store.topic_candidates("widget").unwrap().is_empty(),
+            "an alias of an already-served topic is not a mistake, just another spelling of it"
         );
     }
 
