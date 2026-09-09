@@ -112,6 +112,24 @@ struct CreateItemParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ListEventsParams {
+    /// The worker whose activity feed to read. Omit to use this session's
+    /// `DOCKET_WORKER_ID` (see `resolve_identity`), same fallback every
+    /// other worker-identity argument gets.
+    #[serde(default)]
+    for_worker: Option<String>,
+    /// The cursor from a previous call's result, or omit/0 to start from
+    /// the beginning. Always advance to the returned `cursor`, even when
+    /// `events` came back empty -- that still means "caught up to here",
+    /// not "nothing happened yet".
+    #[serde(default)]
+    since: Option<i64>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListItemsParams {
     /// Topic filter — matches one topic, case-insensitively like every
     /// identifier comparison (ADR-0021).
@@ -671,6 +689,33 @@ impl DocketMcp {
             .await
             .map_err(unreachable_error)?;
         respond::<WorkerDto>(resp).await
+    }
+
+    #[tool(
+        description = "What's new since I last looked -- an activity feed independent of turn/state. Unlike mine (a snapshot of what you hold right now), this surfaces comments and transitions on items you're a stakeholder on (assignee/requester, folding declared aliases) or that fall under a topic you're registered for, even while turn stays with the other party -- e.g. an assignee answering your question in a comment without submitting (see ADR-0010's 2026-09-09 update). Always advance since to the returned cursor on your next call, even when events came back empty -- that still means \"caught up to here\", not \"nothing happened yet\". for_worker may be omitted if this session's DOCKET_WORKER_ID is set"
+    )]
+    async fn list_events(
+        &self,
+        Parameters(p): Parameters<ListEventsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let for_worker = match resolve_identity(p.for_worker, docket_worker_id(), "for_worker") {
+            Ok(id) => id,
+            Err(error) => return Ok(error),
+        };
+        let since = p.since.unwrap_or(0).to_string();
+        let limit = p.limit.map(|l| l.to_string());
+        let resp = self
+            .http
+            .get(api_url(&self.base_url, &["events"]))
+            .query(&[
+                ("for", Some(for_worker.as_str())),
+                ("since", Some(since.as_str())),
+                ("limit", limit.as_deref()),
+            ])
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<serde_json::Value>(resp).await
     }
 
     #[tool(
@@ -1321,6 +1366,94 @@ mod tests {
     /// once it goes back to `null` after a reopen) go through this instead.
     fn json_value(result: &CallToolResult) -> serde_json::Value {
         serde_json::from_str(text_of(result)).expect("tool result is JSON")
+    }
+
+    /// The ADR-0010 09-09 scenario this feature exists for: an assignee
+    /// answers a requester's question in a comment without submitting --
+    /// turn correctly stays with the assignee (real, unfinished work), and
+    /// list_events is what lets the requester see the answer anyway.
+    #[tokio::test]
+    async fn list_events_surfaces_a_comment_without_turn_moving() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("events.db");
+        let core = spawn_core(18442, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        // list_events requires the caller to be a registered worker (its
+        // topic-jurisdiction leg has no meaning otherwise) -- unlike mine/
+        // topic_scope on list_items, which tolerate an unknown id as an
+        // empty result. See Store::list_events' doc comment.
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("acme/req".to_string()),
+                topics: vec![],
+            }))
+            .await
+            .unwrap();
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "question".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/req".to_string()),
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: item_id.clone(),
+                worker_id: Some("acme/assignee".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        server
+            .add_comment(Parameters(AddCommentParams {
+                item_id: item_id.clone(),
+                body: "answered your question".to_string(),
+                author: Some("acme/assignee".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let first = server
+            .list_events(Parameters(ListEventsParams {
+                for_worker: Some("acme/req".to_string()),
+                since: Some(0),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(first.is_error, Some(true));
+        let body = json_value(&first);
+        let events = body["events"].as_array().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["item_id"] == item_id && e["kind"] == "comment"),
+            "requester must see the comment event even though turn stayed with assignee"
+        );
+        let cursor = body["cursor"].as_i64().unwrap();
+        assert!(cursor > 0);
+
+        let second = server
+            .list_events(Parameters(ListEventsParams {
+                for_worker: Some("acme/req".to_string()),
+                since: Some(cursor),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body2 = json_value(&second);
+        assert!(body2["events"].as_array().unwrap().is_empty());
     }
 
     /// The M1 lifecycle (open -> claimed -> resolved -> closed), exercised
