@@ -669,7 +669,9 @@ impl Store {
     }
 
     /// Atomically transitions `claimed -> resolved` — handing the turn to the
-    /// requester. Only the current assignee may submit.
+    /// requester. Only the current assignee may submit — that identity plus
+    /// any declared alias of it (ADR-0022); an undeclared lookalike is still
+    /// refused.
     ///
     /// `resolved` means "the assignee cannot take this further; the requester
     /// decides what happens next", which covers finished work *and* work that
@@ -696,10 +698,13 @@ impl Store {
         // ADR-0019, as amended by ADR-0022: the assignee check is equality of
         // *identity*, not of spelling. Only a declared alias widens it -- an
         // undeclared lookalike is still a different party and still conflicts.
+        // `?1`/`?2` must stay numbered ahead of the group list below -- SQLite
+        // assigns the anonymous `?`s that follow the next indices in order, so
+        // any parameter appended after the predicate would collide with them.
         let sql = format!(
             "UPDATE items SET state = 'resolved', updated_at = ?1
-             WHERE id = ?2 AND state = 'claimed' AND assignee COLLATE NOCASE IN ({})",
-            placeholders(group.len())
+             WHERE id = ?2 AND state = 'claimed' AND {}",
+            identity_group_predicate("assignee", group.len())
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now), Box::new(id.to_string())];
         args.extend(
@@ -728,9 +733,11 @@ impl Store {
     /// separate `conn.transaction()` needed, since no other thread can
     /// interleave while this lock is held). See ADR-0012.
     ///
-    /// Only the item's `requester` may reject (mirrors `submit_item`'s
-    /// `assignee` match on the other side of the handshake) — unless
-    /// `requester` is unset, in which case there is no party to violate. See
+    /// Only the item's `requester` — that identity plus any declared alias of
+    /// it (ADR-0022); an undeclared lookalike is still refused — may reject
+    /// (mirrors `submit_item`'s `assignee` match on the other side of the
+    /// handshake), unless `requester` is unset, in which case there is no
+    /// party to violate. See
     /// [ADR-0019](../../../docs/decisions/ADR-0019-approve-reject-requester-match.md).
     pub fn reject_item(&self, id: &str, author: &str, reason: &str) -> Result<Item> {
         let reason = reason.trim();
@@ -751,8 +758,8 @@ impl Store {
         let sql = format!(
             "UPDATE items SET state = 'claimed', updated_at = ?1
              WHERE id = ?2 AND state = 'resolved'
-               AND (requester IS NULL OR requester COLLATE NOCASE IN ({}))",
-            placeholders(group.len())
+               AND (requester IS NULL OR {})",
+            identity_group_predicate("requester", group.len())
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now), Box::new(id.to_string())];
         args.extend(
@@ -812,9 +819,11 @@ impl Store {
     /// — the requester's approval. `author` is recorded as an atomic
     /// comment (traceability — see ADR-0012's "author" discussion).
     ///
-    /// Only the item's `requester` may approve (mirrors `submit_item`'s
-    /// `assignee` match on the other side of the handshake) — unless
-    /// `requester` is unset, in which case there is no party to violate. See
+    /// Only the item's `requester` — that identity plus any declared alias of
+    /// it (ADR-0022); an undeclared lookalike is still refused — may approve
+    /// (mirrors `submit_item`'s `assignee` match on the other side of the
+    /// handshake), unless `requester` is unset, in which case there is no
+    /// party to violate. See
     /// [ADR-0019](../../../docs/decisions/ADR-0019-approve-reject-requester-match.md).
     pub fn approve_item(&self, id: &str, author: &str) -> Result<Item> {
         let aliases = self.alias_map()?;
@@ -829,8 +838,8 @@ impl Store {
         let sql = format!(
             "UPDATE items SET state = 'closed', resolution = 'done', updated_at = ?1
              WHERE id = ?2 AND state = 'resolved'
-               AND (requester IS NULL OR requester COLLATE NOCASE IN ({}))",
-            placeholders(group.len())
+               AND (requester IS NULL OR {})",
+            identity_group_predicate("requester", group.len())
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now), Box::new(id.to_string())];
         args.extend(
@@ -1420,7 +1429,8 @@ fn existing_state_conflict(conn: &Connection, id: &str, op: &str) -> Result<Stor
 /// wrong state, or a `requester` mismatch (ADR-0019) — that a caller needs to
 /// tell apart: a wrong-state conflict is a stale-state retry, a requester
 /// mismatch is an authorization violation (or a drifted identity fixable via
-/// `set_item_requester`).
+/// `set_item_requester`, or, since ADR-0022, by declaring an alias between the
+/// two spellings).
 fn approve_reject_conflict(
     conn: &Connection,
     id: &str,
@@ -1439,7 +1449,7 @@ fn approve_reject_conflict(
                 Ok(StoreError::Conflict(format!(
                     "cannot {op}: caller `{author}` does not match item's requester `{requester}` \
                      — if this is a drifted identity rather than a genuine wrong-party call, use \
-                     set_item_requester to correct it"
+                     set_item_requester to correct it, or declare an alias between the two spellings"
                 )))
             }
         }
@@ -1550,13 +1560,29 @@ fn placeholders(n: usize) -> String {
     std::iter::repeat_n("?", n).collect::<Vec<_>>().join(", ")
 }
 
+/// `<column> COLLATE NOCASE IN (?, ?, …)`, one placeholder per spelling — the
+/// fixed-shape counterpart to [`push_identity_group_filter`] for a SQL string
+/// built with `format!` instead of accumulated onto a `WHERE 1=1` base.
+///
+/// The collation goes on the **left operand**, same reasoning as
+/// `push_identity_group_filter`'s doc comment: SQLite attaches `COLLATE` to
+/// the expression it follows, so writing it inside the parens instead would
+/// apply it to a list element and leave the comparison case-sensitive —
+/// silently undoing group matching for whichever column uses it. Both
+/// functions encode this rule so it exists in exactly two places, not once
+/// per call site.
+fn identity_group_predicate(column: &str, n: usize) -> String {
+    format!("{column} COLLATE NOCASE IN ({})", placeholders(n))
+}
+
 /// Appends ` AND <column> COLLATE NOCASE IN (?, ?, …)` and pushes one argument
 /// per spelling in the identity's group.
 ///
 /// The collation goes on the **left operand**. SQLite attaches `COLLATE` to the
 /// expression it follows, so `x IN (? COLLATE NOCASE)` would apply it to the
 /// list element and leave the comparison case-sensitive -- silently undoing
-/// ADR-0021 for every column converted this way.
+/// ADR-0021 for every column converted this way. See [`identity_group_predicate`]
+/// for the same rule applied to a fixed-shape (non-accumulating) SQL string.
 fn push_identity_group_filter(
     sql: &mut String,
     args: &mut Vec<Box<dyn rusqlite::ToSql>>,
@@ -2661,6 +2687,23 @@ mod tests {
         store.claim_item(&item.id, "acme/gadget").unwrap();
         let submitted = store.submit_item(&item.id, "gadget", None).unwrap();
         assert_eq!(submitted.state, State::Resolved);
+    }
+
+    /// The assignee side of the same opt-in guarantee as
+    /// `approve_still_refuses_an_undeclared_identity`: without a declared
+    /// alias, `gadget` and `acme/gadget` are two identities and the assignee
+    /// check still refuses.
+    #[test]
+    fn submit_still_refuses_an_undeclared_identity() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/gadget", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "acme/gadget").unwrap();
+        assert!(matches!(
+            store.submit_item(&item.id, "gadget", None),
+            Err(StoreError::Conflict(_))
+        ));
     }
 
     /// `register_worker` is an every-session upsert, so a drifted id must land
