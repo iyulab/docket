@@ -45,6 +45,17 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Check relative documentation links
+        # rustdoc validates intra-doc links but never relative *file* links,
+        # and nothing validates them inside docs/ — five ADR links shipped at
+        # the wrong directory depth before this step existed.
+        run: bash .github/scripts/check-doc-links.sh
+
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
   console:
     runs-on: ubuntu-latest
     steps:
