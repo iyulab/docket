@@ -458,6 +458,11 @@ struct TagCountDto {
 struct TopicCountDto {
     topic: String,
     count: i64,
+    /// Which declared spellings folded into this row (ADR-0022). Defaulted
+    /// so an older `docket-core` that doesn't send this field still
+    /// deserializes, rather than failing the whole `list_topics` call.
+    #[serde(default)]
+    aliases: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -619,6 +624,32 @@ fn with_author(mut body: serde_json::Value, author: String) -> serde_json::Value
     body
 }
 
+/// Inserts a `topic_advisory` key into a successful tool result's JSON
+/// object — never appended as trailing prose, which would break every
+/// caller (including this crate's own `field()`/`json_value()` test
+/// helpers) that parses a tool result as one JSON document. Falls back to
+/// the unmodified `result` if the content block isn't the JSON object this
+/// is meant to annotate, rather than panicking or losing the created item.
+fn with_topic_advisory(result: CallToolResult, note: String) -> CallToolResult {
+    let Some(ContentBlock::Text(text)) = result.content.first() else {
+        return result;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text.text) else {
+        return result;
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return result;
+    };
+    obj.insert(
+        "topic_advisory".to_string(),
+        serde_json::Value::String(note),
+    );
+    match ContentBlock::json(&value) {
+        Ok(block) => CallToolResult::success(vec![block]),
+        Err(_) => result,
+    }
+}
+
 #[tool_router(server_handler)]
 impl DocketMcp {
     #[tool(
@@ -674,7 +705,49 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        let result = respond::<ItemDto>(resp).await?;
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        // Advisory, never fatal: a failed advisory lookup must not turn a
+        // successful create into a tool error. The item exists either way,
+        // so the worst case is the caller simply isn't told.
+        let Ok(Some(note)) = self.fetch_topic_advisory(&p.topic).await else {
+            return Ok(result);
+        };
+        Ok(with_topic_advisory(result, note))
+    }
+
+    /// `GET /topics/candidates` — one sentence when the topic looks
+    /// mistargeted, `None` when it does not. Returns `Err` only for a
+    /// transport failure the caller is expected to ignore.
+    async fn fetch_topic_advisory(&self, topic: &str) -> anyhow::Result<Option<String>> {
+        #[derive(serde::Deserialize)]
+        struct Advisory {
+            unserved: bool,
+            candidates: Vec<String>,
+        }
+        let resp: Advisory = self
+            .http
+            .get(api_url(&self.base_url, &["topics", "candidates"]))
+            .query(&[("topic", topic)])
+            .send()
+            .await?
+            .json()
+            .await?;
+        if !resp.unserved || resp.candidates.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "No registered worker serves topic `{topic}`. Served topics sharing its last \
+             path segment: {}. If one of those was the intended target, an admin can declare \
+             an alias (POST /aliases) or correct this item's topic (PATCH /items/{{id}}).",
+            resp.candidates
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
     }
 
     #[tool(
@@ -2014,6 +2087,60 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["topic"], "iyulab/docket");
         assert_eq!(list[0]["count"], 2);
+    }
+
+    /// A worker that files against a plausible-but-wrong org gets told so in
+    /// the tool result it already reads, rather than having to know to ask.
+    #[tokio::test]
+    async fn create_item_tool_appends_a_mistargeting_advisory() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("mistarget.db");
+        let core = spawn_core(18441, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        // A served topic with items, so there is something to be suggested.
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("iyulab/docket".to_string()),
+                topics: vec!["iyulab/docket".to_string()],
+            }))
+            .await
+            .unwrap();
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "served".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let mistargeted = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "other-org/docket".to_string(),
+                title: "mistargeted".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = text_of(&mistargeted);
+        assert!(
+            text.contains("mistargeted") || text.contains("\"title\""),
+            "the item is still created"
+        );
+        assert!(
+            text.contains("iyulab/docket"),
+            "the served topic sharing the last segment is named: {text}"
+        );
     }
 
     /// A caller can page through a filtered result and trust `total`
