@@ -282,7 +282,7 @@ struct CreateItemRequest {
     #[serde(default)]
     tags: Vec<String>,
     /// Who this item is being worked for — see
-    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
+    /// [ADR-0011](../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     #[serde(default)]
     requester: Option<String>,
 }
@@ -310,7 +310,7 @@ struct ListItemsQuery {
     /// this worker, folding both case ([ADR-0021](../../../docs/decisions/ADR-0021-case-insensitive-identity.md))
     /// and any declared alias of it ([ADR-0022](../../../docs/decisions/ADR-0022-identity-alias.md))
     /// into the same identity before comparing. See
-    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
+    /// [ADR-0011](../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     assignee: Option<String>,
     /// Exact-match on `requester` — symmetric to `assignee`, above, folding
     /// case and declared aliases the same way.
@@ -1053,7 +1053,7 @@ mod tests {
 
     /// `requester` round-trips from creation, `assignee` is set by claim,
     /// and `turn` tracks each state transition — see
-    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
+    /// [ADR-0011](../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     #[tokio::test]
     async fn requester_assignee_turn_track_the_lifecycle_over_http() {
         let app = test_app();
@@ -1120,7 +1120,7 @@ mod tests {
     /// `assignee` matches exactly against the item's assignee field;
     /// `topic_scope` (the old `owned_by` behavior) matches by the worker's
     /// registered topics instead — the two must stay independent, see
-    /// [ADR-0011](../../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
+    /// [ADR-0011](../../../docs/decisions/ADR-0011-requester-assignee-naming.md).
     #[tokio::test]
     async fn assignee_filter_matches_assignee_not_topic_scope() {
         let app = test_app();

@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     std::process::exit(code);
 }
 
-/// Everything after argv[0] — e.g. `docket-cc-launcher hook` on the command
+/// Everything after `argv[0]` — e.g. `docket-cc-launcher hook` on the command
 /// line becomes `["hook"]`, which `resolve_and_run` forwards unchanged to
 /// the resolved `docket-cc` binary so its `hook` subcommand still fires when
 /// invoked through this launcher.

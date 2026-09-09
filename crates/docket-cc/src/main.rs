@@ -8,7 +8,7 @@
 //! `docket-core`'s HTTP/JSON contract (docs/architecture.md "Four layers").
 //!
 //! The projection root lives outside any repo, per
-//! [ADR-0008](../../docs/decisions/ADR-0008-file-representation-location.md);
+//! [ADR-0008](../../../docs/decisions/ADR-0008-file-representation-location.md);
 //! layout mirrors the topic path (`<root>/<topic>/...`). Each item's `body`
 //! becomes the file's markdown body (docs/glossary.md: `body` <-> `.md
 //! file`) with the rest of the item as frontmatter.
