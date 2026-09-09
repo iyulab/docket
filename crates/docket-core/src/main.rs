@@ -586,6 +586,11 @@ struct UpdateItemRequest {
     author: Option<String>,
 }
 
+/// When both `requester` and `topic` are given, they are applied in
+/// sequence — `requester` first, then `topic` — not as a single transaction
+/// spanning both: if `topic` then fails validation, the `requester` half has
+/// already been committed and the caller gets a flat `400` with no mention
+/// of that; a `GET` on the item is the only way to see it landed.
 async fn update_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
