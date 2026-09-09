@@ -687,15 +687,28 @@ impl Store {
     /// optional string in this crate gets.
     pub fn submit_item(&self, id: &str, worker_id: &str, reason: Option<&str>) -> Result<Item> {
         let reason = reason.map(str::trim).filter(|r| !r.is_empty());
+        let aliases = self.alias_map()?;
+        let group = aliases.group_of(worker_id);
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
         let id = resolved.as_str();
         let now = now_millis();
-        let affected = conn.execute(
+        // ADR-0019, as amended by ADR-0022: the assignee check is equality of
+        // *identity*, not of spelling. Only a declared alias widens it -- an
+        // undeclared lookalike is still a different party and still conflicts.
+        let sql = format!(
             "UPDATE items SET state = 'resolved', updated_at = ?1
-             WHERE id = ?2 AND state = 'claimed' AND assignee = ?3 COLLATE NOCASE",
-            params![now, id, worker_id],
-        )?;
+             WHERE id = ?2 AND state = 'claimed' AND assignee COLLATE NOCASE IN ({})",
+            placeholders(group.len())
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now), Box::new(id.to_string())];
+        args.extend(
+            group
+                .iter()
+                .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>),
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let affected = conn.execute(&sql, rusqlite::params_from_iter(param_refs))?;
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "submit")?);
         }
@@ -726,15 +739,29 @@ impl Store {
                 "reason must not be blank".to_string(),
             ));
         }
+        let aliases = self.alias_map()?;
+        let group = aliases.group_of(author);
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
         let id = resolved.as_str();
         let now = now_millis();
-        let affected = conn.execute(
+        // ADR-0019, as amended by ADR-0022: the requester check is equality of
+        // *identity*, not of spelling. Only a declared alias widens it -- an
+        // undeclared lookalike is still a different party and still conflicts.
+        let sql = format!(
             "UPDATE items SET state = 'claimed', updated_at = ?1
-             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3 COLLATE NOCASE)",
-            params![now, id, author],
-        )?;
+             WHERE id = ?2 AND state = 'resolved'
+               AND (requester IS NULL OR requester COLLATE NOCASE IN ({}))",
+            placeholders(group.len())
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now), Box::new(id.to_string())];
+        args.extend(
+            group
+                .iter()
+                .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>),
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let affected = conn.execute(&sql, rusqlite::params_from_iter(param_refs))?;
         if affected == 0 {
             return Err(approve_reject_conflict(&conn, id, "reject", author)?);
         }
@@ -790,15 +817,29 @@ impl Store {
     /// `requester` is unset, in which case there is no party to violate. See
     /// [ADR-0019](../../../docs/decisions/ADR-0019-approve-reject-requester-match.md).
     pub fn approve_item(&self, id: &str, author: &str) -> Result<Item> {
+        let aliases = self.alias_map()?;
+        let group = aliases.group_of(author);
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
         let id = resolved.as_str();
         let now = now_millis();
-        let affected = conn.execute(
+        // ADR-0019, as amended by ADR-0022: the requester check is equality of
+        // *identity*, not of spelling. Only a declared alias widens it -- an
+        // undeclared lookalike is still a different party and still conflicts.
+        let sql = format!(
             "UPDATE items SET state = 'closed', resolution = 'done', updated_at = ?1
-             WHERE id = ?2 AND state = 'resolved' AND (requester IS NULL OR requester = ?3 COLLATE NOCASE)",
-            params![now, id, author],
-        )?;
+             WHERE id = ?2 AND state = 'resolved'
+               AND (requester IS NULL OR requester COLLATE NOCASE IN ({}))",
+            placeholders(group.len())
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now), Box::new(id.to_string())];
+        args.extend(
+            group
+                .iter()
+                .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>),
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let affected = conn.execute(&sql, rusqlite::params_from_iter(param_refs))?;
         if affected == 0 {
             return Err(approve_reject_conflict(&conn, id, "approve", author)?);
         }
@@ -1501,6 +1542,12 @@ fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
         archived_at: row.get(10)?,
         seq: row.get(11)?,
     })
+}
+
+/// `?, ?, …` with one placeholder per spelling — for a fixed-shape SQL string
+/// that can't use the incremental `push_identity_group_filter`.
+fn placeholders(n: usize) -> String {
+    std::iter::repeat_n("?", n).collect::<Vec<_>>().join(", ")
 }
 
 /// Appends ` AND <column> COLLATE NOCASE IN (?, ?, …)` and pushes one argument
@@ -2556,6 +2603,66 @@ mod tests {
         );
     }
 
+    /// ADR-0019, as amended by ADR-0022: the requester check is equality of
+    /// identity, not of spelling, so a declared alias of the requester may
+    /// approve on its behalf.
+    #[test]
+    fn approve_accepts_a_declared_variant_of_the_requester() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        let item = store
+            .create_item("acme/gadget", "t", None, &[], Some("widget"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/gadget").unwrap();
+        store.submit_item(&item.id, "acme/gadget", None).unwrap();
+        let approved = store.approve_item(&item.id, "acme/widget").unwrap();
+        assert_eq!(approved.state, State::Closed);
+    }
+
+    /// The authority change must be opt-in. Without a declaration these are two
+    /// identities and the requester check still refuses -- otherwise every
+    /// similarly-named repo would silently gain approval rights.
+    #[test]
+    fn approve_still_refuses_an_undeclared_identity() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/gadget", "t", None, &[], Some("widget"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/gadget").unwrap();
+        store.submit_item(&item.id, "acme/gadget", None).unwrap();
+        assert!(matches!(
+            store.approve_item(&item.id, "acme/widget"),
+            Err(StoreError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn reject_accepts_a_declared_variant_of_the_requester() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        let item = store
+            .create_item("acme/gadget", "t", None, &[], Some("acme/widget"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/gadget").unwrap();
+        store.submit_item(&item.id, "acme/gadget", None).unwrap();
+        let rejected = store
+            .reject_item(&item.id, "widget", "needs the empty case")
+            .unwrap();
+        assert_eq!(rejected.state, State::Claimed);
+    }
+
+    #[test]
+    fn submit_accepts_a_declared_variant_of_the_assignee() {
+        let store = open_test_store();
+        store.put_alias("gadget", "acme/gadget").unwrap();
+        let item = store
+            .create_item("acme/gadget", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "acme/gadget").unwrap();
+        let submitted = store.submit_item(&item.id, "gadget", None).unwrap();
+        assert_eq!(submitted.state, State::Resolved);
+    }
+
     /// `register_worker` is an every-session upsert, so a drifted id must land
     /// on the existing row rather than fail or fork it. The returned `id` is the
     /// canonical spelling — that response is how a caller learns its own id
@@ -3326,6 +3433,22 @@ mod tests {
         let searched = store
             .search_items(
                 Some("WIDGET"),
+                None,
+                &[],
+                TagMatch::Any,
+                None,
+                None,
+                SortOrder::Desc,
+            )
+            .unwrap();
+        assert_eq!(searched.len(), 2);
+        // "WIDGET" above folds to the exact canonical via the alias key itself,
+        // so it would match without COLLATE. A case variant of the *canonical*
+        // ("acme/widget") is not an alias key, so this is the assertion that
+        // actually exercises the collation.
+        let searched = store
+            .search_items(
+                Some("ACME/WIDGET"),
                 None,
                 &[],
                 TagMatch::Any,
