@@ -485,6 +485,7 @@ impl Store {
                 params![id, tag],
             )?;
         }
+        record_event(&tx, &id, "created", requester.unwrap_or("unknown"), now)?;
         tx.commit()?;
         Ok(Item {
             id,
@@ -1424,6 +1425,7 @@ impl Store {
             "UPDATE items SET updated_at = ?1 WHERE id = ?2",
             params![now, item_id],
         )?;
+        record_event(&conn, item_id, "comment", author, now)?;
         Ok(Comment {
             id,
             item_id: item_id.to_string(),
@@ -1953,11 +1955,12 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        // At this task's checkpoint, create_item does not yet call
-        // record_event (that's Task 2) -- so exactly the two explicit calls
-        // above exist, pinning the counter's exact behavior.
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1], events[0] + 1);
+        // create_item itself now also records a "created" event (Task 2),
+        // so three rows exist total: pin the counter's exact behavior on
+        // the last two (the pair explicitly recorded above), not the total.
+        assert_eq!(events.len(), 3);
+        let last_two = &events[1..];
+        assert_eq!(last_two[1], last_two[0] + 1);
     }
 
     #[test]
@@ -2006,6 +2009,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn create_item_records_a_created_event() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], Some("acme/alice"))
+            .unwrap();
+        let kinds: Vec<String> = store
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("SELECT kind FROM item_events WHERE item_id = ?1")
+            .unwrap()
+            .query_map(params![item.id], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(kinds, vec!["created".to_string()]);
+    }
+
+    #[test]
+    fn create_item_with_no_requester_records_created_with_an_unknown_actor() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], None)
+            .unwrap();
+        let actor: String = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT actor FROM item_events WHERE item_id = ?1",
+                params![item.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(actor, "unknown");
+    }
+
+    #[test]
+    fn add_comment_records_a_comment_event() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], None)
+            .unwrap();
+        store.add_comment(&item.id, "acme/alice", "hello").unwrap();
+        let kinds: Vec<String> = store
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("SELECT kind FROM item_events WHERE item_id = ?1 ORDER BY seq")
+            .unwrap()
+            .query_map(params![item.id], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(kinds, vec!["created".to_string(), "comment".to_string()]);
     }
 
     #[test]
