@@ -98,6 +98,22 @@ impl Store {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 next INTEGER NOT NULL
             );
+            -- Append-only activity log — created/transition/comment, never
+            -- read back through turn/state. seq is event_seq_counter's
+            -- output, not items.seq or item_comments.rowid: a cursor must
+            -- never skip an event, and rowid is reused after DELETE.
+            CREATE TABLE IF NOT EXISTS item_events (
+                seq INTEGER PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES items(id),
+                kind TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_item_events_item ON item_events(item_id);
+            CREATE TABLE IF NOT EXISTS event_seq_counter (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                next INTEGER NOT NULL
+            );
             -- One identity, several spellings (ADR-0022). Storage keeps what
             -- was written everywhere else (ADR-0021); this table is what lets
             -- comparison fold two spellings without rewriting a single row,
@@ -212,6 +228,10 @@ impl Store {
         // row, set to continue from the highest existing seq).
         conn.execute(
             "INSERT OR IGNORE INTO seq_counter (id, next) VALUES (1, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO event_seq_counter (id, next) VALUES (1, 1)",
             [],
         )?;
         Ok(Store {
@@ -633,6 +653,7 @@ impl Store {
         require_item(&tx, id)?;
         tx.execute("DELETE FROM item_tags WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM item_comments WHERE item_id = ?1", params![id])?;
+        tx.execute("DELETE FROM item_events WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
@@ -1730,6 +1751,35 @@ fn insert_lifecycle_comment(
     Ok(())
 }
 
+/// Records one `item_events` row and advances `event_seq_counter` — the
+/// event-log twin of `insert_lifecycle_comment`. Race-free under the
+/// store's connection-wide mutex, same reasoning as `items.seq`
+/// (ADR-0016's comment on `seq_counter`). Not wrapped in a SQL
+/// transaction with the caller's own write, matching every other
+/// multi-statement method in this file (`submit_item`,
+/// `close_with_reason`, …) — none of them transaction-wrap their state
+/// update against `insert_lifecycle_comment` either; this file's existing
+/// convention already accepts that risk for a single-process, single-
+/// connection store (`principles.md`: no separate reliability target set).
+fn record_event(
+    conn: &Connection,
+    item_id: &str,
+    kind: &str,
+    actor: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let seq: i64 = conn.query_row(
+        "UPDATE event_seq_counter SET next = next + 1 WHERE id = 1 RETURNING next - 1",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO item_events (seq, item_id, kind, actor, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![seq, item_id, kind, actor, now],
+    )?;
+    Ok(())
+}
+
 fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
     let item = conn
         .query_row(
@@ -1881,6 +1931,81 @@ mod tests {
 
     fn open_test_store() -> Store {
         Store::open(":memory:").expect("in-memory store opens")
+    }
+
+    #[test]
+    fn record_event_allocates_a_dedicated_monotonic_seq() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], None)
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        record_event(&conn, &item.id, "comment", "acme/alice", 1_000).unwrap();
+        record_event(&conn, &item.id, "comment", "acme/alice", 1_001).unwrap();
+        drop(conn);
+        let events: Vec<i64> = store
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("SELECT seq FROM item_events ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        // At this task's checkpoint, create_item does not yet call
+        // record_event (that's Task 2) -- so exactly the two explicit calls
+        // above exist, pinning the counter's exact behavior.
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1], events[0] + 1);
+    }
+
+    #[test]
+    fn record_event_never_reuses_a_seq_after_the_item_is_deleted() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], None)
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        record_event(&conn, &item.id, "comment", "acme/alice", 1_000).unwrap();
+        let seq_before: i64 = conn
+            .query_row("SELECT MAX(seq) FROM item_events", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        store.delete_item(&item.id).unwrap();
+        let item2 = store
+            .create_item("acme/widget", "t2", None, &[], None)
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        record_event(&conn, &item2.id, "comment", "acme/alice", 1_001).unwrap();
+        let seq_after: i64 = conn
+            .query_row("SELECT MAX(seq) FROM item_events", [], |r| r.get(0))
+            .unwrap();
+        assert!(seq_after > seq_before, "seq must not go backwards or reuse");
+    }
+
+    #[test]
+    fn delete_item_cascades_its_events() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], None)
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            record_event(&conn, &item.id, "comment", "acme/alice", 1_000).unwrap();
+        }
+        store.delete_item(&item.id).unwrap();
+        let count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM item_events WHERE item_id = ?1",
+                params![item.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

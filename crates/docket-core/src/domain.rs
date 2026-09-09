@@ -417,6 +417,27 @@ pub struct Comment {
     pub created_at: i64,
 }
 
+/// One append-only row per state-affecting or discussion-affecting write —
+/// `created`/`transition`/`comment`. Exists to answer "what happened since
+/// I last looked" without touching `turn`: see ADR-0010's 2026-09-09
+/// update for why `turn` itself must stay a workflow-ownership field, not
+/// a read/unread one. `seq` is a dedicated monotonic counter
+/// (`event_seq_counter`), never `item_comments.rowid` or `created_at` —
+/// the same reasoning as `items.seq` (ADR-0016): rowid is reused after a
+/// row is deleted, and epoch millis can collide, so either would let a
+/// cursor skip an event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Event {
+    pub seq: i64,
+    pub item_id: String,
+    /// One of `"created"` / `"transition"` / `"comment"` — not a Rust enum
+    /// at this layer, same treatment `tag`/`comment` bodies get (ADR-0009):
+    /// core doesn't need to branch on it, only store and return it.
+    pub kind: String,
+    pub actor: String,
+    pub created_at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
