@@ -79,6 +79,10 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/comments", post(add_comment).get(list_comments))
         .route("/tags", get(list_tags))
         .route("/topics", get(list_topics))
+        .route(
+            "/aliases",
+            post(put_alias).get(list_aliases).delete(delete_alias),
+        )
         .fallback(api_not_found)
 }
 
@@ -786,6 +790,55 @@ async fn list_topics(
     State(store): State<Arc<Store>>,
 ) -> Result<Json<Vec<docket_core::domain::TopicCount>>, ApiError> {
     Ok(Json(store.list_topics()?))
+}
+
+#[derive(Deserialize)]
+struct PutAliasRequest {
+    alias: String,
+    canonical: String,
+}
+
+/// Declares one identity's alternate spelling. **Deliberately not an MCP
+/// tool**: it changes who may approve or reject items under that identity
+/// (ADR-0019 as amended by ADR-0022), which is an admin judgment about item
+/// disposition, not something a worker decides for itself — the same reasoning
+/// that keeps `PATCH /items/{id}` off MCP. See the MCP-exposure rule in
+/// docs/architecture.md.
+async fn put_alias(
+    State(store): State<Arc<Store>>,
+    Json(req): Json<PutAliasRequest>,
+) -> Result<(StatusCode, Json<docket_core::domain::Alias>), ApiError> {
+    let alias = store.put_alias(&req.alias, &req.canonical)?;
+    Ok((StatusCode::CREATED, Json(alias)))
+}
+
+#[derive(Deserialize)]
+struct ListAliasesQuery {
+    #[serde(default)]
+    canonical: Option<String>,
+}
+
+async fn list_aliases(
+    State(store): State<Arc<Store>>,
+    Query(q): Query<ListAliasesQuery>,
+) -> Result<Json<Vec<docket_core::domain::Alias>>, ApiError> {
+    Ok(Json(store.list_aliases(q.canonical.as_deref())?))
+}
+
+#[derive(Deserialize)]
+struct DeleteAliasQuery {
+    alias: String,
+}
+
+/// Takes the alias as a **query parameter, not a path segment**: an alias is
+/// `org/repo`-shaped, and an unencoded `/` splits a single-segment path route
+/// so it never matches at all — the failure `GET /workers/{id}` shipped with.
+async fn delete_alias(
+    State(store): State<Arc<Store>>,
+    Query(q): Query<DeleteAliasQuery>,
+) -> Result<StatusCode, ApiError> {
+    store.delete_alias(&q.alias)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -3483,5 +3536,84 @@ mod tests {
         let non_archived = json_body(resp).await;
         assert_eq!(non_archived.as_array().unwrap().len(), 1);
         assert_eq!(non_archived[0]["id"], normal_id);
+    }
+
+    #[tokio::test]
+    async fn alias_routes_create_list_and_delete() {
+        let store = Arc::new(open_test_store());
+        let created = app(store.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/aliases")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"alias":"widget","canonical":"acme/widget"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let listed = app(store.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/aliases")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+
+        // The alias is `org/repo`-shaped, so it carries a `/`. A path-segment
+        // route would miss entirely on the unencoded form -- exactly the trap
+        // `GET /workers/{id}` fell into. A query parameter has no such trap.
+        let deleted = app(store.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/aliases?alias=acme%2Fold-name")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn alias_route_maps_validation_to_400_and_conflict_to_409() {
+        let store = Arc::new(open_test_store());
+        let post = |body: &'static str| {
+            let store = store.clone();
+            async move {
+                app(store)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/aliases")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(
+            post(r#"{"alias":"  ","canonical":"acme/widget"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(r#"{"alias":"widget","canonical":"acme/widget"}"#).await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            post(r#"{"alias":"widget","canonical":"acme/gadget"}"#).await,
+            StatusCode::CONFLICT
+        );
     }
 }
