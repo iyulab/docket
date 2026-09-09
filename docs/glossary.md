@@ -18,6 +18,7 @@ This is the discipline that keeps layer boundaries from leaking. If a term from 
 | tag | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
 | comment | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
 | alias | (none — an opaque `(alias, canonical)` identifier pair declaring two spellings the same identity, not translated; see [ADR-0022](decisions/ADR-0022-identity-alias.md)) |
+| event | (none — an append-only activity-log row (`created`/`transition`/`comment`), independent of `turn`; see [ADR-0010](decisions/ADR-0010-item-from-to-turn.md)'s 2026-09-09 update) |
 
 Concepts in the right-hand column get translated into the left-hand column at layer 3 before reaching the core. Wherever that translation happens is the layer boundary.
 

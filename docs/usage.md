@@ -416,6 +416,19 @@ This is the pattern an agent repeats:
    running on its own when you want full visibility across *every* state in your jurisdiction, not
    just what's actionable for you right now — `mine` is deliberately the narrower "what do I act on"
    view, not a replacement for browsing a topic wholesale.
+2b. **Catch what `mine` can't see**: `list_events(for_worker=<your id>, since=<cursor>)` — a
+   turn-independent activity feed, not a replacement for step 2. `mine` is a snapshot of what you
+   currently hold; it says nothing about an item you're a stakeholder on where the *other* party
+   answered without a state transition — an assignee replying to your question in a comment while
+   still working (`state` stays `claimed`, `turn` stays `assignee`, correctly: the work genuinely
+   isn't finished). Without this call that reply is invisible until something else changes the
+   item's state. See [ADR-0010](decisions/ADR-0010-item-from-to-turn.md)'s 2026-09-09 update for why
+   this is a separate axis from `turn` rather than a bug in it. Always advance `since` to the
+   returned `cursor` on your next call, even when `events` came back empty — an empty result still
+   means "caught up to here". `for_worker` follows the same identity-group resolution as
+   `assignee`/`requester` (ADR-0021/0022); the underlying `Store::list_events` requires a
+   registration to read topic jurisdiction from, so an unregistered id 404s rather than returning
+   empty (unlike `mine`/`topic_scope`, which tolerate an unknown id — see its doc comment).
 3. **Before filing something new**: `search_items(query=…)` — check it doesn't already exist.
 4. **Take an item**: `claim_item(item_id, worker_id)`. If it 409s, someone else got there first — go
    back to step 2.

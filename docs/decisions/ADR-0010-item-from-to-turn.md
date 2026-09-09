@@ -253,3 +253,9 @@ standing in for a *correct* `turn`; an event log doesn't stand in for `turn`, it
 `turn` was never designed to answer. Consistent with P-3 (a worker still pulls the log on its own
 schedule; nothing is pushed or auto-distributed). Design/implementation is its own plan, not this ADR.
 
+**Implemented** (2026-09-09,
+[PLAN-docket-20260909-event-cursor-implementation.md](https://github.com/iyulab/docket-works/blob/main/claudedocs/plans/PLAN-docket-20260909-event-cursor-implementation.md)):
+`item_events` + `event_seq_counter` (`docket-core`), `GET /events?for=<worker>&since=<cursor>`,
+`docket-mcp`'s `list_events` tool. `turn`/`state` unchanged, exactly as this update said they would
+stay.
+
