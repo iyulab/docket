@@ -564,12 +564,20 @@ async fn get_item(
 
 #[derive(Deserialize)]
 struct UpdateItemRequest {
-    /// Corrects `requester` on an existing item — the only field this covers
-    /// so far. `requester` is normally set once at creation (ADR-0010); this
-    /// covers both an item that never got one and one whose identity drifted
-    /// (ADR-0019). Editing `title`/`body`/`topic` post-creation is a separate,
+    /// Corrects `requester` on an existing item. `requester` is normally set
+    /// once at creation (ADR-0010); this covers both an item that never got
+    /// one and one whose identity drifted (ADR-0019). Optional so a caller
+    /// can patch `topic` alone, but at least one of the two must be given —
+    /// see `update_item`.
+    #[serde(default)]
+    requester: Option<String>,
+    /// Corrects `topic` on an existing item — the item-level counterpart to
+    /// an alias (ADR-0022): an alias is for a spelling people actually use,
+    /// declaring one for a one-off typo would make the typo permanent
+    /// schema. Editing `title`/`body` post-creation is still a separate,
     /// not-yet-built gap (see ROADMAP.md).
-    requester: String,
+    #[serde(default)]
+    topic: Option<String>,
     /// Who made the correction, recorded on the lifecycle comment the change
     /// writes. Optional here and defaulting to `"unknown"`, the same treatment
     /// `POST /items/{id}/comments` gives a direct HTTP caller — `docket-mcp`
@@ -583,12 +591,28 @@ async fn update_item(
     Path(id): Path<String>,
     Json(req): Json<UpdateItemRequest>,
 ) -> Result<Json<Item>, ApiError> {
+    if req.requester.is_none() && req.topic.is_none() {
+        return Err(ApiError(StoreError::Validation(
+            "PATCH /items/{id} requires at least one of requester or topic".to_string(),
+        )));
+    }
     let author = req.author.as_deref().unwrap_or("unknown");
-    Ok(Json(store.set_item_requester(
-        &id,
-        author,
-        &req.requester,
-    )?))
+    // Applied in declaration order — requester, then topic. Each call is its
+    // own atomic store operation (mutex-guarded transaction), so a failure on
+    // the second leaves the first's correction durably applied rather than
+    // reverted, exactly as if the caller had issued two separate PATCH
+    // requests; the error response names the field that failed, so the
+    // caller is never left guessing which one that was.
+    let mut item = None;
+    if let Some(requester) = req.requester.as_deref() {
+        item = Some(store.set_item_requester(&id, author, requester)?);
+    }
+    if let Some(topic) = req.topic.as_deref() {
+        item = Some(store.set_item_topic(&id, author, topic)?);
+    }
+    Ok(Json(item.expect(
+        "validated above that requester or topic is present",
+    )))
 }
 
 #[derive(Deserialize)]
@@ -1617,6 +1641,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(json_body(resp).await["requester"], "backfilled-reporter");
+    }
+
+    /// The item-level counterpart to declaring an alias: corrects a
+    /// mistargeted `topic` in place.
+    #[tokio::test]
+    async fn patch_item_sets_topic() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "other-org/widget", "title": "mistargeted"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/items/{id}"),
+                serde_json::json!({"topic": "acme/widget", "author": "console"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["topic"], "acme/widget");
+    }
+
+    /// Neither field given must be a 400, not a silent no-op — a caller
+    /// omitting both would otherwise believe an edit landed that never did.
+    #[tokio::test]
+    async fn patch_item_with_neither_field_is_400() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/items/{id}"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Both fields given applies both, in declaration order (requester, then
+    /// topic) — see `update_item`'s doc comment for why that order is safe.
+    #[tokio::test]
+    async fn patch_item_applies_both_requester_and_topic() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "other-org/widget", "title": "mistargeted"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/items/{id}"),
+                serde_json::json!({"requester": "acme/reporter", "topic": "acme/widget"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["requester"], "acme/reporter");
+        assert_eq!(body["topic"], "acme/widget");
     }
 
     #[tokio::test]

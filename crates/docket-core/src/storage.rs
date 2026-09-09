@@ -538,6 +538,51 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
+    /// Corrects `topic` on an item that was filed under the wrong one.
+    ///
+    /// An alias ([ADR-0022](../../../docs/decisions/ADR-0022-identity-alias.md))
+    /// is for a spelling people actually use; declaring one for a one-off typo
+    /// would make the typo permanent schema. This is the item-level correction
+    /// instead — the exact counterpart of `set_item_requester`.
+    ///
+    /// State-independent (works on a closed item too — this corrects metadata,
+    /// it isn't a workflow transition). A change is recorded as a lifecycle
+    /// comment naming both values, since this is the one edit that moves an
+    /// item between topics and "moved from what" belongs in the thread.
+    /// Setting the value it already has is a no-op, the same idempotency
+    /// `set_item_requester` and the tag operations have.
+    pub fn set_item_topic(&self, id: &str, author: &str, topic: &str) -> Result<Item> {
+        let topic = topic.trim();
+        if topic.is_empty() {
+            return Err(StoreError::Validation(
+                "topic must not be blank".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
+        let previous = row_to_item(&conn, id)?.ok_or(StoreError::NotFound)?.topic;
+        if previous == topic {
+            return row_to_item(&conn, id)?.ok_or(StoreError::NotFound);
+        }
+        let now = now_millis();
+        let affected = conn.execute(
+            "UPDATE items SET topic = ?1, updated_at = ?2 WHERE id = ?3",
+            params![topic, now, id],
+        )?;
+        if affected == 0 {
+            return Err(StoreError::NotFound);
+        }
+        insert_lifecycle_comment(
+            &conn,
+            id,
+            author,
+            &format!("topic: {previous} -> {topic}"),
+            now,
+        )?;
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
     /// Sets `archived_at` if not already set. Idempotent — archiving an
     /// already-archived item is not an error, it just returns the item
     /// unchanged (matches `add_tags`/`remove_tags`'s existing idempotency
@@ -3039,6 +3084,46 @@ mod tests {
         assert!(matches!(
             store.set_item_requester("nonexistent-id", "admin", "reporter-1"),
             Err(StoreError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn set_item_topic_moves_the_item_and_records_both_values() {
+        let store = open_test_store();
+        let item = store
+            .create_item("other-org/widget", "mistargeted", None, &[], None)
+            .unwrap();
+        let moved = store
+            .set_item_topic(&item.id, "console", "acme/widget")
+            .unwrap();
+        assert_eq!(moved.topic, "acme/widget");
+        let comments = store.list_comments(&item.id).unwrap();
+        let last = comments.last().unwrap();
+        assert!(
+            last.body.contains("other-org/widget"),
+            "the old value stays in the thread"
+        );
+        assert!(last.body.contains("acme/widget"));
+    }
+
+    #[test]
+    fn set_item_topic_is_idempotent_and_rejects_blank() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        let before = store.list_comments(&item.id).unwrap().len();
+        store
+            .set_item_topic(&item.id, "console", "acme/widget")
+            .unwrap();
+        assert_eq!(
+            store.list_comments(&item.id).unwrap().len(),
+            before,
+            "setting the value it already has records nothing"
+        );
+        assert!(matches!(
+            store.set_item_topic(&item.id, "console", "  "),
+            Err(StoreError::Validation(_))
         ));
     }
 
