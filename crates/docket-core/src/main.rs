@@ -78,6 +78,7 @@ fn api_routes() -> Router<Arc<Store>> {
         )
         .route("/items/{id}/comments", post(add_comment).get(list_comments))
         .route("/tags", get(list_tags))
+        .route("/events", get(list_events))
         .route("/topics", get(list_topics))
         .route("/topics/candidates", get(topic_candidates))
         .route(
@@ -302,6 +303,19 @@ async fn create_item(
 }
 
 #[derive(Deserialize)]
+struct ListEventsQuery {
+    /// The worker id whose activity feed this is -- required, unlike every
+    /// other filter param on this API, because there is no meaningful
+    /// unfiltered form of this endpoint (see `Store::list_events`'s doc
+    /// comment on the `NotFound`-vs-empty asymmetry with
+    /// `topic_scope`/`mine`).
+    #[serde(rename = "for")]
+    for_worker: Option<String>,
+    since: Option<i64>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct ListItemsQuery {
     /// Exact-match topic filter.
     topic: Option<String>,
@@ -394,6 +408,24 @@ const DEFAULT_LIST_LIMIT: usize = 50;
 /// However large a caller's explicit `limit` is, the response still can't
 /// reproduce the original unbounded-response failure by accident.
 const MAX_LIST_LIMIT: usize = 200;
+
+/// No repeated keys on this endpoint, so the plain `axum::extract::Query`
+/// (unlike `list_items`, just below) is enough.
+async fn list_events(
+    State(store): State<Arc<Store>>,
+    Query(q): Query<ListEventsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let for_worker = q
+        .for_worker
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| ApiError(StoreError::Validation("for is required".to_string())))?;
+    let since = q.since.unwrap_or(0);
+    let limit = q.limit.unwrap_or(DEFAULT_LIST_LIMIT).min(MAX_LIST_LIMIT);
+    let (events, cursor) = store.list_events(&for_worker, since, limit)?;
+    Ok(Json(
+        serde_json::json!({"events": events, "cursor": cursor}),
+    ))
+}
 
 /// Uses `axum_extra`'s `Query` rather than `axum::extract::Query`: only the
 /// former decodes repeated keys (`?tag=a&tag=b`) into a `Vec`, which the
@@ -967,6 +999,97 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_events_returns_a_cursor_and_folds_relevant_activity() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/workers",
+                serde_json::json!({"id": "acme/bot", "topics": ["acme/widget"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "acme/widget", "title": "t1"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = json_body(resp).await;
+        let item_id = created["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/events?for=acme/bot&since=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let events = body["events"].as_array().unwrap();
+        assert!(events.iter().any(|e| e["item_id"] == item_id));
+        let cursor = body["cursor"].as_i64().unwrap();
+        assert!(cursor > 0);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/events?for=acme/bot&since={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body2 = json_body(resp).await;
+        assert!(body2["events"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_events_missing_for_is_400() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/events?since=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_events_unregistered_worker_is_404() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/events?for=acme/never-seen&since=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// The M1 completion criterion, end to end through the router: create,
