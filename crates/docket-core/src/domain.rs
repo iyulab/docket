@@ -312,6 +312,19 @@ pub struct TopicCount {
     pub count: i64,
 }
 
+/// A declared spelling variant of one identity — `alias` names the same thing
+/// as `canonical`. Resolution is always one hop: an `alias` may never itself be
+/// another row's `canonical`, and a `canonical` may never be another row's
+/// `alias` (enforced in `Store::put_alias`). See
+/// [ADR-0022](../../../docs/decisions/ADR-0022-identity-alias.md) for why
+/// chains are structurally forbidden rather than merely deferred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Alias {
+    pub alias: String,
+    pub canonical: String,
+    pub created_at: i64,
+}
+
 /// A single append-only note attached to an item. No edit/delete API by
 /// design — corrections are new comments, matching the project's existing
 /// "history isn't rewritten" convention for issue drafts.

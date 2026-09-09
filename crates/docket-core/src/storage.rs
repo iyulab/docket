@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::domain::{
-    Comment, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder, State, TagCount,
+    Alias, Comment, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder, State, TagCount,
     TagMatch, TopicCount, Worker,
 };
 
@@ -82,6 +82,17 @@ impl Store {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 next INTEGER NOT NULL
             );
+            -- One identity, several spellings (ADR-0022). Storage keeps what
+            -- was written everywhere else (ADR-0021); this table is what lets
+            -- comparison fold two spellings without rewriting a single row,
+            -- which is why declaring an alias applies retroactively.
+            CREATE TABLE IF NOT EXISTS identity_aliases (
+                alias      TEXT PRIMARY KEY,
+                canonical  TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_identity_aliases_canonical
+                ON identity_aliases(canonical);
             CREATE TABLE IF NOT EXISTS item_tags (
                 item_id TEXT NOT NULL REFERENCES items(id),
                 tag     TEXT NOT NULL,
@@ -180,6 +191,128 @@ impl Store {
             conn: Mutex::new(conn),
         })
     }
+
+    /// Declares that `alias` names the same identity as `canonical`.
+    ///
+    /// Idempotent for the same pair (case-folded). Rejects, as `Conflict`:
+    /// a chain in either direction, and re-pointing an existing alias at a
+    /// different canonical — an alias silently changing meaning would move
+    /// every item filed under it to a different identity, including who may
+    /// approve them (ADR-0019). Blank or self-referential input is
+    /// `Validation`, not `Conflict`: that's malformed input, not a state clash.
+    pub fn put_alias(&self, alias: &str, canonical: &str) -> Result<Alias> {
+        let alias = alias.trim();
+        let canonical = canonical.trim();
+        if alias.is_empty() || canonical.is_empty() {
+            return Err(StoreError::Validation(
+                "alias and canonical must not be blank".to_string(),
+            ));
+        }
+        if crate::domain::identity_eq(alias, canonical) {
+            return Err(StoreError::Validation(
+                "alias must differ from canonical".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let alias_is_a_canonical: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM identity_aliases WHERE canonical = ?1 COLLATE NOCASE)",
+            params![alias],
+            |row| row.get(0),
+        )?;
+        if alias_is_a_canonical {
+            return Err(StoreError::Conflict(format!(
+                "cannot alias {alias}: it is already the canonical of another alias"
+            )));
+        }
+        let canonical_is_an_alias: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM identity_aliases WHERE alias = ?1 COLLATE NOCASE)",
+            params![canonical],
+            |row| row.get(0),
+        )?;
+        if canonical_is_an_alias {
+            return Err(StoreError::Conflict(format!(
+                "cannot point at {canonical}: it is itself an alias"
+            )));
+        }
+        let existing: Option<(String, String, i64)> = conn
+            .query_row(
+                "SELECT alias, canonical, created_at FROM identity_aliases
+                 WHERE alias = ?1 COLLATE NOCASE",
+                params![alias],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((stored_alias, stored_canonical, created_at)) = existing {
+            if crate::domain::identity_eq(&stored_canonical, canonical) {
+                return Ok(Alias {
+                    alias: stored_alias,
+                    canonical: stored_canonical,
+                    created_at,
+                });
+            }
+            return Err(StoreError::Conflict(format!(
+                "{alias} is already an alias of {stored_canonical}"
+            )));
+        }
+        let now = now_millis();
+        conn.execute(
+            "INSERT INTO identity_aliases (alias, canonical, created_at) VALUES (?1, ?2, ?3)",
+            params![alias, canonical, now],
+        )?;
+        drop(conn);
+        self.invalidate_alias_cache();
+        Ok(Alias {
+            alias: alias.to_string(),
+            canonical: canonical.to_string(),
+            created_at: now,
+        })
+    }
+
+    /// Every declared alias, newest first. `canonical` filters to one
+    /// identity's variants, folded case like every identifier comparison.
+    pub fn list_aliases(&self, canonical: Option<&str>) -> Result<Vec<Alias>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut sql =
+            String::from("SELECT alias, canonical, created_at FROM identity_aliases WHERE 1=1");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(c) = canonical {
+            sql.push_str(" AND canonical = ? COLLATE NOCASE");
+            args.push(Box::new(c.to_string()));
+        }
+        sql.push_str(" ORDER BY created_at DESC, alias ASC");
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(param_refs), |row| {
+            Ok(Alias {
+                alias: row.get(0)?,
+                canonical: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Withdraws a declaration. Not destructive to any item — the items filed
+    /// under that spelling simply stop folding into the canonical, the exact
+    /// inverse of `put_alias` applying retroactively.
+    pub fn delete_alias(&self, alias: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let affected = conn.execute(
+            "DELETE FROM identity_aliases WHERE alias = ?1 COLLATE NOCASE",
+            params![alias.trim()],
+        )?;
+        drop(conn);
+        if affected == 0 {
+            return Err(StoreError::NotFound);
+        }
+        self.invalidate_alias_cache();
+        Ok(())
+    }
+
+    // Filled in by the alias-map cache (next task). Kept as a named seam from
+    // the start so every mutation path already calls it.
+    fn invalidate_alias_cache(&self) {}
 
     /// Registers a worker, or updates the registration that already exists.
     ///
@@ -3349,5 +3482,82 @@ mod tests {
 
         drop(store);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn put_alias_stores_and_lists_a_declared_variant() {
+        let store = open_test_store();
+        let a = store.put_alias("widget", "acme/widget").unwrap();
+        assert_eq!(a.alias, "widget");
+        assert_eq!(a.canonical, "acme/widget");
+        let rows = store.list_aliases(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        let filtered = store.list_aliases(Some("ACME/WIDGET")).unwrap();
+        assert_eq!(filtered.len(), 1, "canonical filter folds case (ADR-0021)");
+    }
+
+    #[test]
+    fn put_alias_is_idempotent_for_the_same_declaration() {
+        let store = open_test_store();
+        let first = store.put_alias("widget", "acme/widget").unwrap();
+        let again = store.put_alias("WIDGET", "acme/Widget").unwrap();
+        assert_eq!(
+            again.created_at, first.created_at,
+            "re-declaring changes nothing"
+        );
+        assert_eq!(store.list_aliases(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn put_alias_rejects_blank_and_self() {
+        let store = open_test_store();
+        assert!(matches!(
+            store.put_alias("  ", "acme/widget"),
+            Err(StoreError::Validation(_))
+        ));
+        assert!(matches!(
+            store.put_alias("acme/widget", "ACME/WIDGET"),
+            Err(StoreError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn put_alias_rejects_chains_in_both_directions() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        // Pointing a new alias *at* `widget` would build a two-hop chain
+        // (w -> widget -> acme/widget), which the canonical-is-an-alias
+        // check below rejects.
+        assert!(matches!(
+            store.put_alias("w", "widget"),
+            Err(StoreError::Conflict(_))
+        ));
+        // And an existing canonical must not become an alias of something else.
+        assert!(matches!(
+            store.put_alias("acme/widget", "acme/gadget"),
+            Err(StoreError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn put_alias_rejects_repointing_an_existing_alias() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        assert!(matches!(
+            store.put_alias("widget", "acme/gadget"),
+            Err(StoreError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn delete_alias_removes_it_and_404s_when_absent() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        store.delete_alias("WIDGET").unwrap();
+        assert!(store.list_aliases(None).unwrap().is_empty());
+        assert!(matches!(
+            store.delete_alias("widget"),
+            Err(StoreError::NotFound)
+        ));
     }
 }
