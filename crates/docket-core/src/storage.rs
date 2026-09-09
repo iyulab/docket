@@ -387,6 +387,9 @@ impl Store {
     /// whose id drifted from registering at all.
     pub fn register_worker(&self, id: &str, topics: &[String]) -> Result<Worker> {
         let topics_json = serde_json::to_string(topics).expect("Vec<String> always serializes");
+        let aliases = self.alias_map()?;
+        let id = aliases.resolve(id).to_string();
+        let id = id.as_str();
         let conn = self.conn.lock().expect("store mutex poisoned");
         let canonical: String = conn
             .query_row(
@@ -580,6 +583,9 @@ impl Store {
     }
 
     pub fn get_worker(&self, id: &str) -> Result<Worker> {
+        let aliases = self.alias_map()?;
+        let id = aliases.resolve(id).to_string();
+        let id = id.as_str();
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
             "SELECT id, topics, online FROM workers WHERE id = ?1 COLLATE NOCASE",
@@ -611,6 +617,7 @@ impl Store {
         archived: Option<bool>,
         order: SortOrder,
     ) -> Result<Vec<Item>> {
+        let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
             "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at, seq FROM items WHERE 1=1",
@@ -618,8 +625,7 @@ impl Store {
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(t) = topic {
-            sql.push_str(" AND topic = ? COLLATE NOCASE");
-            args.push(Box::new(t.to_string()));
+            push_identity_group_filter(&mut sql, &mut args, "topic", &aliases.group_of(t));
         }
         if let Some(s) = state {
             sql.push_str(" AND state = ?");
@@ -1192,6 +1198,7 @@ impl Store {
         archived: Option<bool>,
         order: SortOrder,
     ) -> Result<Vec<Item>> {
+        let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut sql = String::from(
             "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.requester, i.assignee, i.created_at, i.updated_at, i.archived_at, i.seq
@@ -1200,8 +1207,7 @@ impl Store {
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(t) = topic {
-            sql.push_str(" AND i.topic = ? COLLATE NOCASE");
-            args.push(Box::new(t.to_string()));
+            push_identity_group_filter(&mut sql, &mut args, "i.topic", &aliases.group_of(t));
         }
         if let Some(s) = state {
             sql.push_str(" AND i.state = ?");
@@ -1495,6 +1501,32 @@ fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
         archived_at: row.get(10)?,
         seq: row.get(11)?,
     })
+}
+
+/// Appends ` AND <column> COLLATE NOCASE IN (?, ?, …)` and pushes one argument
+/// per spelling in the identity's group.
+///
+/// The collation goes on the **left operand**. SQLite attaches `COLLATE` to the
+/// expression it follows, so `x IN (? COLLATE NOCASE)` would apply it to the
+/// list element and leave the comparison case-sensitive -- silently undoing
+/// ADR-0021 for every column converted this way.
+fn push_identity_group_filter(
+    sql: &mut String,
+    args: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    column: &str,
+    group: &[String],
+) {
+    sql.push_str(" AND ");
+    sql.push_str(column);
+    sql.push_str(" COLLATE NOCASE IN (");
+    for (i, spelling) in group.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('?');
+        args.push(Box::new(spelling.clone()));
+    }
+    sql.push(')');
 }
 
 /// Runs after the `Statement` borrow of `conn` has ended, filling in each
@@ -2549,6 +2581,27 @@ mod tests {
         }
     }
 
+    /// A declared alias is the same identity for worker lookups too, not just
+    /// topic filters (ADR-0022) — registering under a variant id must land on
+    /// the same row as the canonical spelling, and `get_worker` must resolve
+    /// a variant to it.
+    #[test]
+    fn register_and_get_worker_land_on_the_canonical_row_for_a_variant_id() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        let first = store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        let second = store
+            .register_worker("widget", &["acme/widget".to_string()])
+            .unwrap();
+        assert_eq!(
+            second.id, first.id,
+            "a variant id is that worker, not a second one"
+        );
+        assert_eq!(store.get_worker("WIDGET").unwrap().id, "acme/widget");
+    }
+
     #[test]
     fn submit_item_records_a_reason_only_when_one_is_given() {
         let store = open_test_store();
@@ -3240,6 +3293,48 @@ mod tests {
             )
             .unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    /// A topic filter must match every spelling declared for the identity,
+    /// not just the literal one passed in — the SQL-side counterpart to
+    /// `topic_matches_with` (ADR-0022).
+    #[test]
+    fn topic_filter_matches_every_declared_spelling_and_still_folds_case() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        store.create_item("widget", "a", None, &[], None).unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], None)
+            .unwrap();
+        store
+            .create_item("acme/gadget", "c", None, &[], None)
+            .unwrap();
+
+        for spelling in ["acme/widget", "widget", "ACME/WIDGET", "WIDGET"] {
+            let found = store
+                .list_items(Some(spelling), None, None, SortOrder::Desc)
+                .unwrap();
+            assert_eq!(
+                found.len(),
+                2,
+                "topic={spelling} should match the whole group"
+            );
+        }
+        // Case folding must survive the rewrite from `= ? COLLATE NOCASE` to an
+        // `IN (…)` list -- SQLite applies the collation to the left operand, so
+        // moving it inside the parens would silently make this case-sensitive.
+        let searched = store
+            .search_items(
+                Some("WIDGET"),
+                None,
+                &[],
+                TagMatch::Any,
+                None,
+                None,
+                SortOrder::Desc,
+            )
+            .unwrap();
+        assert_eq!(searched.len(), 2);
     }
 
     /// See ADR-0020: `order` picks the direction of the fixed `updated_at`
