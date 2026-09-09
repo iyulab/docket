@@ -5,8 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::domain::{
-    Alias, Comment, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder, State, TagCount,
-    TagMatch, TopicCount, Worker,
+    Alias, AliasMap, Comment, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder, State,
+    TagCount, TagMatch, TopicCount, Worker,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +42,11 @@ fn now_millis() -> i64 {
 /// write has already moved the row out of the expected state.
 pub struct Store {
     conn: Mutex<Connection>,
+    /// `identity_aliases` is read on nearly every query and written rarely, so
+    /// it is cached whole rather than re-queried per comparison. `None` means
+    /// "not loaded yet"; every mutation path clears it via
+    /// `invalidate_alias_cache`.
+    alias_cache: std::sync::RwLock<Option<AliasMap>>,
 }
 
 impl Store {
@@ -86,13 +91,24 @@ impl Store {
             -- was written everywhere else (ADR-0021); this table is what lets
             -- comparison fold two spellings without rewriting a single row,
             -- which is why declaring an alias applies retroactively.
+            -- COLLATE NOCASE is declared on the column (not left to each
+            -- query) because every query against this table already compares
+            -- with COLLATE NOCASE, and SQLite only uses an index whose
+            -- collation matches the comparison — without this, both the PK
+            -- and the canonical index below are unusable, and the PK does
+            -- not enforce case-insensitive uniqueness on alias. This
+            -- diverges from the workers table's default-collation pattern
+            -- deliberately: a later resolution step makes alias resolution
+            -- decide who may approve an item, so one alias mapping to
+            -- exactly one canonical must be enforced by the schema, not
+            -- only by the connection mutex.
             CREATE TABLE IF NOT EXISTS identity_aliases (
-                alias      TEXT PRIMARY KEY,
+                alias      TEXT PRIMARY KEY COLLATE NOCASE,
                 canonical  TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_identity_aliases_canonical
-                ON identity_aliases(canonical);
+                ON identity_aliases(canonical COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS item_tags (
                 item_id TEXT NOT NULL REFERENCES items(id),
                 tag     TEXT NOT NULL,
@@ -189,6 +205,7 @@ impl Store {
         )?;
         Ok(Store {
             conn: Mutex::new(conn),
+            alias_cache: std::sync::RwLock::new(None),
         })
     }
 
@@ -310,9 +327,26 @@ impl Store {
         Ok(())
     }
 
-    // Filled in by the alias-map cache (next task). Kept as a named seam from
-    // the start so every mutation path already calls it.
-    fn invalidate_alias_cache(&self) {}
+    /// The declared alias set, cached. Returns a clone: the table is small
+    /// (one row per declared spelling) and cloning keeps callers from holding
+    /// the lock across SQL, which would deadlock against `self.conn`.
+    pub fn alias_map(&self) -> Result<AliasMap> {
+        if let Some(map) = self
+            .alias_cache
+            .read()
+            .expect("alias cache poisoned")
+            .as_ref()
+        {
+            return Ok(map.clone());
+        }
+        let map = AliasMap::from_rows(self.list_aliases(None)?);
+        *self.alias_cache.write().expect("alias cache poisoned") = Some(map.clone());
+        Ok(map)
+    }
+
+    fn invalidate_alias_cache(&self) {
+        *self.alias_cache.write().expect("alias cache poisoned") = None;
+    }
 
     /// Registers a worker, or updates the registration that already exists.
     ///
@@ -3505,6 +3539,8 @@ mod tests {
             again.created_at, first.created_at,
             "re-declaring changes nothing"
         );
+        assert_eq!(again.alias, "widget", "the stored spelling wins");
+        assert_eq!(again.canonical, "acme/widget", "the stored spelling wins");
         assert_eq!(store.list_aliases(None).unwrap().len(), 1);
     }
 
@@ -3559,5 +3595,19 @@ mod tests {
             store.delete_alias("widget"),
             Err(StoreError::NotFound)
         ));
+    }
+
+    #[test]
+    fn alias_map_reflects_writes_and_deletes_without_reopening_the_store() {
+        let store = open_test_store();
+        assert!(store.alias_map().unwrap().is_empty());
+        store.put_alias("widget", "acme/widget").unwrap();
+        assert_eq!(store.alias_map().unwrap().resolve("widget"), "acme/widget");
+        store.delete_alias("widget").unwrap();
+        assert_eq!(
+            store.alias_map().unwrap().resolve("widget"),
+            "widget",
+            "the cache is invalidated on delete, not just on insert"
+        );
     }
 }

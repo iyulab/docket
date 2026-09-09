@@ -197,6 +197,79 @@ pub fn topic_matches(owned: &str, item_topic: &str) -> bool {
         && item_topic.as_bytes().get(owned.len()) == Some(&b'/')
 }
 
+/// Every declared alias, indexed for lookup. Built from the store's
+/// `identity_aliases` rows; see [`Alias`] for the one-hop invariant this
+/// relies on — because a chain can never exist, `resolve` is a single map
+/// lookup and needs no loop or cycle guard.
+#[derive(Debug, Clone, Default)]
+pub struct AliasMap {
+    /// lowercased alias -> canonical, as declared
+    forward: std::collections::HashMap<String, String>,
+    /// lowercased canonical -> its aliases, as declared
+    reverse: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl AliasMap {
+    pub fn from_rows(rows: impl IntoIterator<Item = Alias>) -> Self {
+        let mut map = Self::default();
+        for row in rows {
+            map.reverse
+                .entry(row.canonical.to_ascii_lowercase())
+                .or_default()
+                .push(row.alias.clone());
+            map.forward
+                .insert(row.alias.to_ascii_lowercase(), row.canonical);
+        }
+        map
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.forward.is_empty()
+    }
+
+    /// The canonical spelling of `id`. One hop — an id that is not a declared
+    /// alias is its own canonical, which makes this total: there is no
+    /// "unresolvable identifier" case for any caller to handle.
+    pub fn resolve<'a>(&'a self, id: &'a str) -> &'a str {
+        self.forward
+            .get(&id.to_ascii_lowercase())
+            .map(String::as_str)
+            .unwrap_or(id)
+    }
+
+    /// `resolve(id)` plus every spelling declared for it — the set a SQL
+    /// `IN (…)` has to cover to match the same rows the in-memory comparisons
+    /// do. Always contains at least one element.
+    pub fn group_of(&self, id: &str) -> Vec<String> {
+        let canonical = self.resolve(id);
+        let mut group = vec![canonical.to_string()];
+        if let Some(aliases) = self.reverse.get(&canonical.to_ascii_lowercase()) {
+            group.extend(aliases.iter().cloned());
+        }
+        group
+    }
+}
+
+/// [`topic_matches`], folding declared aliases first (ADR-0022).
+///
+/// **Order matters**: resolve each whole identifier, *then* prefix-compare.
+/// The other order breaks a worker registered on a bare prefix (`acme`)
+/// reaching an item filed under an alias with no org segment (`widget`),
+/// because the prefix test would run against the unresolved spelling.
+///
+/// Every item-matching site must use this, not [`topic_matches`] — the plain
+/// form remains for comparing alias-table keys themselves, where folding
+/// would be circular.
+pub fn topic_matches_with(aliases: &AliasMap, owned: &str, item_topic: &str) -> bool {
+    topic_matches(aliases.resolve(owned), aliases.resolve(item_topic))
+}
+
+/// [`identity_eq_opt`], folding declared aliases first (ADR-0022). Same
+/// use-this-not-that rule as [`topic_matches_with`].
+pub fn identity_eq_opt_with(aliases: &AliasMap, a: Option<&str>, b: &str) -> bool {
+    a.is_some_and(|a| identity_eq(aliases.resolve(a), aliases.resolve(b)))
+}
+
 /// How `search_items`'s `tags` filter combines multiple tags. See
 /// docs/architecture.md — tags are opaque to the core, this only governs
 /// set logic (does an item need ANY of the given tags, or ALL of them).
@@ -423,5 +496,71 @@ mod tests {
         }
         assert_eq!(SortOrder::default(), SortOrder::Desc);
         assert_eq!(SortOrder::parse("sideways"), None);
+    }
+
+    fn alias_row(alias: &str, canonical: &str) -> Alias {
+        Alias {
+            alias: alias.to_string(),
+            canonical: canonical.to_string(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_folds_a_declared_variant_and_passes_unknowns_through() {
+        let map = AliasMap::from_rows(vec![alias_row("widget", "acme/widget")]);
+        assert_eq!(map.resolve("widget"), "acme/widget");
+        assert_eq!(map.resolve("WIDGET"), "acme/widget", "lookup folds case");
+        assert_eq!(
+            map.resolve("acme/widget"),
+            "acme/widget",
+            "a canonical resolves to itself"
+        );
+        assert_eq!(
+            map.resolve("acme/gadget"),
+            "acme/gadget",
+            "an unknown id is its own canonical"
+        );
+    }
+
+    #[test]
+    fn group_of_returns_the_canonical_and_every_declared_variant() {
+        let map = AliasMap::from_rows(vec![
+            alias_row("widget", "acme/widget"),
+            alias_row("widget-rs", "acme/widget"),
+            alias_row("gadget", "acme/gadget"),
+        ]);
+        let mut group = map.group_of("WIDGET-RS");
+        group.sort();
+        assert_eq!(group, vec!["acme/widget", "widget", "widget-rs"]);
+        assert_eq!(
+            map.group_of("acme/other"),
+            vec!["acme/other"],
+            "unknown ids group alone"
+        );
+    }
+
+    #[test]
+    fn topic_matches_with_resolves_before_prefix_comparing() {
+        let map = AliasMap::from_rows(vec![alias_row("widget", "acme/widget")]);
+        // A worker registered on the bare prefix `acme` must reach an item
+        // filed under an alias that carries no org segment at all. This only
+        // works if the whole identifier is resolved *first* and the prefix
+        // comparison runs on the result.
+        assert!(topic_matches_with(&map, "acme", "widget"));
+        assert!(topic_matches_with(&map, "widget", "acme/widget"));
+        assert!(!topic_matches_with(&map, "other", "widget"));
+    }
+
+    #[test]
+    fn identity_eq_opt_with_folds_declared_variants() {
+        let map = AliasMap::from_rows(vec![alias_row("widget", "acme/widget")]);
+        assert!(identity_eq_opt_with(&map, Some("widget"), "ACME/Widget"));
+        assert!(!identity_eq_opt_with(&map, None, "acme/widget"));
+        assert!(!identity_eq_opt_with(
+            &map,
+            Some("acme/gadget"),
+            "acme/widget"
+        ));
     }
 }
