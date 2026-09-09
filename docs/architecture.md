@@ -169,14 +169,16 @@ What the layer split actually opens up.
 
 Not every `docket-core` HTTP operation becomes a `docket-mcp` tool. An operation is exposed to
 MCP when a worker can safely call it on its own judgment — reversible, or destructive only to
-something disposable (a claim, a tag). An operation stays HTTP/console-only when it is
-irreversible against durable history, or represents an admin/human value judgment about an
-item's disposition: `remove`, `merge`, `force-close`, `force-approve`, and `delete` all stay
-HTTP-only under this rule. `PATCH /items/{id}` splits by field: `requester` is exposed
-(`set_item_requester`), while `topic` and the alias endpoints (`POST`/`GET`/`DELETE /aliases`)
-stay HTTP-only — declaring an alias, in particular, is a judgment about identity that changes who
-may `approve`/`reject` every item under it, not metadata on one item (see
-[ADR-0022](decisions/ADR-0022-identity-alias.md)).
+something disposable (a claim, a tag). An operation stays off MCP when it is irreversible against
+durable history, or represents an admin/human value judgment about an item's disposition:
+`remove`, `merge`, `force-close`, `force-approve`, and `delete` all stay HTTP-only under this
+rule, each with a console button for the human operator MCP exclusion is routing around.
+`PATCH /items/{id}` splits by field: `requester` is exposed (`set_item_requester`), while `topic`
+and the alias endpoints (`POST`/`GET`/`DELETE /aliases`) stay HTTP-only — declaring an alias, in
+particular, is a judgment about identity that changes who may `approve`/`reject` every item under
+it, not metadata on one item (see [ADR-0022](decisions/ADR-0022-identity-alias.md)). Unlike the
+buttoned operations above, neither `topic` correction nor the alias endpoints have a console
+surface today — HTTP (or a raw client atop it) is the only way to reach them.
 `claim`/`submit`/`approve`/`reject`/`reopen`/`archive`/`block`/`defer` are all MCP tools. `force-approve` in particular must stay off MCP — exposing it there would let
 a worker approve its own (or another item's) completion without ever reaching `resolved`, exactly
 the shortcut the `claim → submit → approve` split exists to prevent (see

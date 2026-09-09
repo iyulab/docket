@@ -386,8 +386,8 @@ pub struct TopicCount {
     pub topic: String,
     pub count: i64,
     /// Which declared spellings folded into this row. Empty for a topic with
-    /// no aliases. Exposed so an owner can see what was folded — without it,
-    /// a folded variant would vanish from the vocabulary view with no trace.
+    /// no aliases. Carried over the API so a client can surface what folded
+    /// into this count — as of this writing no client renders it yet.
     #[serde(default)]
     pub aliases: Vec<String>,
 }

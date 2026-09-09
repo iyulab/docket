@@ -222,8 +222,9 @@ closed item too — this corrects metadata, not a workflow transition). Rejects 
   declaring an alias (below): an alias is for a spelling people actually use across many items,
   declaring one for a single mistyped item would make that typo permanent schema, so this is the
   one-off fix instead. Unlike `requester`, it has no MCP tool — the same admin-only reasoning as
-  the alias endpoints and the admin operations below. There is still no way to edit `title`/`body`
-  after creation.
+  the alias endpoints and the admin operations below, though unlike those admin operations neither
+  `topic` correction nor declaring an alias has a console button yet — both are HTTP-only, full
+  stop. There is still no way to edit `title`/`body` after creation.
 
 When both are given, they are applied **in sequence — `requester` first, then `topic` — not as one
 transaction**: if the `topic` half then fails validation, the `requester` half has already been

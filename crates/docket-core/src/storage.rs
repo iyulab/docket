@@ -385,20 +385,31 @@ impl Store {
     /// derived id drifted learns the real one. Refusing the registration
     /// instead was considered and rejected: it would stop exactly the session
     /// whose id drifted from registering at all.
+    ///
+    /// Since ADR-0022, "the existing registration" is a matter of *identity*,
+    /// not spelling — the lookup below matches every spelling in the id's
+    /// declared alias group, not just the one hop `AliasMap::resolve` would
+    /// pick. A worker that registered under a variant before an alias existed
+    /// keeps whatever spelling is on its row (declaring an alias never
+    /// rewrites storage — folding happens at comparison time); this lookup is
+    /// what lets a later registration under any other spelling in the group
+    /// still land on that same row instead of forking a second one.
     pub fn register_worker(&self, id: &str, topics: &[String]) -> Result<Worker> {
         let topics_json = serde_json::to_string(topics).expect("Vec<String> always serializes");
         let aliases = self.alias_map()?;
-        let id = aliases.resolve(id).to_string();
-        let id = id.as_str();
+        let group = aliases.group_of(id);
         let conn = self.conn.lock().expect("store mutex poisoned");
         let canonical: String = conn
             .query_row(
-                "SELECT id FROM workers WHERE id = ?1 COLLATE NOCASE",
-                params![id],
+                &format!(
+                    "SELECT id FROM workers WHERE {}",
+                    identity_group_predicate("id", group.len())
+                ),
+                rusqlite::params_from_iter(group.iter()),
                 |row| row.get(0),
             )
             .optional()?
-            .unwrap_or_else(|| id.to_string());
+            .unwrap_or_else(|| aliases.resolve(id).to_string());
         conn.execute(
             "INSERT INTO workers (id, topics, online, registered_at) VALUES (?1, ?2, 1, ?3)
              ON CONFLICT(id) DO UPDATE SET topics = excluded.topics, online = 1",
@@ -627,14 +638,21 @@ impl Store {
         Ok(())
     }
 
+    /// Since ADR-0022, matches the whole identity group (`id`'s canonical
+    /// plus every declared variant), not just `id` resolved one hop — the
+    /// same reasoning as `register_worker`'s doc comment: a row's stored
+    /// spelling doesn't change when an alias is declared later, so a lookup
+    /// under any spelling in the group must still find it.
     pub fn get_worker(&self, id: &str) -> Result<Worker> {
         let aliases = self.alias_map()?;
-        let id = aliases.resolve(id).to_string();
-        let id = id.as_str();
+        let group = aliases.group_of(id);
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
-            "SELECT id, topics, online FROM workers WHERE id = ?1 COLLATE NOCASE",
-            params![id],
+            &format!(
+                "SELECT id, topics, online FROM workers WHERE {}",
+                identity_group_predicate("id", group.len())
+            ),
+            rusqlite::params_from_iter(group.iter()),
             |row| {
                 let topics_json: String = row.get(1)?;
                 Ok(Worker {
@@ -815,7 +833,9 @@ impl Store {
         let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
         let affected = conn.execute(&sql, rusqlite::params_from_iter(param_refs))?;
         if affected == 0 {
-            return Err(approve_reject_conflict(&conn, id, "reject", author)?);
+            return Err(approve_reject_conflict(
+                &conn, &aliases, id, "reject", author,
+            )?);
         }
         insert_lifecycle_comment(&conn, id, author, reason, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
@@ -895,7 +915,9 @@ impl Store {
         let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
         let affected = conn.execute(&sql, rusqlite::params_from_iter(param_refs))?;
         if affected == 0 {
-            return Err(approve_reject_conflict(&conn, id, "approve", author)?);
+            return Err(approve_reject_conflict(
+                &conn, &aliases, id, "approve", author,
+            )?);
         }
         insert_lifecycle_comment(&conn, id, author, "approved", now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
@@ -1112,22 +1134,27 @@ impl Store {
     /// under an exact-match topic. Meant to be called before drafting a new
     /// item so a caller reuses an existing tag string instead of inventing
     /// a synonym.
+    ///
+    /// The topic scope folds declared aliases the same as every other topic
+    /// filter (ADR-0022, `COLLATE NOCASE` included) — before this, a tag
+    /// filed under one spelling would silently drop out of the vocabulary
+    /// view for a caller scoping by a declared variant of it.
     pub fn list_tags(&self, topic: Option<&str>) -> Result<Vec<TagCount>> {
+        let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let sql = if topic.is_some() {
+        let mut sql = String::from(
             "SELECT it.tag, COUNT(*) FROM item_tags it
              JOIN items i ON i.id = it.item_id
-             WHERE i.topic = ?1
-             GROUP BY it.tag ORDER BY COUNT(*) DESC, it.tag ASC"
-        } else {
-            "SELECT tag, COUNT(*) FROM item_tags
-             GROUP BY tag ORDER BY COUNT(*) DESC, tag ASC"
-        };
-        let mut stmt = conn.prepare(sql)?;
-        let rows = match topic {
-            Some(t) => stmt.query_map(params![t], tag_count_from_row)?,
-            None => stmt.query_map([], tag_count_from_row)?,
-        };
+             WHERE 1=1",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(t) = topic {
+            push_identity_group_filter(&mut sql, &mut args, "i.topic", &aliases.group_of(t));
+        }
+        sql.push_str(" GROUP BY it.tag ORDER BY COUNT(*) DESC, it.tag ASC");
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(param_refs), tag_count_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1611,8 +1638,17 @@ fn existing_state_conflict(conn: &Connection, id: &str, op: &str) -> Result<Stor
 /// mismatch is an authorization violation (or a drifted identity fixable via
 /// `set_item_requester`, or, since ADR-0022, by declaring an alias between the
 /// two spellings).
+///
+/// `author` and the item's `requester` are shown resolved to their canonical
+/// spelling (same `aliases` the caller already resolved the match attempt
+/// with), not as raw strings — two spellings that are already the same
+/// declared identity never reach this branch (the `WHERE` clause would have
+/// matched), but showing the canonical on both sides keeps the message
+/// naming one identity per side consistently instead of whatever spelling
+/// happened to be typed or stored.
 fn approve_reject_conflict(
     conn: &Connection,
+    aliases: &AliasMap,
     id: &str,
     op: &str,
     author: &str,
@@ -1626,6 +1662,8 @@ fn approve_reject_conflict(
                 )))
             } else {
                 let requester = item.requester.as_deref().unwrap_or("(unset)");
+                let author = aliases.resolve(author);
+                let requester = aliases.resolve(requester);
                 Ok(StoreError::Conflict(format!(
                     "cannot {op}: caller `{author}` does not match item's requester `{requester}` \
                      — if this is a drifted identity rather than a genuine wrong-party call, use \
@@ -2945,6 +2983,88 @@ mod tests {
         assert_eq!(store.get_worker("WIDGET").unwrap().id, "acme/widget");
     }
 
+    /// The order the test above doesn't exercise: registering *before* an
+    /// alias exists stores the row under the plain spelling used at the
+    /// time, since folding happens at comparison time, not on write
+    /// (ADR-0022) — declaring the alias afterward never rewrites that row.
+    /// A lookup under either spelling must still reach it, which requires
+    /// `get_worker` (and `register_worker`'s own existing-row search) to
+    /// match the whole identity group instead of one resolved spelling.
+    #[test]
+    fn a_worker_registered_before_its_alias_is_declared_is_still_reachable_under_both_spellings() {
+        let store = open_test_store();
+        let registered = store
+            .register_worker("widget", &["acme/widget".to_string()])
+            .unwrap();
+        assert_eq!(registered.id, "widget", "stored under the spelling used");
+
+        store.put_alias("widget", "acme/widget").unwrap();
+
+        for spelling in ["widget", "acme/widget", "WIDGET"] {
+            let found = store.get_worker(spelling).unwrap();
+            assert_eq!(
+                found.id, "widget",
+                "found via {spelling}, still under the row's original spelling"
+            );
+        }
+    }
+
+    /// Same as above with the alias/canonical roles reversed — the
+    /// declared canonical (`widget`) is the *shorter* name here, while the
+    /// row was registered under what later becomes the declared alias
+    /// (`acme/widget`). The direction of the declaration must not matter:
+    /// both spellings resolve to the same `AliasMap::group_of`.
+    #[test]
+    fn a_worker_registered_under_what_later_becomes_the_alias_spelling_is_still_reachable() {
+        let store = open_test_store();
+        let registered = store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        assert_eq!(registered.id, "acme/widget");
+
+        // "widget" is declared the canonical here — the reverse of the
+        // previous test's roles.
+        store.put_alias("acme/widget", "widget").unwrap();
+
+        for spelling in ["acme/widget", "widget", "WIDGET"] {
+            let found = store.get_worker(spelling).unwrap();
+            assert_eq!(found.id, "acme/widget");
+        }
+    }
+
+    /// `register_worker` under a second spelling of an already-registered
+    /// identity is the every-session upsert this method exists for
+    /// (ADR-0021/ADR-0022 together) — it must update the existing row, not
+    /// fork a second one, and the response must carry the row's actual
+    /// stored spelling so a drifted caller learns it.
+    #[test]
+    fn registering_under_a_second_spelling_of_an_existing_identity_updates_the_row() {
+        let store = open_test_store();
+        let first = store
+            .register_worker("widget", &["acme/a".to_string()])
+            .unwrap();
+        store.put_alias("widget", "acme/widget").unwrap();
+
+        let second = store
+            .register_worker("acme/widget", &["acme/b".to_string()])
+            .unwrap();
+        assert_eq!(
+            second.id, first.id,
+            "lands on the same row's stored spelling, not a new one"
+        );
+        assert_eq!(second.topics, vec!["acme/b".to_string()]);
+
+        // One row, not two: both spellings see the second registration's
+        // topics — a forked second row would leave "widget" showing the
+        // first registration's now-stale topics.
+        for spelling in ["widget", "acme/widget"] {
+            assert_eq!(
+                store.get_worker(spelling).unwrap().topics,
+                vec!["acme/b".to_string()]
+            );
+        }
+    }
+
     #[test]
     fn submit_item_records_a_reason_only_when_one_is_given() {
         let store = open_test_store();
@@ -3412,6 +3532,44 @@ mod tests {
         let scoped = store.list_tags(Some("iyulab/router")).unwrap();
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].tag, "deferred");
+    }
+
+    /// ADR-0022: a topic scope folds declared aliases the same everywhere
+    /// else it's applied — an item filed under one spelling must still show
+    /// up in `list_tags` scoped by a declared variant of it. Also covers the
+    /// case-folding `list_items`'s topic filter already had and this one
+    /// didn't (`i.topic = ?1` had no `COLLATE NOCASE`).
+    #[test]
+    fn list_tags_topic_scope_folds_a_declared_alias() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        store
+            .create_item("widget", "a", None, &["from-variant".to_string()], None)
+            .unwrap();
+        store
+            .create_item(
+                "acme/widget",
+                "b",
+                None,
+                &["from-canonical".to_string()],
+                None,
+            )
+            .unwrap();
+
+        for spelling in ["widget", "acme/widget", "ACME/WIDGET"] {
+            let mut tags: Vec<String> = store
+                .list_tags(Some(spelling))
+                .unwrap()
+                .into_iter()
+                .map(|tc| tc.tag)
+                .collect::<Vec<_>>();
+            tags.sort_unstable();
+            assert_eq!(
+                tags,
+                vec!["from-canonical", "from-variant"],
+                "scoped by {spelling}"
+            );
+        }
     }
 
     /// docket-works#33: `related_items` resolves the forward direction
