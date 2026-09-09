@@ -750,6 +750,7 @@ impl Store {
         if affected == 0 {
             return Err(existing_state_conflict(&conn, id, "claim")?);
         }
+        record_event(&conn, id, "transition", worker_id, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -805,6 +806,7 @@ impl Store {
         if let Some(reason) = reason {
             insert_lifecycle_comment(&conn, id, worker_id, reason, now)?;
         }
+        record_event(&conn, id, "transition", worker_id, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -860,6 +862,7 @@ impl Store {
             )?);
         }
         insert_lifecycle_comment(&conn, id, author, reason, now)?;
+        record_event(&conn, id, "transition", author, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -899,6 +902,7 @@ impl Store {
             return Err(existing_state_conflict(&conn, id, "reopen")?);
         }
         insert_lifecycle_comment(&conn, id, author, reason, now)?;
+        record_event(&conn, id, "transition", author, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -942,6 +946,7 @@ impl Store {
             )?);
         }
         insert_lifecycle_comment(&conn, id, author, "approved", now)?;
+        record_event(&conn, id, "transition", author, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -991,6 +996,7 @@ impl Store {
             "INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?1, ?2)",
             params![id, format!("duplicate-of:{duplicate_of_id}")],
         )?;
+        record_event(&tx, id, "transition", author, now)?;
         let item = row_to_item(&tx, id)?.ok_or(StoreError::NotFound)?;
         tx.commit()?;
         Ok(item)
@@ -1035,6 +1041,7 @@ impl Store {
             return Err(existing_state_conflict(&conn, id, op)?);
         }
         insert_lifecycle_comment(&conn, id, author, op, now)?;
+        record_event(&conn, id, "transition", author, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -1074,6 +1081,7 @@ impl Store {
             return Err(existing_state_conflict(&conn, id, op)?);
         }
         insert_lifecycle_comment(&conn, id, author, reason, now)?;
+        record_event(&conn, id, "transition", author, now)?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
@@ -2067,6 +2075,79 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(kinds, vec!["created".to_string(), "comment".to_string()]);
+    }
+
+    #[test]
+    fn every_transition_method_records_a_transition_event() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], Some("acme/req"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/assignee").unwrap();
+        store.submit_item(&item.id, "acme/assignee", None).unwrap();
+        store
+            .reject_item(&item.id, "acme/req", "not quite")
+            .unwrap();
+        store.submit_item(&item.id, "acme/assignee", None).unwrap();
+        store.approve_item(&item.id, "acme/req").unwrap();
+
+        let item2 = store
+            .create_item("acme/widget", "t2", None, &[], None)
+            .unwrap();
+        store.claim_item(&item2.id, "acme/assignee").unwrap();
+        store.force_close_item(&item2.id, "acme/admin").unwrap();
+
+        let item3 = store
+            .create_item("acme/widget", "t3", None, &[], None)
+            .unwrap();
+        store.claim_item(&item3.id, "acme/assignee").unwrap();
+        store.force_close_item(&item3.id, "acme/admin").unwrap();
+        store
+            .reopen_item(&item3.id, "acme/admin", "reopen for retest")
+            .unwrap();
+
+        let item4 = store
+            .create_item("acme/widget", "t4", None, &[], None)
+            .unwrap();
+        store
+            .block_item(&item4.id, "acme/admin", "waiting on dep")
+            .unwrap();
+
+        let item5 = store
+            .create_item("acme/widget", "t5", None, &[], None)
+            .unwrap();
+        let item6 = store
+            .create_item("acme/widget", "t6", None, &[], None)
+            .unwrap();
+        store
+            .merge_item(&item5.id, &item6.id, "acme/admin")
+            .unwrap();
+
+        for id in [&item.id, &item2.id, &item3.id, &item4.id, &item5.id] {
+            let count: i64 = store
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM item_events WHERE item_id = ?1 AND kind = 'transition'",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(count > 0, "item {id} recorded no transition event");
+        }
+        // item 1's chain: claim, submit, reject, submit, approve = 5 transitions.
+        let item1_count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM item_events WHERE item_id = ?1 AND kind = 'transition'",
+                params![item.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(item1_count, 5);
     }
 
     #[test]
