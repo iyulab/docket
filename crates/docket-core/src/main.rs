@@ -12,6 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::Query as ExtraQuery;
 use docket_core::domain::State as ItemState;
+use docket_core::domain::{identity_eq_opt_with, topic_matches_with};
 use docket_core::{Item, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -417,6 +418,10 @@ async fn list_items(
     } else {
         store.list_items(q.topic.as_deref(), state, q.archived, order)?
     };
+    // Loaded once, before the filter chain, so declaring an alias applies
+    // retroactively to every comparison below without rewriting any row —
+    // see ADR-0021 and the folding comparisons it introduced.
+    let aliases = store.alias_map()?;
     let items = match q.topic_scope {
         Some(worker_id) => {
             // An unregistered worker id is treated as "owns no topics", not
@@ -434,7 +439,7 @@ async fn list_items(
                 .filter(|item| {
                     topics
                         .iter()
-                        .any(|owned| docket_core::domain::topic_matches(owned, &item.topic))
+                        .any(|owned| topic_matches_with(&aliases, owned, &item.topic))
                 })
                 .collect()
         }
@@ -446,18 +451,14 @@ async fn list_items(
     let items = match q.assignee {
         Some(worker_id) => items
             .into_iter()
-            .filter(|item| {
-                docket_core::domain::identity_eq_opt(item.assignee.as_deref(), &worker_id)
-            })
+            .filter(|item| identity_eq_opt_with(&aliases, item.assignee.as_deref(), &worker_id))
             .collect(),
         None => items,
     };
     let items: Vec<Item> = match q.requester {
         Some(requester) => items
             .into_iter()
-            .filter(|item| {
-                docket_core::domain::identity_eq_opt(item.requester.as_deref(), &requester)
-            })
+            .filter(|item| identity_eq_opt_with(&aliases, item.requester.as_deref(), &requester))
             .collect(),
         None => items,
     };
@@ -473,16 +474,14 @@ async fn list_items(
             items
                 .into_iter()
                 .filter(|item| {
-                    docket_core::domain::identity_eq_opt(item.assignee.as_deref(), &worker_id)
-                        || (docket_core::domain::identity_eq_opt(
-                            item.requester.as_deref(),
-                            &worker_id,
-                        ) && item.state == ItemState::Resolved)
+                    identity_eq_opt_with(&aliases, item.assignee.as_deref(), &worker_id)
+                        || (identity_eq_opt_with(&aliases, item.requester.as_deref(), &worker_id)
+                            && item.state == ItemState::Resolved)
                         || (item.state == ItemState::Open
                             && item.assignee.is_none()
-                            && topics.iter().any(|owned| {
-                                docket_core::domain::topic_matches(owned, &item.topic)
-                            }))
+                            && topics
+                                .iter()
+                                .any(|owned| topic_matches_with(&aliases, owned, &item.topic)))
                 })
                 .collect()
         }
@@ -1389,6 +1388,108 @@ mod tests {
         assert_eq!(listed.as_array().unwrap().len(), 1);
         assert_eq!(listed[0]["id"], pending_id);
         let _ = in_progress_id; // asserted absent by the length checks above
+    }
+
+    fn open_test_store() -> Store {
+        Store::open(":memory:").expect("in-memory store opens")
+    }
+
+    fn app(store: Arc<Store>) -> Router {
+        build_router(
+            store,
+            std::path::Path::new("/nonexistent-console-dir-for-tests"),
+        )
+    }
+
+    async fn get_items(store: &Arc<Store>, uri: &str) -> Vec<Item> {
+        let resp = app(store.clone())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The headline property of comparison-time folding: an item already
+    /// filed under a variant spelling becomes visible the moment the alias is
+    /// declared, with no row rewritten and no migration run.
+    #[tokio::test]
+    async fn declaring_an_alias_retroactively_surfaces_an_already_filed_item() {
+        let store = Arc::new(open_test_store());
+        // Filed by someone who did not know the canonical spelling.
+        store
+            .create_item("widget", "variant-spelled", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+
+        let before = get_items(&store, "/items?topic_scope=acme/widget").await;
+        assert!(
+            before.is_empty(),
+            "unserved variant is invisible before the declaration"
+        );
+
+        store.put_alias("widget", "acme/widget").unwrap();
+
+        let after = get_items(&store, "/items?topic_scope=acme/widget").await;
+        assert_eq!(
+            after.len(),
+            1,
+            "same rows, same query -- only the declaration changed"
+        );
+        assert_eq!(
+            after[0].topic, "widget",
+            "storage still keeps what was written"
+        );
+    }
+
+    /// A worker registered on a bare prefix must reach an item filed under a
+    /// variant with no leading segment -- resolve-then-prefix, not the reverse.
+    #[tokio::test]
+    async fn a_prefix_registration_reaches_an_item_filed_under_a_bare_variant() {
+        let store = Arc::new(open_test_store());
+        store.put_alias("widget", "acme/widget").unwrap();
+        store
+            .create_item("widget", "bare", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/scout", &["acme".to_string()])
+            .unwrap();
+
+        let items = get_items(&store, "/items?topic_scope=acme/scout").await;
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn requester_and_mine_filters_fold_declared_variants() {
+        let store = Arc::new(open_test_store());
+        store.put_alias("widget", "acme/widget").unwrap();
+        let item = store
+            .create_item(
+                "acme/gadget",
+                "filed by a variant spelling",
+                None,
+                &[],
+                Some("widget"),
+            )
+            .unwrap();
+        store.claim_item(&item.id, "acme/gadget").unwrap();
+        store.submit_item(&item.id, "acme/gadget", None).unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+
+        assert_eq!(
+            get_items(&store, "/items?requester=acme/widget")
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(get_items(&store, "/items?mine=acme/widget").await.len(), 1);
     }
 
     /// The one way to give a pre-existing item a `requester` after the fact —
