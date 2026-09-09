@@ -3638,28 +3638,22 @@ mod tests {
         );
     }
 
-    /// Regression for a race in `alias_map`'s cache-miss path: it drops
-    /// `conn` after reading rows and only then takes the cache's write lock,
-    /// leaving a window where a concurrent `put_alias`/`delete_alias` can
-    /// invalidate in between — a loader that started before the mutation
-    /// must not then store the snapshot it read beforehand over that
-    /// invalidation, or the mutation becomes invisible until some later,
-    /// unrelated write happens to invalidate again.
-    ///
-    /// This is expressed as concurrent writers plus concurrent readers
-    /// rather than hand-driving the exact interleaving, because the race is
-    /// in the gap between releasing one lock and acquiring another — there
-    /// is no seam to pause it at from outside `alias_map`. It is not flaky:
-    /// every assertion runs only after every spawned thread has joined, at
-    /// which point no further mutation is in flight, so the final
-    /// `alias_map()` call is a plain single-threaded read. What it exercises
-    /// is that this call is guaranteed to observe every completed write
-    /// regardless of how the concurrent calls interleaved — which holds only
-    /// because a cached value's generation is checked against the current
-    /// one, so a store built from a since-superseded read can never win a
-    /// generation it no longer holds.
+    /// Smoke test that concurrent `put_alias` and `alias_map` calls don't
+    /// corrupt the cache: every assertion runs only after every spawned
+    /// thread has joined, at which point no further mutation is in flight,
+    /// so it can't be flaky. It does **not** exercise the specific race
+    /// `alias_map`'s generation check guards against (a loader whose cached
+    /// store lands after a concurrent invalidation) — that race's window is
+    /// between releasing `conn` and taking the cache's write lock inside a
+    /// single call, with no external seam to pause it at, and empirically
+    /// (measured against the pre-generation-check code: 0/100 runs failed,
+    /// 50 debug + 50 release) this shape does not land in that window,
+    /// because every writer's own invalidation still runs after it, and the
+    /// last one to finish clears the cache before the final read anyway.
+    /// The generation check is covered by reasoning in `alias_map`'s doc
+    /// comment, not by a test.
     #[test]
-    fn concurrent_put_alias_and_alias_map_never_lose_a_write_to_a_stale_cache() {
+    fn concurrent_put_alias_and_alias_map_stay_consistent() {
         let store = Arc::new(open_test_store());
         let count = 32;
         let mut handles = Vec::new();
