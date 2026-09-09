@@ -42,11 +42,22 @@ fn now_millis() -> i64 {
 /// write has already moved the row out of the expected state.
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Bumped by `invalidate_alias_cache` on every alias-table mutation.
+    /// `alias_cache` records the generation it was built from, and
+    /// `alias_map` re-checks this counter after reading rows, before storing
+    /// them: releasing `conn` and then separately taking the cache's write
+    /// lock leaves a window where a concurrent mutation lands and invalidates
+    /// in between, and without this check the read that started before the
+    /// mutation would overwrite that invalidation with the data it fetched
+    /// beforehand. A monotonically increasing counter (rather than clearing
+    /// the cache to `None`) makes that check possible: two loaders can tell
+    /// which of them read a fresher snapshot.
+    alias_generation: std::sync::atomic::AtomicU64,
     /// `identity_aliases` is read on nearly every query and written rarely, so
     /// it is cached whole rather than re-queried per comparison. `None` means
-    /// "not loaded yet"; every mutation path clears it via
-    /// `invalidate_alias_cache`.
-    alias_cache: std::sync::RwLock<Option<AliasMap>>,
+    /// "not loaded yet"; a `Some` is only trusted while its generation still
+    /// matches `alias_generation` (see that field's doc comment).
+    alias_cache: std::sync::RwLock<Option<(u64, AliasMap)>>,
 }
 
 impl Store {
@@ -205,6 +216,7 @@ impl Store {
         )?;
         Ok(Store {
             conn: Mutex::new(conn),
+            alias_generation: std::sync::atomic::AtomicU64::new(0),
             alias_cache: std::sync::RwLock::new(None),
         })
     }
@@ -330,22 +342,37 @@ impl Store {
     /// The declared alias set, cached. Returns a clone: the table is small
     /// (one row per declared spelling) and cloning keeps callers from holding
     /// the lock across SQL, which would deadlock against `self.conn`.
+    ///
+    /// The generation is read before the cache is consulted and, on a miss,
+    /// re-checked after the rows are read but before they're stored — a
+    /// mutation that invalidates the cache while this call is still in
+    /// flight bumps the generation, which makes that second check fail and
+    /// this call skip caching its now-stale read instead of clobbering the
+    /// invalidation with it. The rows it returns are still correct for the
+    /// generation it observed; only the caching of them is skipped.
     pub fn alias_map(&self) -> Result<AliasMap> {
-        if let Some(map) = self
+        use std::sync::atomic::Ordering;
+        let generation = self.alias_generation.load(Ordering::Acquire);
+        if let Some((cached_generation, map)) = self
             .alias_cache
             .read()
             .expect("alias cache poisoned")
             .as_ref()
+            && *cached_generation == generation
         {
             return Ok(map.clone());
         }
         let map = AliasMap::from_rows(self.list_aliases(None)?);
-        *self.alias_cache.write().expect("alias cache poisoned") = Some(map.clone());
+        let mut cache = self.alias_cache.write().expect("alias cache poisoned");
+        if self.alias_generation.load(Ordering::Acquire) == generation {
+            *cache = Some((generation, map.clone()));
+        }
         Ok(map)
     }
 
     fn invalidate_alias_cache(&self) {
-        *self.alias_cache.write().expect("alias cache poisoned") = None;
+        self.alias_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// Registers a worker, or updates the registration that already exists.
@@ -3609,5 +3636,60 @@ mod tests {
             "widget",
             "the cache is invalidated on delete, not just on insert"
         );
+    }
+
+    /// Regression for a race in `alias_map`'s cache-miss path: it drops
+    /// `conn` after reading rows and only then takes the cache's write lock,
+    /// leaving a window where a concurrent `put_alias`/`delete_alias` can
+    /// invalidate in between — a loader that started before the mutation
+    /// must not then store the snapshot it read beforehand over that
+    /// invalidation, or the mutation becomes invisible until some later,
+    /// unrelated write happens to invalidate again.
+    ///
+    /// This is expressed as concurrent writers plus concurrent readers
+    /// rather than hand-driving the exact interleaving, because the race is
+    /// in the gap between releasing one lock and acquiring another — there
+    /// is no seam to pause it at from outside `alias_map`. It is not flaky:
+    /// every assertion runs only after every spawned thread has joined, at
+    /// which point no further mutation is in flight, so the final
+    /// `alias_map()` call is a plain single-threaded read. What it exercises
+    /// is that this call is guaranteed to observe every completed write
+    /// regardless of how the concurrent calls interleaved — which holds only
+    /// because a cached value's generation is checked against the current
+    /// one, so a store built from a since-superseded read can never win a
+    /// generation it no longer holds.
+    #[test]
+    fn concurrent_put_alias_and_alias_map_never_lose_a_write_to_a_stale_cache() {
+        let store = Arc::new(open_test_store());
+        let count = 32;
+        let mut handles = Vec::new();
+        for i in 0..count {
+            let store = Arc::clone(&store);
+            handles.push(std::thread::spawn(move || {
+                store
+                    .put_alias(&format!("widget{i}"), &format!("acme/widget{i}"))
+                    .unwrap();
+            }));
+        }
+        // Concurrent readers race the writers above; a reader's own result
+        // is never checked, only that it can't corrupt the cache for the
+        // assertions that run after every thread here has joined.
+        for _ in 0..count {
+            let store = Arc::clone(&store);
+            handles.push(std::thread::spawn(move || {
+                store.alias_map().unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let map = store.alias_map().unwrap();
+        for i in 0..count {
+            assert_eq!(
+                map.resolve(&format!("widget{i}")),
+                format!("acme/widget{i}"),
+                "every completed write must be visible once all threads have joined"
+            );
+        }
     }
 }
