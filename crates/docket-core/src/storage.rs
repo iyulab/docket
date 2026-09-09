@@ -1171,17 +1171,25 @@ impl Store {
     /// also the discovery surface for a mistargeted spelling: a variant that
     /// nobody has declared yet still stands as its own row, which is the
     /// signal that it needs either an alias or a correction.
+    ///
+    /// Two spellings that differ only in case are one identity even with no
+    /// alias declared (ADR-0021), so they fold together here too. Which
+    /// spelling represents the folded row is a defined choice, not an
+    /// accident of `GROUP BY` row order: the raw per-spelling rows are
+    /// sorted by topic before folding, so the lexicographically-first
+    /// spelling (`"Foo"` before `"foo"`, plain ASCII order) always wins.
     pub fn list_topics(&self) -> Result<Vec<TopicCount>> {
         let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT topic, COUNT(*) FROM items WHERE archived_at IS NULL GROUP BY topic",
         )?;
-        let raw: Vec<TopicCount> = stmt
+        let mut raw: Vec<TopicCount> = stmt
             .query_map([], topic_count_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         drop(conn);
+        raw.sort_by(|a, b| a.topic.cmp(&b.topic));
 
         let mut folded: Vec<TopicCount> = Vec::new();
         for row in raw {
@@ -3346,6 +3354,55 @@ mod tests {
         );
         let gadget = topics.iter().find(|t| t.topic == "acme/gadget").unwrap();
         assert!(gadget.aliases.is_empty());
+    }
+
+    #[test]
+    fn list_topics_folds_case_variants_to_the_lexicographically_first_spelling() {
+        let store = open_test_store();
+        // No alias declared for either -- these two spellings are already
+        // one identity under ADR-0021, purely by case-insensitive
+        // comparison, and must still fold into a single row.
+        store
+            .create_item("acme/Widget", "a", None, &[], None)
+            .unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], None)
+            .unwrap();
+
+        let topics = store.list_topics().unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(
+            topics[0].topic, "acme/Widget",
+            "uppercase sorts before lowercase in ASCII, so it represents the folded row"
+        );
+        assert_eq!(topics[0].count, 2);
+    }
+
+    #[test]
+    fn list_topics_ranks_by_the_folded_total_not_any_single_spellings_count() {
+        let store = open_test_store();
+        store.put_alias("widget", "acme/widget").unwrap();
+        store
+            .create_item("acme/widget", "a", None, &[], None)
+            .unwrap();
+        store.create_item("widget", "b", None, &[], None).unwrap();
+        store.create_item("widget", "c", None, &[], None).unwrap();
+        store
+            .create_item("acme/other", "d", None, &[], None)
+            .unwrap();
+        store
+            .create_item("acme/other", "e", None, &[], None)
+            .unwrap();
+
+        // Per spelling: "widget" has 2, "acme/other" has 2, "acme/widget"
+        // has 1 -- so a ranking computed before the fold (or one that
+        // forgets to re-sort after it) would not put the folded
+        // "acme/widget" row (2 + 1 = 3) ahead of "acme/other" (2). It must.
+        let topics = store.list_topics().unwrap();
+        assert_eq!(topics[0].topic, "acme/widget");
+        assert_eq!(topics[0].count, 3);
+        assert_eq!(topics[1].topic, "acme/other");
+        assert_eq!(topics[1].count, 2);
     }
 
     #[test]
