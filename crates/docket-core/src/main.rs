@@ -79,6 +79,7 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/comments", post(add_comment).get(list_comments))
         .route("/tags", get(list_tags))
         .route("/topics", get(list_topics))
+        .route("/topics/candidates", get(topic_candidates))
         .route(
             "/aliases",
             post(put_alias).get(list_aliases).delete(delete_alias),
@@ -790,6 +791,36 @@ async fn list_topics(
     State(store): State<Arc<Store>>,
 ) -> Result<Json<Vec<docket_core::domain::TopicCount>>, ApiError> {
     Ok(Json(store.list_topics()?))
+}
+
+#[derive(Deserialize)]
+struct TopicCandidatesQuery {
+    topic: String,
+}
+
+#[derive(Serialize)]
+struct TopicCandidatesResponse {
+    /// No registered worker's topics match the given one. A mistargeted topic
+    /// is nearly always unserved, which is what makes this a high-signal
+    /// condition without any similarity scoring.
+    unserved: bool,
+    candidates: Vec<String>,
+}
+
+/// Advisory only — nothing here rejects or rewrites a topic. Kept a separate
+/// read instead of a field on `POST /items` so the item wire shape stays
+/// unchanged for `docket-console` and `docket-cc`, and so an owner can ask the
+/// same question later about a topic already filed against.
+async fn topic_candidates(
+    State(store): State<Arc<Store>>,
+    Query(q): Query<TopicCandidatesQuery>,
+) -> Result<Json<TopicCandidatesResponse>, ApiError> {
+    let unserved = !store.topic_is_served(&q.topic)?;
+    let candidates = store.topic_candidates(&q.topic)?;
+    Ok(Json(TopicCandidatesResponse {
+        unserved,
+        candidates,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2604,6 +2635,52 @@ mod tests {
         assert_eq!(topics[0]["count"], 2);
         assert_eq!(topics[1]["topic"], "iyulab/router");
         assert_eq!(topics[1]["count"], 1);
+    }
+
+    /// The advisory never blocks: the item is created, and the caller is told
+    /// separately. Refusing would break topics being an open set -- the first
+    /// item of a genuinely new topic could never be filed.
+    #[tokio::test]
+    async fn create_item_succeeds_for_a_mistargeted_topic_and_candidates_are_a_separate_call() {
+        let store = Arc::new(open_test_store());
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+
+        let created = app(store.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/items")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"topic":"other-org/widget","title":"mistargeted"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let advisory = app(store.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/topics/candidates?topic=other-org%2Fwidget")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(advisory.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(advisory.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["unserved"], serde_json::json!(true));
+        assert_eq!(body["candidates"], serde_json::json!(["acme/widget"]));
     }
 
     /// ADR-0014: a caller that asks for nothing gets `DEFAULT_LIST_LIMIT`

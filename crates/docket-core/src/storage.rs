@@ -1218,6 +1218,81 @@ impl Store {
         Ok(folded)
     }
 
+    /// Every registered worker. Needed to answer "is this topic served by
+    /// anyone", which no single-worker lookup can.
+    pub fn list_workers(&self) -> Result<Vec<Worker>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id, topics, online FROM workers")?;
+        let rows = stmt.query_map([], |row| {
+            let topics_json: String = row.get(1)?;
+            Ok(Worker {
+                id: row.get(0)?,
+                topics: serde_json::from_str(&topics_json).unwrap_or_default(),
+                online: row.get::<_, i64>(2)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Whether some registered worker's topics match `topic`. Free of `self`
+    /// so `topic_candidates` can reuse it against an already-fetched alias
+    /// map and worker list instead of re-querying per candidate.
+    fn served_by(aliases: &AliasMap, workers: &[Worker], topic: &str) -> bool {
+        workers.iter().any(|w| {
+            w.topics
+                .iter()
+                .any(|owned| crate::domain::topic_matches_with(aliases, owned, topic))
+        })
+    }
+
+    /// Whether some registered worker's topics match `topic` — the same
+    /// served-ness `topic_candidates` needs, extracted so both share one
+    /// definition instead of two that could drift apart.
+    pub fn topic_is_served(&self, topic: &str) -> Result<bool> {
+        let aliases = self.alias_map()?;
+        let workers = self.list_workers()?;
+        Ok(Self::served_by(&aliases, &workers, topic))
+    }
+
+    /// Topics that plausibly were the intended target of `topic`.
+    ///
+    /// Two conditions, both exact — there is no similarity scoring here, and
+    /// deliberately so: core knows a topic is a `/`-separated path and nothing
+    /// more (P-1), so segment equality is available to it while edit distance
+    /// is not.
+    ///
+    /// 1. `topic` is **unserved** — no registered worker's topics match it.
+    ///    A served topic is never reported: it is not a mistake.
+    /// 2. Some *other* topic that has items **is** served and its last `/`
+    ///    segment equals `topic`'s.
+    ///
+    /// Always advisory. Two topics sharing a last segment can both be
+    /// legitimate, so nothing here rejects, rewrites, or auto-corrects.
+    pub fn topic_candidates(&self, topic: &str) -> Result<Vec<String>> {
+        let topic = topic.trim();
+        if topic.is_empty() {
+            return Ok(Vec::new());
+        }
+        let aliases = self.alias_map()?;
+        let workers = self.list_workers()?;
+        if Self::served_by(&aliases, &workers, topic) {
+            return Ok(Vec::new());
+        }
+        let wanted = last_segment(aliases.resolve(topic));
+        let mut candidates: Vec<String> = self
+            .list_topics()?
+            .into_iter()
+            .map(|t| t.topic)
+            .filter(|t| !crate::domain::identity_eq(aliases.resolve(t), aliases.resolve(topic)))
+            .filter(|t| crate::domain::identity_eq(last_segment(t), wanted))
+            .filter(|t| Self::served_by(&aliases, &workers, t))
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        Ok(candidates)
+    }
+
     /// A comment is always new activity (no idempotency to consider, unlike
     /// `add_tags`/`remove_tags`), so this unconditionally bumps the parent
     /// item's `updated_at` — a thread's most recent comment counts as its
@@ -1683,6 +1758,11 @@ fn topic_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TopicCount> {
         count: row.get(1)?,
         aliases: Vec::new(),
     })
+}
+
+/// The part after the last `/` — the whole string when there is no separator.
+fn last_segment(topic: &str) -> &str {
+    topic.rsplit('/').next().unwrap_or(topic)
 }
 
 #[cfg(test)]
@@ -3403,6 +3483,83 @@ mod tests {
         assert_eq!(topics[0].count, 3);
         assert_eq!(topics[1].topic, "acme/other");
         assert_eq!(topics[1].count, 2);
+    }
+
+    #[test]
+    fn topic_candidates_suggests_a_served_topic_sharing_the_last_segment() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        // Filed against a plausible-but-wrong org. Same last segment.
+        let candidates = store.topic_candidates("other-org/widget").unwrap();
+        assert_eq!(candidates, vec!["acme/widget"]);
+    }
+
+    #[test]
+    fn topic_candidates_is_empty_for_a_topic_that_is_already_served() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        assert!(
+            store.topic_candidates("acme/widget").unwrap().is_empty(),
+            "a served topic is not a mistake"
+        );
+    }
+
+    /// Segment equality only. No edit distance, no similarity score -- core does
+    /// not interpret topic strings (P-1), it only knows they are `/`-separated.
+    #[test]
+    fn topic_candidates_does_not_guess_at_a_different_last_segment() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/widget", &["acme/widget".to_string()])
+            .unwrap();
+        assert!(store.topic_candidates("acme/widgets").unwrap().is_empty());
+        assert!(store.topic_candidates("acme/wdiget").unwrap().is_empty());
+    }
+
+    /// The candidate pool is real, item-bearing topics -- not registration
+    /// strings. Registrations are prefixes, so the canonical spelling may appear
+    /// in no registration at all.
+    #[test]
+    fn topic_candidates_draws_from_item_bearing_topics_not_registration_strings() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "served", None, &[], None)
+            .unwrap();
+        store
+            .register_worker("acme/scout", &["acme".to_string()])
+            .unwrap();
+        assert_eq!(
+            store.topic_candidates("other-org/widget").unwrap(),
+            vec!["acme/widget"]
+        );
+    }
+
+    #[test]
+    fn topic_candidates_ignores_a_topic_no_worker_serves() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "unserved", None, &[], None)
+            .unwrap();
+        assert!(
+            store
+                .topic_candidates("other-org/widget")
+                .unwrap()
+                .is_empty(),
+            "an unserved lookalike is no better a target than the one given"
+        );
     }
 
     #[test]
