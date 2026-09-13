@@ -157,8 +157,7 @@ mitigated by `set_item_requester` and a clear error message, not eliminated.
 > the mitigation named here can function. But the tool description and `docs/usage.md` still carried
 > the ADR-0011-era wording, "set requester on an item that doesn't have one yet", so a reader
 > concluded no repair path existed and approved under the wrong spelling instead — the exact
-> workaround this clause exists to prevent
-> ([docket-works#37](https://github.com/iyulab/docket-works/issues/37)). Both texts now describe
+> workaround this clause exists to prevent. Both texts now describe
 > backfill and repair as the two cases they always were, and a correction records a lifecycle
 > comment naming the old and new value. The lesson generalizes: when an ADR gives an existing
 > primitive a new job, that primitive's tool description and usage row are part of implementing the
@@ -184,8 +183,8 @@ override (`force-close`, `remove`, `merge`) closing an item they cared about —
 agnostic, human-console actions by design. That gap is a query-convention concern, not a
 `docket-core` invariant, and is out of scope here.
 
-**2026-08-24 update — the query-convention gap above is documented, not left implicit**
-(`docket-works#32`): no new primitive was needed — `list_items(requester=<id>, state="closed")`
+**2026-08-24 update — the query-convention gap above is documented, not left implicit**: no new
+primitive was needed — `list_items(requester=<id>, state="closed")`
 already answers "what closed while I wasn't looking" with the same tools this ADR's own text names.
 What was actually missing was the connection between that existing call and `mine`'s deliberate
 `closed` exclusion. `docs/usage.md` §5 (the worker loop) now states this explicitly next to `mine`,

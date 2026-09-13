@@ -67,7 +67,11 @@ primitives:
   are new comments, not edits to old ones. **Status: implemented** — this task adds
   `item_comments`, `Store::{add_comment, list_comments}`, and `comment` is reflected in
   `principles.md` P-1's vocabulary list and `glossary.md`'s mapping table as of this
-  same commit.
+  same commit. **2026-09-13 update**: narrowed by
+  [ADR-0023](ADR-0023-redact-item-and-comment.md) — a comment's `body` can now be
+  overwritten, but only to a fixed redaction sentinel via `redact_comment`, never to
+  arbitrary new content. "No update operation" no longer holds literally; "no way to
+  edit a comment's substance" still does.
 
 Neither concept carries any domain-specific meaning (no `severity`, `scopePath`,
 `tenantId`, or similar baked into the schema) — the string content of a tag and the

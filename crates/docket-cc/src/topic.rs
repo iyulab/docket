@@ -48,8 +48,7 @@ pub fn derive_topic(start: &Path) -> String {
 /// every submodule nested anywhere underneath its repository root, read
 /// straight from `.gitmodules` (recursing into a submodule's own
 /// `.gitmodules` for an umbrella-of-umbrellas). A caller working across an
-/// umbrella and its submodules — this repository's own `docket-works`/
-/// `docket` pair included — otherwise has to enumerate and register every
+/// umbrella and its submodules otherwise has to enumerate and register every
 /// sibling topic by hand, and a missed one goes silently unnoticed (a
 /// `topic_scope`/`mine` filter just returns fewer rows, no error). Order:
 /// `start`'s own topic first, then each submodule in `.gitmodules`
@@ -387,16 +386,15 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// The umbrella+submodule shape this repository itself is in — walking
-    /// from the umbrella root must list both the umbrella's own topic and
-    /// the submodule's, in `.gitmodules` order, exactly the gap the
-    /// "docket-cc topic이 엄브렐러+서브모듈..." issue reported.
+    /// The umbrella+submodule shape a caller can be in — walking from the
+    /// umbrella root must list both the umbrella's own topic and the
+    /// submodule's, in `.gitmodules` order.
     #[test]
     fn derive_all_topics_lists_the_umbrella_and_its_submodule() {
         let umbrella = temp_dir("all-topics-umbrella");
         write_config_with_origin(
             &umbrella.join(".git"),
-            "https://github.com/iyulab/docket-works.git",
+            "https://github.com/acme/umbrella.git",
         );
         std::fs::write(
             umbrella.join(".gitmodules"),
@@ -417,10 +415,7 @@ mod tests {
 
         assert_eq!(
             derive_all_topics(&umbrella),
-            vec![
-                "iyulab/docket-works".to_string(),
-                "iyulab/docket".to_string(),
-            ]
+            vec!["acme/umbrella".to_string(), "iyulab/docket".to_string(),]
         );
 
         std::fs::remove_dir_all(&umbrella).unwrap();
@@ -435,7 +430,7 @@ mod tests {
         let umbrella = temp_dir("all-topics-uninit");
         write_config_with_origin(
             &umbrella.join(".git"),
-            "https://github.com/iyulab/docket-works.git",
+            "https://github.com/acme/umbrella.git",
         );
         std::fs::write(
             umbrella.join(".gitmodules"),
@@ -447,7 +442,7 @@ mod tests {
 
         assert_eq!(
             derive_all_topics(&umbrella),
-            vec!["iyulab/docket-works".to_string()]
+            vec!["acme/umbrella".to_string()]
         );
 
         std::fs::remove_dir_all(&umbrella).unwrap();

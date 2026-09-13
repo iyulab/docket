@@ -4,8 +4,7 @@ Status: v0 alignment snapshot | 2026-08-23 | settled
 
 ## Context
 
-[Issue #29](https://github.com/iyulab/docket-works/issues/29) (docket-works, private, product
-feedback — §5 exception) reported a live case: an assignee worker completed real work end-to-end
+A real deployment reported a live case: an assignee worker completed real work end-to-end
 (triage, implementation, deployment) but never called `claim_item`/`submit_item` — it narrated
 every step through `add_comment` instead. The item stayed `state=open`, `assignee=null`. When the
 requester tried `approve_item` after confirming the work, the call was rejected with `conflict:

@@ -72,11 +72,16 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/items/{id}/block", post(block_item))
         .route("/items/{id}/defer", post(defer_item))
         .route("/items/{id}/archive", post(archive_item))
+        .route("/items/{id}/redact", post(redact_item))
         .route(
             "/items/{id}/tags",
             post(add_item_tags).delete(remove_item_tags),
         )
         .route("/items/{id}/comments", post(add_comment).get(list_comments))
+        .route(
+            "/items/{id}/comments/{comment_id}/redact",
+            post(redact_comment),
+        )
         .route("/tags", get(list_tags))
         .route("/events", get(list_events))
         .route("/topics", get(list_topics))
@@ -107,8 +112,8 @@ async fn api_not_found() -> impl IntoResponse {
 /// An API client must not: handing it a `200 text/html` shell turns a
 /// mis-shaped path into a *successful* call whose body then fails to parse,
 /// which is strictly worse than a 404 — it can't be told apart from a broken
-/// transport. That is how an unencoded `/` inside a worker id surfaced
-/// (docket-works#36): `GET /workers/{org}/{repo}` is two segments, misses the
+/// transport. That is how an unencoded `/` inside a worker id surfaced:
+/// `GET /workers/{org}/{repo}` is two segments, misses the
 /// single-segment `/workers/{id}` route, and lands here.
 ///
 /// [`api_not_found`] already guards the `/api` nest, but the same routes are
@@ -348,8 +353,7 @@ struct ListItemsQuery {
     /// one case where `mine` *does* consult topic jurisdiction, since an
     /// unclaimed item in your topic has no other owner to be "held" by).
     /// Combines what a caller otherwise has to know to run as three
-    /// separate queries and merge themselves — see
-    /// [docket-works#35](https://github.com/iyulab/docket-works/issues/35).
+    /// separate queries and merge themselves.
     /// ANDs with every other filter on this struct, same as `assignee`/
     /// `requester` do individually. Every identity comparison here — the
     /// `assignee` match, the `requester` match, and the topic-jurisdiction
@@ -395,8 +399,7 @@ struct ListItemsQuery {
     /// `get_item` offers for a single item, applied per row here after
     /// pagination (so the cost is bounded by `limit`, not the unpaged
     /// total). Defaults to `false` (byte-identical response to before, no
-    /// `related` key on any item). See
-    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    /// `related` key on any item).
     #[serde(default)]
     expand_related: Option<bool>,
 }
@@ -565,8 +568,7 @@ async fn list_items(
 #[derive(Deserialize)]
 struct GetItemQuery {
     /// When `true`, also resolves the item's `related:<id>` tags (both
-    /// directions) into a `related` field — see
-    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    /// directions) into a `related` field.
     /// Defaults to `false`, in which case the response is byte-identical to
     /// today's (no `related` key at all, not even an empty array).
     #[serde(default)]
@@ -618,6 +620,13 @@ struct UpdateItemRequest {
     /// not-yet-built gap (see ROADMAP.md).
     #[serde(default)]
     topic: Option<String>,
+    /// Corrects `assignee` on an existing item — reassignment only, the
+    /// item-level counterpart to `requester`. There is no way to clear it
+    /// through this field (it is a plain `String`, not nullable):
+    /// unassigning an item is `reopen_item`'s job,
+    /// not this one's.
+    #[serde(default)]
+    assignee: Option<String>,
     /// Who made the correction, recorded on the lifecycle comment the change
     /// writes. Optional here and defaulting to `"unknown"`, the same treatment
     /// `POST /items/{id}/comments` gives a direct HTTP caller — `docket-mcp`
@@ -626,28 +635,30 @@ struct UpdateItemRequest {
     author: Option<String>,
 }
 
-/// When both `requester` and `topic` are given, they are applied in
-/// sequence — `requester` first, then `topic` — not as a single transaction
-/// spanning both: if `topic` then fails validation, the `requester` half has
-/// already been committed and the caller gets a flat `400` with no mention
-/// of that; a `GET` on the item is the only way to see it landed.
+/// When more than one of `requester`/`topic`/`assignee` are given, they are
+/// applied in sequence — declaration order above — not as a single
+/// transaction spanning all of them: if a later field then fails validation,
+/// the earlier ones have already been committed and the caller gets a flat
+/// `400` with no mention of that; a `GET` on the item is the only way to see
+/// what landed.
 async fn update_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateItemRequest>,
 ) -> Result<Json<Item>, ApiError> {
-    if req.requester.is_none() && req.topic.is_none() {
+    if req.requester.is_none() && req.topic.is_none() && req.assignee.is_none() {
         return Err(ApiError(StoreError::Validation(
-            "PATCH /items/{id} requires at least one of requester or topic".to_string(),
+            "PATCH /items/{id} requires at least one of requester, topic, or assignee".to_string(),
         )));
     }
     let author = req.author.as_deref().unwrap_or("unknown");
-    // Applied in declaration order — requester, then topic. Each call is its
-    // own atomic store operation (mutex-guarded transaction), so a failure on
-    // the second leaves the first's correction durably applied rather than
-    // reverted, exactly as if the caller had issued two separate PATCH
-    // requests; the error response names the field that failed, so the
-    // caller is never left guessing which one that was.
+    // Applied in declaration order — requester, then topic, then assignee.
+    // Each call is its own atomic store operation (mutex-guarded
+    // transaction), so a failure on a later one leaves the earlier
+    // correction(s) durably applied rather than reverted, exactly as if the
+    // caller had issued separate PATCH requests; the error response names
+    // the field that failed, so the caller is never left guessing which one
+    // that was.
     let mut item = None;
     if let Some(requester) = req.requester.as_deref() {
         item = Some(store.set_item_requester(&id, author, requester)?);
@@ -655,8 +666,11 @@ async fn update_item(
     if let Some(topic) = req.topic.as_deref() {
         item = Some(store.set_item_topic(&id, author, topic)?);
     }
+    if let Some(assignee) = req.assignee.as_deref() {
+        item = Some(store.set_item_assignee(&id, author, assignee)?);
+    }
     Ok(Json(item.expect(
-        "validated above that requester or topic is present",
+        "validated above that requester, topic, or assignee is present",
     )))
 }
 
@@ -969,6 +983,53 @@ async fn list_comments(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<docket_core::domain::Comment>>, ApiError> {
     Ok(Json(store.list_comments(&id)?))
+}
+
+#[derive(Deserialize)]
+struct RedactItemRequest {
+    #[serde(default = "default_comment_author")]
+    author: String,
+    /// Also redact `title`, not just `body`. Defaults to `false` — `title`
+    /// is what every list view renders, so it is touched only when it
+    /// itself carries the leak, not by default. See ADR-0023.
+    #[serde(default)]
+    title: bool,
+}
+
+/// HTTP/console-only — deliberately has no MCP tool. Redaction is
+/// irreversible (the value it overwrites is gone, not archived), which puts
+/// it in the same MCP-exposure bucket as `remove`/`delete` per
+/// `docs/architecture.md`'s exposure rule, not the worker-callable bucket
+/// `set_item_requester`/`set_item_assignee` are in.
+async fn redact_item(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    body: Option<Json<RedactItemRequest>>,
+) -> Result<Json<Item>, ApiError> {
+    let (author, title) = match body {
+        Some(Json(req)) => (req.author, req.title),
+        None => (default_comment_author(), false),
+    };
+    Ok(Json(store.redact_item(&id, &author, title)?))
+}
+
+#[derive(Deserialize)]
+struct RedactCommentRequest {
+    #[serde(default = "default_comment_author")]
+    author: String,
+}
+
+/// HTTP/console-only, same reasoning as `redact_item` above — no MCP tool.
+async fn redact_comment(
+    State(store): State<Arc<Store>>,
+    Path((id, comment_id)): Path<(String, String)>,
+    body: Option<Json<RedactCommentRequest>>,
+) -> Result<Json<docket_core::domain::Comment>, ApiError> {
+    let author = match body {
+        Some(Json(req)) => req.author,
+        None => default_comment_author(),
+    };
+    Ok(Json(store.redact_comment(&id, &comment_id, &author)?))
 }
 
 #[cfg(test)]
@@ -1369,7 +1430,7 @@ mod tests {
     /// I look at" sweep must return its items under either spelling. Before
     /// ADR-0021 `mine="iyulab/Filer"` returned the `Filer` items and never the
     /// `filer` ones, and the requester did not see two of its own resolved items
-    /// for six days (docket-works#37).
+    /// for six days.
     #[tokio::test]
     async fn mine_and_the_ownership_filters_fold_identity_case() {
         let app = test_app();
@@ -1493,7 +1554,7 @@ mod tests {
         let app = test_app();
 
         // w1 is registered for `iyulab` — makes it eligible for the
-        // unclaimed-inbox branch (docket-works#35) under that jurisdiction.
+        // unclaimed-inbox branch under that jurisdiction.
         app.clone()
             .oneshot(json_request(
                 "POST",
@@ -1573,8 +1634,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Open, unclaimed, under w1's topic jurisdiction (`iyulab`) — the new
-        // unclaimed-inbox branch (docket-works#35) — matches mine=w1 even
+        // Open, unclaimed, under w1's topic jurisdiction (`iyulab`) — the
+        // unclaimed-inbox branch — matches mine=w1 even
         // though w1 never touched it.
         let resp = app
             .clone()
@@ -2652,7 +2713,7 @@ mod tests {
         assert_eq!(json_body(resp).await, serde_json::json!([]));
     }
 
-    /// docket-works#33: `expand_related` defaults to omitting the `related`
+    /// `expand_related` defaults to omitting the `related`
     /// key entirely (byte-identical to the pre-existing response shape,
     /// unlike an explicit `null`/`[]`), and only builds it out when asked.
     #[tokio::test]
@@ -2738,8 +2799,8 @@ mod tests {
     }
 
     /// The same `expand_related` expansion `get_item` offers for a single
-    /// item, applied per row on `list_items` — a batch-expand follow-on to
-    /// docket-works#33. Defaults off (byte-identical rows); when requested,
+    /// item, applied per row on `list_items` — a batch-expand follow-on.
+    /// Defaults off (byte-identical rows); when requested,
     /// only the returned page is expanded, not the unpaged total — proven
     /// here by tagging `a` (referencing `b`) *before* creating `c`, so the
     /// default (`updated_at` descending) page-2 result is `[c, a]`, excluding
@@ -3283,7 +3344,7 @@ mod tests {
 
     /// A browser navigating a client-side route announces `text/html`, and only
     /// that gets the SPA shell — a caller that didn't ask for HTML gets the same
-    /// JSON 404 the API returns. See `spa_fallback` / docket-works#36.
+    /// JSON 404 the API returns. See `spa_fallback`.
     #[tokio::test]
     async fn spa_fallback_serves_index_only_when_html_is_requested() {
         let dir = temp_console_dir("spa-fallback");
@@ -3377,8 +3438,8 @@ mod tests {
     }
 
     /// A misspelled API path at the root used to answer `200 text/html` while
-    /// the same path under `/api` answered a JSON 404 — the asymmetry behind
-    /// docket-works#36, since every client calls the root-merged routes. The
+    /// the same path under `/api` answered a JSON 404 — an asymmetry that
+    /// mattered since every client calls the root-merged routes. The
     /// two now agree for any caller that isn't a browser.
     #[tokio::test]
     async fn bare_unmatched_path_matches_api_404_for_non_browser_callers() {
@@ -3407,7 +3468,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Regression for docket-works#36. A worker id is conventionally `org/repo`,
+    /// A worker id is conventionally `org/repo`,
     /// so an unencoded id makes `/workers/{id}` a *two*-segment path that misses
     /// the route entirely and lands on the static fallback. Before the fix that
     /// answered `200 text/html`, which every JSON client read as a broken
@@ -3771,6 +3832,123 @@ mod tests {
             second_archived["archived_at"].as_u64().unwrap(),
             first_timestamp
         );
+    }
+
+    /// POST /items/{id}/redact clears `body` by default and leaves `title`
+    /// untouched unless asked — the only way to reach this operation at all,
+    /// since it deliberately has no MCP tool (docs/architecture.md's
+    /// exposure rule for irreversible operations).
+    #[tokio::test]
+    async fn redact_item_clears_body_by_default_and_title_when_asked() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({
+                    "topic": "iyulab/docket",
+                    "title": "leaked-in-title",
+                    "body": "leaked-in-body",
+                }),
+            ))
+            .await
+            .unwrap();
+        let item = json_body(resp).await;
+        let id = item["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/redact"),
+                serde_json::json!({"author": "admin"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let redacted = json_body(resp).await;
+        assert_eq!(redacted["body"], serde_json::Value::Null);
+        assert_eq!(redacted["title"], "leaked-in-title");
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/redact"),
+                serde_json::json!({"author": "admin", "title": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let redacted = json_body(resp).await;
+        assert_eq!(redacted["title"], "[redacted]");
+    }
+
+    /// POST /items/{id}/comments/{comment_id}/redact overwrites one
+    /// comment's body without touching the rest of the thread, and the
+    /// audit trail names the comment, never its content.
+    #[tokio::test]
+    async fn redact_comment_overwrites_body_only() {
+        let app = test_app();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "t"}),
+            ))
+            .await
+            .unwrap();
+        let item = json_body(resp).await;
+        let id = item["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/comments"),
+                serde_json::json!({"author": "acme/alice", "body": "leaked-comment-body"}),
+            ))
+            .await
+            .unwrap();
+        let comment = json_body(resp).await;
+        let comment_id = comment["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{id}/comments/{comment_id}/redact"),
+                serde_json::json!({"author": "admin"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let redacted = json_body(resp).await;
+        assert_eq!(redacted["body"], "[redacted]");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{id}/comments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let comments = json_body(resp).await;
+        let bodies: Vec<&str> = comments
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["body"].as_str().unwrap())
+            .collect();
+        assert!(!bodies.iter().any(|b| b.contains("leaked-comment-body")));
+        assert!(bodies.iter().any(|b| b.contains(&comment_id)));
     }
 
     /// GET /items with no `archived` param excludes archived items by default.

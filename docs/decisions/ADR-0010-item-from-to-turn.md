@@ -110,10 +110,9 @@ here rather than silently edited, so the original reasoning stays visible:
 - **The backfill did happen.** `PATCH /items/{id} {"from": "…"}` was added (admin-only, HTTP-only,
   no MCP tool — same reasoning as the three close operations) specifically to set `from` on items
   that predate this ADR. Every non-closed production item carrying a `found-in:` tag was backfilled
-  from that tag's value, then the now-redundant tag removed via the existing `remove_tags` — see
-  `docket-works` HISTORY for the 2026-08-18 entries. Closed items were left untouched (no
-  practical need surfaced yet, and their `found-in:` tag remains the only record of the value until
-  one exists).
+  from that tag's value, then the now-redundant tag removed via the existing `remove_tags` (done
+  2026-08-18). Closed items were left untouched (no practical need surfaced yet, and their
+  `found-in:` tag remains the only record of the value until one exists).
 - **`to`'s display fallback lives in the console, not here.** `docket-console` shows `to`, falling
   back to the item's own `topic` when nobody has claimed it yet, so "who should look at this" always
   has an answer. This is display-only — `Item.to` itself is unchanged, still `null` until `claim`.
@@ -217,7 +216,7 @@ question as rejected work in a way that changes what they do — the cheap next 
 
 ## 2026-09-09 update — comment does not flip `turn`; that gap is a different fact, not this ADR's
 
-A real production instance (`docket-works` owner, watching the console live) surfaced what looked
+A real production instance (an operator watching the console live) surfaced what looked
 like a regression of the 2026-09-08 fix: `iyulab/FastFind.NET` (assignee) answered all three of
 `iyulab/Filer`'s (requester) questions in a comment, and a comment after that reported the fix
 committed but not yet released — "stays claimed until the release ships". `turn` stayed `assignee`
@@ -253,8 +252,7 @@ standing in for a *correct* `turn`; an event log doesn't stand in for `turn`, it
 `turn` was never designed to answer. Consistent with P-3 (a worker still pulls the log on its own
 schedule; nothing is pushed or auto-distributed). Design/implementation is its own plan, not this ADR.
 
-**Implemented** (2026-09-09,
-[PLAN-docket-20260909-event-cursor-implementation.md](https://github.com/iyulab/docket-works/blob/main/claudedocs/plans/PLAN-docket-20260909-event-cursor-implementation.md)):
+**Implemented** (2026-09-09):
 `item_events` + `event_seq_counter` (`docket-core`), `GET /events?for=<worker>&since=<cursor>`,
 `docket-mcp`'s `list_events` tool. `turn`/`state` unchanged, exactly as this update said they would
 stay.

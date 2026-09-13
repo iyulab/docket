@@ -12,8 +12,8 @@ convention that emerged organically was `state = open` plus a free-form tag (`bl
 — `tag`/`comment` were exactly designed for this kind of workflow-generic labeling
 ([ADR-0009](ADR-0009-tag-and-comment-vocabulary.md)).
 
-In practice this convention doesn't hold up as a *filtering* primitive. A live audit
-(`docket-works`, 2026-08-23) found 15 items across 6 topics carrying `open` + `blocked`/`deferred`,
+In practice this convention doesn't hold up as a *filtering* primitive. A live audit of a real
+deployment (2026-08-23) found 15 items across 6 topics carrying `open` + `blocked`/`deferred`,
 none of them distinguishable from a genuinely actionable open item by any `list_items`/
 `search_items` call — neither tool accepts a tag filter capable of *excluding* a tag (`search_items`
 only supports "any/all of these tags", never "none of these"), so every "what's actually open"
@@ -40,9 +40,8 @@ turn-flipping "notify" mechanism; building one now would be speculative (YAGNI).
 **Where the "parked" concept lives:**
 
 - **Reject — keep it as a tag, add tag-exclude filtering to `list_items`/`search_items`**: the
-  minimal fix (originally filed as
-  [docket-works#31](https://github.com/iyulab/docket-works/issues/31), now superseded/closed by
-  this ADR). Rejected because it doesn't address the actual objection: a tag is an arbitrary,
+  minimal fix originally proposed, now superseded by this ADR. Rejected because it doesn't address
+  the actual objection: a tag is an arbitrary,
   unconstrained string (typo-prone, no casing guarantee, no compile-time exhaustiveness) that
   filtering/rendering logic would still depend on by convention only, which is exactly the kind of
   reliance ADR-0009 designed tags to be unsuited for.
@@ -71,8 +70,8 @@ turn-flipping "notify" mechanism; building one now would be speculative (YAGNI).
   deferred is not that. It is the same kind of thing `reject_item` already is: a normal worker
   judgment call, made constantly by whichever session is doing the actual triage work, that needs
   to be callable from `docket-mcp` — the tool surface agents actually operate through. Making it
-  HTTP-only would mean an agent doing routine triage (the majority of `docket-works`'s real usage)
-  could observe `resolution = blocked` on `get_item` but could never *set* it, defeating the
+  HTTP-only would mean an agent doing routine triage (the majority of real-world usage) could
+  observe `resolution = blocked` on `get_item` but could never *set* it, defeating the
   original ask ("console **and mcp** should read the current situation correctly").
 - **Accept — `block_item`/`defer_item`, MCP-exposed, requiring a reason** (adopted): same
   state-unrestricted SQL shape as the admin closes (any pre-closed state, no assignee check) via a

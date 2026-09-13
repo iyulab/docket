@@ -1,8 +1,8 @@
 //! Single-shot "check GitHub Releases → maybe update docket-core" pass,
 //! run once per invocation. The 15-minute repeat comes from a Windows
-//! Scheduled Task registered outside this crate (docket-works-private
-//! install script, design §4) — this binary does not loop or sleep
-//! between checks itself.
+//! Scheduled Task registered outside this crate (a separately maintained
+//! install script) — this binary does not loop or sleep between checks
+//! itself.
 
 const IDLE_THRESHOLD_SECS: u64 = 300;
 

@@ -35,9 +35,8 @@ struct DocketMcp {
 /// path misses its single-segment route, falls through to docket-core's static
 /// console service, and comes back as a `200 text/html` that this tool then
 /// fails to parse as JSON. `get_worker` hit exactly that, so every `org/repo`
-/// worker id was unlookupable regardless of whether it was registered
-/// ([docket-works#36](https://github.com/iyulab/docket-works/issues/36)). Both
-/// values are routine here: a worker id is conventionally `org/repo`, and an
+/// worker id was unlookupable regardless of whether it was registered.
+/// Both values are routine here: a worker id is conventionally `org/repo`, and an
 /// item accepts its `seq` alias in `#142` form.
 fn api_url(base_url: &str, segments: &[&str]) -> reqwest::Url {
     let mut url = reqwest::Url::parse(base_url).expect("base_url is a valid absolute URL");
@@ -158,8 +157,8 @@ struct ListItemsParams {
     /// filed (`requester`) that are now `resolved` and waiting on *its*
     /// decision — approve it, or answer what the assignee asked and hand it
     /// back with `reject_item` (ADR-0010's 2026-09-08 update) — OR `open`
-    /// (unclaimed) items under a topic this worker is registered for (see
-    /// docket-works#35 — the topic-jurisdiction test is the same one
+    /// (unclaimed) items under a topic this worker is registered for (the
+    /// topic-jurisdiction test is the same one
     /// `topic_scope` uses). ANDs with every other filter here,
     /// same as `assignee`/`requester` individually. Prefer this over
     /// manually combining `assignee`, `requester`+`state=resolved`, and
@@ -195,7 +194,7 @@ struct ListItemsParams {
     /// `get_item` offers for a single item, applied per row here after
     /// `limit`/`offset`, so the cost is bounded by the returned page, not
     /// the unpaged total. Defaults to `false` (no `related` field on any
-    /// item). See [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    /// item).
     #[serde(default)]
     expand_related: Option<bool>,
 }
@@ -258,8 +257,7 @@ struct SearchItemsParams {
     order: Option<String>,
     /// Same semantics as `list_items`'s field of the same name — resolves
     /// each returned item's `related:<id>` tags into a `related` field,
-    /// bounded by the returned page. See
-    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    /// bounded by the returned page.
     #[serde(default)]
     expand_related: Option<bool>,
 }
@@ -347,6 +345,22 @@ struct SetRequesterParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SetAssigneeParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    item_id: String,
+    /// The corrected assignee identity. Must not be blank — this tool only
+    /// reassigns, it never clears assignee (see `reopen_item` for that).
+    assignee: String,
+    /// Who is making the correction — recorded on the lifecycle comment the
+    /// change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
+    /// `resolve_identity`), same treatment as every other authored operation.
+    #[serde(default)]
+    author: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListTagsParams {
     /// Scope the vocabulary to items under this exact-match topic.
     #[serde(default)]
@@ -389,8 +403,7 @@ struct GetItemParams {
     item_id: String,
     /// When `true`, also resolves the item's `related:<id>` tags (both
     /// directions) into the response's `related` field. Defaults to
-    /// `false` (no `related` field at all). See
-    /// [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
+    /// `false` (no `related` field at all).
     #[serde(default)]
     expand_related: Option<bool>,
 }
@@ -444,12 +457,11 @@ struct ItemDto {
     /// Only present when `get_item` was called with `expand_related=true`
     /// against a server that supports it — omitted (not `null`/`[]`)
     /// otherwise, same older-server-defaulting convention as `tags` above.
-    /// See [docket-works#33](https://github.com/iyulab/docket-works/issues/33).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     related: Option<Vec<RelatedItemRefDto>>,
 }
 
-/// Mirrors `docket-core`'s `RelatedItemRef` JSON shape (docket-works#33).
+/// Mirrors `docket-core`'s `RelatedItemRef` JSON shape.
 #[derive(Debug, Serialize, Deserialize)]
 struct RelatedItemRefDto {
     id: String,
@@ -525,9 +537,8 @@ fn content_type(resp: &reqwest::Response) -> String {
 /// Message for a 2xx whose body isn't the JSON this tool expected.
 ///
 /// The bare serde text ("expected value at line 1 column 1") leaves the caller
-/// unable to tell a real not-found from a broken transport — the complaint in
-/// [docket-works#36](https://github.com/iyulab/docket-works/issues/36), where a
-/// mis-shaped path quietly returned docket-core's console HTML with a 200. The
+/// unable to tell a real not-found from a broken transport — the complaint
+/// where a mis-shaped path quietly returned docket-core's console HTML with a 200. The
 /// status and content-type are what separate the two, so they travel with the
 /// parse error.
 fn unparseable_body(
@@ -719,7 +730,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Fetch a worker's registration — its topics and online status. id may be omitted to look up this session's own registration via DOCKET_WORKER_ID. The only way to positively confirm what you're currently registered as (topic_scope/mine treat an unknown worker id the same as one with no matching topics: an empty result, not an error)"
+        description = "Fetch a worker's registration — its topics and online flag. online is set once at register_worker and never updated afterward — it is NOT a liveness signal, it means \"has registered\", not \"is currently active\". id may be omitted to look up this session's own registration via DOCKET_WORKER_ID. The only way to positively confirm what you're currently registered as (topic_scope/mine treat an unknown worker id the same as one with no matching topics: an empty result, not an error)"
     )]
     async fn get_worker(
         &self,
@@ -796,7 +807,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss (see docket-works#35). Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item"
     )]
     async fn list_items(
         &self,
@@ -1137,9 +1148,10 @@ impl DocketMcp {
             the item, do not impersonate the wrong spelling. State-independent (works on a \
             closed item too — this corrects metadata, it isn't a workflow transition) and \
             idempotent (setting the value it already has changes nothing). A real change is \
-            recorded as a comment naming the old and new value. Does not cover assignee/turn/title/body. topic can also be corrected on the same PATCH /items/{id} request but \
-            has no MCP tool of its own (docs/usage.md). author may be omitted if this \
-            session's DOCKET_WORKER_ID is set"
+            recorded as a comment naming the old and new value. Does not cover turn/title/body — \
+            use set_item_assignee to correct assignee. topic can also be corrected on the same \
+            PATCH /items/{id} request but has no MCP tool of its own (docs/usage.md). author may \
+            be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn set_item_requester(
         &self,
@@ -1153,6 +1165,35 @@ impl DocketMcp {
             .http
             .patch(items_url(&self.base_url, &p.item_id, &[]))
             .json(&serde_json::json!({ "requester": p.requester, "author": author }))
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Correct an item's assignee — the mirror of set_item_requester on the \
+            other side of the handshake. Covers both an item nobody has claimed yet and one \
+            whose assignee identity drifted or vanished (a claimed workspace renamed or torn \
+            down, with nothing else able to move it off). Reassignment only: this never clears \
+            assignee — unassigning is reopen_item's job, not this one's. State-independent \
+            (works on a closed item too — this corrects metadata, it isn't a workflow \
+            transition) and idempotent (setting the value it already has changes nothing). A \
+            real change is recorded as a comment naming the old and new value. author may be \
+            omitted if this session's DOCKET_WORKER_ID is set"
+    )]
+    async fn set_item_assignee(
+        &self,
+        Parameters(p): Parameters<SetAssigneeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let resp = self
+            .http
+            .patch(items_url(&self.base_url, &p.item_id, &[]))
+            .json(&serde_json::json!({ "assignee": p.assignee, "author": author }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -2447,7 +2488,7 @@ mod tests {
         // The other half of what this tool is for: repairing a requester that
         // is already set. The tool used to describe itself as covering only
         // the blank case, which is what sent a reader looking for a primitive
-        // that already existed (docket-works#37).
+        // that already existed.
         let repaired = server
             .set_item_requester(Parameters(SetRequesterParams {
                 item_id: item_id.clone(),
@@ -2472,6 +2513,103 @@ mod tests {
         );
     }
 
+    /// The assignee side of the same handshake as
+    /// `set_item_requester_backfills_a_blank_requester`: a workspace claimed
+    /// under one spelling that later renamed or vanished, with nothing else
+    /// able to move `assignee` off of it.
+    #[tokio::test]
+    async fn set_item_assignee_reassigns_a_claimed_item() {
+        let dir = std::env::temp_dir().join(format!(
+            "docket-mcp-test-set-assignee-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("set-assignee.db");
+        let core = spawn_core(18443, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "claimed under a spelling that later drifted".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: item_id.clone(),
+                worker_id: Some("acme/widget".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let rejected = server
+            .set_item_assignee(Parameters(SetAssigneeParams {
+                item_id: item_id.clone(),
+                assignee: "   ".to_string(),
+                author: Some("acme/fixer".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+
+        let reassigned = server
+            .set_item_assignee(Parameters(SetAssigneeParams {
+                item_id: item_id.clone(),
+                assignee: "acme/Widget".to_string(),
+                author: Some("acme/fixer".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(reassigned.is_error, Some(true));
+        assert_eq!(json_value(&reassigned)["assignee"], "acme/Widget");
+
+        let refetched = server
+            .list_items(Parameters(ListItemsParams {
+                topic: Some("iyulab/docket".to_string()),
+                state: None,
+                assignee: Some("acme/Widget".to_string()),
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&refetched)["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == item_id)
+        );
+
+        let comments = server
+            .list_comments(Parameters(ItemIdParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+        let rendered = text_of(&comments);
+        assert!(
+            rendered.contains("assignee: acme/widget -> acme/Widget"),
+            "correction must be recorded in the thread, got: {rendered}"
+        );
+    }
+
     /// Pins the encoding contract itself, independently of docket-core.
     ///
     /// The end-to-end tests here run against a core built from this same
@@ -2479,12 +2617,12 @@ mod tests {
     /// talks to whatever core a machine is pointed at, which can be an older
     /// deployment that still answers a mis-shaped path with `200 text/html`.
     /// Encoding the segment on the way out is what makes the request correct
-    /// regardless (docket-works#36).
+    /// regardless.
     #[test]
     fn api_url_encodes_a_path_segment_rather_than_splitting_it() {
         assert_eq!(
-            api_url("http://127.0.0.1:8420", &["workers", "iyulab/docket-works"]).as_str(),
-            "http://127.0.0.1:8420/workers/iyulab%2Fdocket-works"
+            api_url("http://127.0.0.1:8420", &["workers", "acme/widget"]).as_str(),
+            "http://127.0.0.1:8420/workers/acme%2Fwidget"
         );
         // An item's `seq` alias arrives as `#142`; unencoded, `#` would make
         // the rest a URL fragment and the path just `/items/`.
@@ -2503,8 +2641,7 @@ mod tests {
     /// items they filed, and unclaimed items in their topics. This asserts the
     /// gap directly — the item is absent from the requester's `mine` while the
     /// assignee holds it, and present the moment it is handed back — so the
-    /// reasoning stays checkable instead of living only in prose
-    /// (docket-works#39).
+    /// reasoning stays checkable instead of living only in prose.
     #[tokio::test]
     async fn a_question_reaches_the_requester_only_after_submit() {
         let dir =
@@ -2620,8 +2757,7 @@ mod tests {
     /// form real callers use and the one that broke: a worker id is the single
     /// value this crate puts in a *path segment*, so an unencoded `/` made the
     /// request miss its route and come back as docket-core's console HTML with
-    /// a `200`, for registered and unregistered ids alike
-    /// ([docket-works#36](https://github.com/iyulab/docket-works/issues/36)).
+    /// a `200`, for registered and unregistered ids alike.
     /// A slash-free id can't reproduce that, which is how the earlier version
     /// of this very test passed against a tool that never worked. Registering
     /// then reading back is what proves the segment round-trips: `api_url`
@@ -2916,7 +3052,7 @@ mod tests {
         assert_eq!(missing.is_error, Some(true));
     }
 
-    /// docket-works#33: `expand_related` is forwarded end to end through the
+    /// `expand_related` is forwarded end to end through the
     /// real HTTP request (not just exercised against docket-core directly),
     /// and defaults to omitting `related` when unset.
     #[tokio::test]
@@ -2989,7 +3125,7 @@ mod tests {
     }
 
     /// The same `expand_related` forwarding `get_item` gets (above), proven
-    /// on `list_items` too — a batch-expand follow-on to docket-works#33.
+    /// on `list_items` too — a batch-expand follow-on.
     #[tokio::test]
     async fn list_items_expand_related_is_forwarded_through_the_real_request() {
         let dir = std::env::temp_dir().join(format!(

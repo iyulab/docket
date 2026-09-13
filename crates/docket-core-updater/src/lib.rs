@@ -2,9 +2,8 @@
 //! fetch its local `/status`, compare against the latest GitHub release,
 //! and — if warranted — download+verify+swap+restart+smoke, rolling back
 //! on smoke failure. The 15-minute repeat comes from a Windows Scheduled
-//! Task registered outside this crate (docket-works-private install
-//! script, design §4) — this binary itself does not loop or sleep between
-//! checks.
+//! Task registered outside this crate (a separately maintained install
+//! script) — this binary itself does not loop or sleep between checks.
 
 pub mod decision;
 pub mod deploy;

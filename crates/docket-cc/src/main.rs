@@ -196,8 +196,7 @@ fn write_item_file(root: &Path, item: &ItemDto) -> std::io::Result<PathBuf> {
 /// single-segment route, and lands on docket-core's static console service —
 /// which used to answer `200 text/html`. For the registration check below that
 /// was worse than an error, because `is_success()` then reported an
-/// unregistered worker as registered
-/// ([docket-works#36](https://github.com/iyulab/docket-works/issues/36)).
+/// unregistered worker as registered.
 fn api_url(base_url: &str, segments: &[&str]) -> reqwest::Url {
     let mut url = reqwest::Url::parse(base_url).expect("base_url is a valid absolute URL");
     {
@@ -598,23 +597,18 @@ mod tests {
         let item_id = created["id"].as_str().unwrap();
 
         // `org/repo` shaped on purpose: that is the only form real worker ids
-        // take, and the `/` in it is what has to survive the URL round trip
-        // (docket-works#36). A slash-free `w1` fixture passes either way.
+        // take, and the `/` in it is what has to survive the URL round trip.
+        // A slash-free `w1` fixture passes either way.
         client
             .post(api_url(&core.base_url, &["workers"]))
-            .json(&serde_json::json!({"id": "iyulab/docket-works", "topics": ["iyulab"]}))
+            .json(&serde_json::json!({"id": "acme/widget", "topics": ["iyulab"]}))
             .send()
             .await
             .unwrap();
 
-        let synced = sync(
-            &client,
-            &core.base_url,
-            "iyulab/docket-works",
-            &projection_root,
-        )
-        .await
-        .unwrap();
+        let synced = sync(&client, &core.base_url, "acme/widget", &projection_root)
+            .await
+            .unwrap();
         assert_eq!(synced.len(), 1);
 
         let expected_path = projection_root
@@ -638,12 +632,12 @@ mod tests {
     /// Pins the encoding contract itself, independently of docket-core — this
     /// crate talks to whatever core the machine points at, which can be an
     /// older deployment that still answers a mis-shaped path with
-    /// `200 text/html` (docket-works#36).
+    /// `200 text/html`.
     #[test]
     fn api_url_encodes_a_path_segment_rather_than_splitting_it() {
         assert_eq!(
-            api_url("http://127.0.0.1:8420", &["workers", "iyulab/docket-works"]).as_str(),
-            "http://127.0.0.1:8420/workers/iyulab%2Fdocket-works"
+            api_url("http://127.0.0.1:8420", &["workers", "acme/widget"]).as_str(),
+            "http://127.0.0.1:8420/workers/acme%2Fwidget"
         );
     }
 
@@ -655,7 +649,7 @@ mod tests {
     /// the console fallback instead of the route, and a `200 text/html` reply
     /// passed `is_success()` — so the one guard whose entire job is answering
     /// "is this worker registered?" answered yes for every unregistered worker
-    /// anyone actually has (docket-works#36).
+    /// anyone actually has.
     #[tokio::test]
     async fn sync_for_unregistered_worker_is_an_error() {
         let test_dir = std::env::temp_dir().join(format!(

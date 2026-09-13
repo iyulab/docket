@@ -15,13 +15,12 @@ registered workers) found **two independent drifts**, both in party-identity fie
 | Field | Spellings | Items |
 |---|---|---|
 | `requester` | `iyulab/Filer` (21) vs `iyulab/filer` (2) | 23 |
-| `assignee` | `iyu-devstack/Schemorph` (2) vs `iyu-devstack/schemorph` (1) | 3 |
+| `assignee` | `other-org/Handler` (2) vs `other-org/handler` (1) | 3 |
 
-The `requester` case is the one that was reported
-([docket-works#37](https://github.com/iyulab/docket-works/issues/37)); the `assignee` case was found
-while measuring it, and is what makes this a class rather than an incident. Neither party ever typed
-two spellings on purpose. A worker id is derived per session — sometimes computed, sometimes written
-by hand — and the two paths disagreed on case.
+The `requester` case is the one that was reported by a consumer; the `assignee` case, from an
+unrelated org, was found while measuring it, and is what makes this a class rather than an
+incident. Neither party ever typed two spellings on purpose. A worker id is derived per session —
+sometimes computed, sometimes written by hand — and the two paths disagreed on case.
 
 The consequence is that an identity silently splits in half. `list_items(requester="iyulab/Filer")`
 and `mine="iyulab/Filer"` returned 21 items and never the other 2; `mine="iyulab/filer"` returned
@@ -118,18 +117,21 @@ it is cosmetic.
 
 The canonical spelling for those rows is **the one the identity currently uses** — the most recent
 write, which on this data is also the majority spelling in both cases (`iyulab/Filer`,
-`iyu-devstack/Schemorph`). Note this is *not* the same rule as `register_worker`'s first-write-wins
+`other-org/Handler`). Note this is *not* the same rule as `register_worker`'s first-write-wins
 above, and it does not need to be: the upsert answers "which existing row does this registration
 land on", where exactly one row exists; the migration answers "which of two historical strings should
 be displayed", where the current one is the useful answer. After this ADR, no future drift needs
 migrating at all — folding makes it invisible — so this rule governs one cleanup, not an invariant.
 
-Execution is **not** performed here. It mutates the running dataset, and the two halves are not even
-symmetric: `requester` rows can be corrected through `set_item_requester`, which since
-docket-works#37 records a before→after comment and therefore documents itself; the single `assignee`
-row has no edit path at all (`set_item_assignee` does not exist, and inventing one to fix one row
-would be a worse trade than a one-line `UPDATE`). So it is a human-run step, parked with the release
-gate rather than executed by the change that made it optional.
+Execution is **not** performed here. It mutates the running dataset, and at the time of this ADR the
+two halves were not even symmetric: `requester` rows could be corrected through
+`set_item_requester`, which records a before→after comment and therefore documents itself, while
+the single `assignee` row had no edit path at all — inventing one just to fix that one row would
+have been a worse trade than a one-line `UPDATE`. (`set_item_assignee` exists now, added later for
+unrelated reasons, but this migration still isn't re-routed through it: a one-line `UPDATE` on a
+single already-identified row remains the simpler path, and re-plumbing a historical cleanup through
+a primitive built for a different purpose would gain nothing.) So it is a human-run step, parked
+with the release gate rather than executed by the change that made it optional.
 
 ## Re-open trigger
 

@@ -8,14 +8,12 @@ Status: v0 implementation | 2026-08-24 | implemented
 with `limit`/`offset`, but left the sort direction exactly as it already was — a hardcoded
 `ORDER BY updated_at DESC` in `Store::list_items`/`search_items`
 (`crates/docket-core/src/storage.rs:385,905`) with no caller-facing option. That fact was not even
-documented until a live audit ([docket-works#26](https://github.com/iyulab/docket-works/issues/26))
-found a caller had to read the SQL to learn it, then work around the absence of an ascending option
-by pulling every open item and sorting/computing age client-side. The docs-only half of that issue
-(stating the fixed-`desc` contract in `docs/usage.md` and the MCP tool descriptions) was already
-shipped before this ADR; this ADR is the "improvement" half the issue also asked for, previously
-held back pending real friction (`docket-works/ROADMAP.md`'s YAGNI note) and reopened here on
-direct instruction (the same escalation path [ADR-0019](ADR-0019-approve-reject-requester-match.md)
-used).
+documented until a live consumer had to read the SQL to learn it, then work around the absence of
+an ascending option by pulling every open item and sorting/computing age client-side. The docs-only
+half of that report (stating the fixed-`desc` contract in `docs/usage.md` and the MCP tool
+descriptions) was already shipped before this ADR; this ADR is the "improvement" half also asked
+for, previously held back as unconfirmed friction (YAGNI) and reopened once that friction became
+concrete (the same escalation path [ADR-0019](ADR-0019-approve-reject-requester-match.md) used).
 
 The friction is real and structural, not cosmetic: "find the longest-untouched item" is a natural
 query against a field this project already tracks (`updated_at`) and already sorts by — a caller
@@ -23,7 +21,7 @@ that wants the tail of that same ordering has no way to ask for it directly toda
 the end of the *head*-first ordering via `offset`, which requires first learning `total` and doing
 the arithmetic. Any caller of `list_items`/`search_items` at this project's scale hits the same wall
 the moment it needs staleness rather than recency — squarely inside `docket-core`'s own
-responsibility layer (`라이브러리 한계 = 개선 기회`), not a consumer-domain concept.
+responsibility layer, not a consumer-domain concept.
 
 ## Options considered and trade-offs
 
@@ -43,8 +41,7 @@ responsibility layer (`라이브러리 한계 = 개선 기회`), not a consumer-
   omitted — every existing caller (MCP or HTTP) is unaffected. An unrecognized value falls back to
   the default silently, the same treatment `tag_match` already gets (`ListItemsQuery`/
   `SearchItemsQuery` in `main.rs`) rather than a `400` — consistent with this project's established
-  "unrecognized filter value degrades to default, doesn't error" convention (`docket-works` issue
-  #18's "미인식 필터 키 무응답 수용" finding).
+  "unrecognized filter value degrades to default, doesn't error" convention.
 
 **Where the direction is applied:**
 
@@ -66,9 +63,9 @@ responsibility layer (`라이브러리 한계 = 개선 기회`), not a consumer-
 - **Accept — yes, same batch** (adopted, no alternative seriously considered): the deployment split
   between `docket-core`(HTTP, deployed immediately via `publish-docket-core.sh`) and
   `docket-mcp`/`docket-cc` (GitHub-Releases-only, launcher-fetched) already burned this project once
-  — `docket-works/CLAUDE.md`'s "배포 게이트" section, added after a real incident (2026-08-20) where
-  `docket-core` served new reject/reopen/archive tools that `docket-mcp` had no way to call. Adding
-  `order` to `docket-core` alone and leaving `docket-mcp` for later would reproduce exactly that gap.
+  — `docket-core` served new reject/reopen/archive tools that `docket-mcp` had no way to call,
+  because the two layers deployed on independent schedules. Adding `order` to `docket-core` alone
+  and leaving `docket-mcp` for later would reproduce exactly that gap.
 
 ## Decision
 
@@ -97,8 +94,8 @@ caller-selected one at the same call site.
 ## Consequences
 
 **Gained**: "find the oldest-untouched items" becomes one call (`order=asc`, optionally with
-`limit`) instead of pulling every row and sorting client-side — the exact reported friction
-(`docket-works#26`) is closed for MCP and HTTP callers alike, in the same release. The already-fixed
+`limit`) instead of pulling every row and sorting client-side — the exact reported friction is
+closed for MCP and HTTP callers alike, in the same release. The already-fixed
 "desc" contract stated in `docs/usage.md`/tool descriptions stays true by construction: it is still
 the default, just no longer the only option.
 

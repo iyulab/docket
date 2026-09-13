@@ -166,7 +166,7 @@ describe('deriveTopics', () => {
 describe('identity comparison (ADR-0021)', () => {
   it('folds ASCII case, so the console classifies an item the way the server does', () => {
     expect(identityEq('iyulab/Filer', 'iyulab/filer')).toBe(true)
-    expect(identityEq('iyu-devstack/Schemorph', 'iyu-devstack/schemorph')).toBe(true)
+    expect(identityEq('other-org/Handler', 'other-org/handler')).toBe(true)
     expect(identityEq('iyulab/Filer', 'iyulab/Filer2')).toBe(false)
   })
 

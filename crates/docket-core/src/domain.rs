@@ -81,6 +81,11 @@ pub struct Worker {
     pub id: String,
     /// Topic prefixes this worker owns (see [`topic_matches`]).
     pub topics: Vec<String>,
+    /// Set once, at registration, and never updated afterward — **not a
+    /// liveness signal**. A worker that registered once and has been gone
+    /// for weeks still reads `online: true`. There is currently no
+    /// heartbeat or presence mechanism; treat this as "has registered", not
+    /// "is currently active".
     pub online: bool,
 }
 
@@ -353,7 +358,7 @@ pub enum RelatedRelation {
 }
 
 /// One item linked to another via the `related:<id>` free-form tag
-/// convention (docket-works#33), derived at request time by
+/// convention, derived at request time by
 /// `Store::related_items` for `get_item(expand_related=true)` — not a
 /// stored concept, not part of [`Item`]. The core still treats tags as
 /// fully opaque strings (P-1); this is a best-effort helper that
@@ -442,16 +447,15 @@ pub struct Event {
 mod tests {
     use super::*;
 
-    /// ADR-0021. The fixtures use the two spellings actually observed drifting
-    /// in the running dataset, not invented ones — a `w1`-shaped fixture cannot
-    /// reproduce this class at all.
+    /// ADR-0021. The first pair is the actual spelling drift observed in the
+    /// running dataset, not an invented one — a `w1`-shaped fixture cannot
+    /// reproduce this class at all. The second stands in for a second,
+    /// independent drift found in the same dataset, from an unrelated org
+    /// (name anonymized here; see ADR-0021 for the real-data narrative).
     #[test]
     fn identity_comparison_folds_ascii_case() {
         assert!(identity_eq("iyulab/Filer", "iyulab/filer"));
-        assert!(identity_eq(
-            "iyu-devstack/Schemorph",
-            "iyu-devstack/schemorph"
-        ));
+        assert!(identity_eq("other-org/Handler", "other-org/handler"));
         assert!(!identity_eq("iyulab/Filer", "iyulab/Filer2"));
 
         assert!(identity_eq_opt(Some("iyulab/Filer"), "iyulab/filer"));

@@ -30,7 +30,7 @@ concept — any caller referencing items by hand or by token budget hits the sam
 
 **Numbering scope — global vs. per-topic:**
 
-- **Reject — per-topic counter** (e.g. `iyulab/docket-works#12`, mirroring GitHub's per-repo issue
+- **Reject — per-topic counter** (e.g. `acme/widget#12`, mirroring GitHub's per-repo issue
   numbers): the closest domain analogy (`topic` ~ repo), and the shape initially proposed when this
   friction was first triaged. Rejected on closer design: resolving a per-topic number back to an
   item requires the topic *alongside* the number — either as a compound string (`topic#12`, which
@@ -99,8 +99,8 @@ tiebreak) the first time `Store::open` runs against them, same idempotent
 ```
 
 No new `state`/`resolution` value. `docket-mcp`'s tool descriptions and `docs/usage.md` gain a note
-that `item_id` accepts either form, matching the doc-only precedent set by
-[Issue #26](https://github.com/iyulab/docket-works/issues/26)'s sort-order documentation.
+that `item_id` accepts either form, matching the doc-only precedent
+[ADR-0020](ADR-0020-list-search-order-parameter.md) set for its own sort-order documentation.
 `docket-console` gains a visible `#<seq>` next to each item (replacing `Card.tsx`'s truncated-UUID
 slice, the exact display this ADR's motivating friction traced back to) and in the item detail
 header. `docket-cc`'s file projection gains a `seq:` frontmatter line alongside `id:`.

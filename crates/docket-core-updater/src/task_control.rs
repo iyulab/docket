@@ -1,8 +1,8 @@
 //! Controls the Windows Scheduled Task that runs `docket-core` on the
-//! deployment host (registered once by a docket-works-private install
-//! script, design §4) — stopping/restarting the task, not the process
-//! directly, matches how the existing manual publish path already
-//! manages `docket-core`'s lifecycle.
+//! deployment host (registered once by a separately maintained install
+//! script) — stopping/restarting the task, not the process directly,
+//! matches how the existing manual publish path already manages
+//! `docket-core`'s lifecycle.
 //!
 //! Windows-only: `docket-core-updater` only ever runs on the Windows
 //! deployment host this scheduled task exists on. Not covered by

@@ -40,6 +40,12 @@ fn now_millis() -> i64 {
 /// `rows_affected`, so serializing access here is sufficient to make claim
 /// exclusive: the loser's `UPDATE` matches zero rows because the winner's
 /// write has already moved the row out of the expected state.
+/// What `redact_item`/`redact_comment` write in place of leaked content — a
+/// fixed sentinel, never a transformation of what was there, so grepping the
+/// database or a comment thread for it can never turn up personal data
+/// under another name. See ADR-0023.
+const REDACTED: &str = "[redacted]";
+
 pub struct Store {
     conn: Mutex<Connection>,
     /// Bumped by `invalidate_alias_cache` on every alias-table mutation.
@@ -171,6 +177,10 @@ impl Store {
             END;
             CREATE TRIGGER IF NOT EXISTS comments_fts_ad AFTER DELETE ON item_comments BEGIN
                 INSERT INTO comments_fts(comments_fts, rowid, body) VALUES('delete', old.rowid, old.body);
+            END;
+            CREATE TRIGGER IF NOT EXISTS comments_fts_au AFTER UPDATE ON item_comments BEGIN
+                INSERT INTO comments_fts(comments_fts, rowid, body) VALUES('delete', old.rowid, old.body);
+                INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
             END;",
         )?;
         migrate_owner_to_requester_assignee(&conn)?;
@@ -194,13 +204,14 @@ impl Store {
         // 'rebuild' is idempotent and cheap at this project's scale.
         conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
         // Same rationale as items_fts above, applied to comments_fts.
-        // item_comments is still never *edited* (no update API, ADR-0009),
-        // so no AFTER UPDATE trigger is needed — an INSERT-only trigger
-        // can't fall out of sync with rows that never change once written.
-        // Rows can be deleted now, though: delete_item (ADR-0013) cascades
-        // to item_comments, which is exactly why the comments_fts_ad
-        // trigger above exists — it keeps the FTS index in sync when that
-        // happens.
+        // item_comments now has one narrow update path — redact_comment
+        // (see ADR-0023, which amends ADR-0009's original "no update API")
+        // — which is exactly why comments_fts_au exists above: without it,
+        // a redacted body would keep matching search_items by its
+        // pre-redaction text in the shadow index, reproducing the exact
+        // leak the operation exists to close. delete_item (ADR-0013)
+        // cascades to item_comments too, which is why comments_fts_ad
+        // exists.
         conn.execute(
             "INSERT INTO comments_fts(comments_fts) VALUES('rebuild')",
             [],
@@ -615,6 +626,65 @@ impl Store {
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
 
+    /// Corrects `assignee` on an item — the exact counterpart of
+    /// `set_item_requester` on the other side of the handshake: a workspace
+    /// that claimed an item can vanish or get renamed, and nothing else can
+    /// move a stale `assignee` off of it, since `claim_item` only claims an
+    /// `open` item and `reopen_item` deliberately leaves `assignee`
+    /// untouched.
+    ///
+    /// **Reassignment only — this never clears `assignee`.** The type here
+    /// is `&str`, not `Option<&str>`, so there is no way to call this with
+    /// "unset": unassigning an item is `reopen_item`'s job (it already picks
+    /// `open` over `claimed` when `assignee` is `NULL`), and letting this
+    /// operation null it too would leave two paths deciding the same field
+    /// with no shared authority between them.
+    ///
+    /// State-independent (works on a closed item too — this corrects
+    /// metadata, it isn't a workflow transition) and idempotent — setting
+    /// the value it already has is a no-op, the same byte-equal comparison
+    /// `set_item_requester` uses (not a case-folded one: `set_item_requester`
+    /// exists precisely to repair a drifted *case*, so folding case here
+    /// would make that class of correction unreachable through this
+    /// operation). A real change is recorded as a lifecycle comment naming
+    /// both values.
+    pub fn set_item_assignee(&self, id: &str, author: &str, assignee: &str) -> Result<Item> {
+        let assignee = assignee.trim();
+        if assignee.is_empty() {
+            return Err(StoreError::Validation(
+                "assignee must not be blank".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
+        let previous = row_to_item(&conn, id)?
+            .ok_or(StoreError::NotFound)?
+            .assignee;
+        if previous.as_deref() == Some(assignee) {
+            return row_to_item(&conn, id)?.ok_or(StoreError::NotFound);
+        }
+        let now = now_millis();
+        let affected = conn.execute(
+            "UPDATE items SET assignee = ?1, updated_at = ?2 WHERE id = ?3",
+            params![assignee, now, id],
+        )?;
+        if affected == 0 {
+            return Err(StoreError::NotFound);
+        }
+        insert_lifecycle_comment(
+            &conn,
+            id,
+            author,
+            &format!(
+                "assignee: {} -> {assignee}",
+                previous.as_deref().unwrap_or("(unset)")
+            ),
+            now,
+        )?;
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
     /// Sets `archived_at` if not already set. Idempotent — archiving an
     /// already-archived item is not an error, it just returns the item
     /// unchanged (matches `add_tags`/`remove_tags`'s existing idempotency
@@ -630,6 +700,60 @@ impl Store {
         conn.execute(
             "UPDATE items SET archived_at = ?1, updated_at = ?1 WHERE id = ?2 AND archived_at IS NULL",
             params![now, id],
+        )?;
+        row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
+    }
+
+    /// Overwrites leaked personal content on an item in place — `body`
+    /// always, `title` only when asked (a title is what every list rendering
+    /// shows, so it is redacted only when it itself carries the leak, not by
+    /// default). This is `delete_item`'s narrower sibling: a caller wanting
+    /// to strike one field without losing the item's id, thread, and history
+    /// uses this instead of deleting the whole thing. See ADR-0023.
+    ///
+    /// State-independent (works on a closed item too — this corrects
+    /// content, it isn't a workflow transition) and idempotent — redacting a
+    /// field that already reads as redacted changes nothing there. A real
+    /// change is recorded as a lifecycle comment naming which field(s) were
+    /// touched — **never the value that was there**, since quoting it would
+    /// just relocate the leak into the audit trail meant to close it.
+    pub fn redact_item(&self, id: &str, author: &str, redact_title: bool) -> Result<Item> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, id)?;
+        let id = resolved.as_str();
+        let current = row_to_item(&conn, id)?.ok_or(StoreError::NotFound)?;
+
+        let mut touched: Vec<&str> = Vec::new();
+        let new_title = if redact_title && current.title != REDACTED {
+            touched.push("title");
+            REDACTED.to_string()
+        } else {
+            current.title
+        };
+        let new_body: Option<String> = if current.body.is_some() {
+            touched.push("body");
+            None
+        } else {
+            None
+        };
+        if touched.is_empty() {
+            return row_to_item(&conn, id)?.ok_or(StoreError::NotFound);
+        }
+
+        let now = now_millis();
+        let affected = conn.execute(
+            "UPDATE items SET title = ?1, body = ?2, updated_at = ?3 WHERE id = ?4",
+            params![new_title, new_body, now, id],
+        )?;
+        if affected == 0 {
+            return Err(StoreError::NotFound);
+        }
+        insert_lifecycle_comment(
+            &conn,
+            id,
+            author,
+            &format!("redacted: {}", touched.join(", ")),
+            now,
         )?;
         row_to_item(&conn, id)?.ok_or(StoreError::NotFound)
     }
@@ -1281,7 +1405,7 @@ impl Store {
     /// [`RelatedItemRef`]. Deliberately not exposed as a public API on the
     /// tag vocabulary itself (P-1: tags stay opaque strings); this is the
     /// one place the core interprets this specific shape, and only for the
-    /// read-only `related_items` helper below (docket-works#33).
+    /// read-only `related_items` helper below.
     const RELATED_TAG_PREFIX: &str = "related:";
 
     /// Items linked to `id` via the `related:<id>` tag convention, both
@@ -1550,6 +1674,59 @@ impl Store {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Overwrites one comment's `body` in place — `redact_item`'s sibling
+    /// for the thread rather than the item itself, so one leaked comment in
+    /// an otherwise-fine thread doesn't force deleting the whole item. See
+    /// ADR-0023, which amends ADR-0009's original "comments are append-only,
+    /// no edit API" decision with this one narrow exception.
+    ///
+    /// Idempotent — redacting an already-redacted comment changes nothing.
+    /// The audit trail is a lifecycle comment naming which comment was
+    /// touched (its id, not its content) — never the body that was there,
+    /// since quoting it would relocate the leak rather than close it.
+    pub fn redact_comment(&self, item_id: &str, comment_id: &str, author: &str) -> Result<Comment> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let resolved = resolve_item_id(&conn, item_id)?;
+        let item_id = resolved.as_str();
+        let current = conn
+            .query_row(
+                "SELECT id, item_id, author, body, created_at FROM item_comments
+                 WHERE id = ?1 AND item_id = ?2",
+                params![comment_id, item_id],
+                |row| {
+                    Ok(Comment {
+                        id: row.get(0)?,
+                        item_id: row.get(1)?,
+                        author: row.get(2)?,
+                        body: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        if current.body == REDACTED {
+            return Ok(current);
+        }
+
+        let now = now_millis();
+        conn.execute(
+            "UPDATE item_comments SET body = ?1 WHERE id = ?2",
+            params![REDACTED, comment_id],
+        )?;
+        insert_lifecycle_comment(
+            &conn,
+            item_id,
+            author,
+            &format!("redacted comment {comment_id}"),
+            now,
+        )?;
+        Ok(Comment {
+            body: REDACTED.to_string(),
+            ..current
+        })
     }
 
     /// `list_items`'s superset: adds tag filtering (`tags`/`tag_match`) and
@@ -3313,7 +3490,7 @@ mod tests {
     /// so the two-party handshake must not hard-fail on it. This is the exact
     /// shape observed in production — 21 items under `iyulab/Filer`, 2 under
     /// `iyulab/filer` — where the only way to approve was to pass the wrong
-    /// spelling back (docket-works#37).
+    /// spelling back.
     #[test]
     fn approve_and_reject_match_a_requester_that_drifted_in_case() {
         let store = open_test_store();
@@ -3340,25 +3517,21 @@ mod tests {
         }
     }
 
-    /// The assignee half of the same handshake — a second, independent drift
-    /// (`iyu-devstack/Schemorph` vs `.../schemorph`) was found in the same audit.
+    /// The assignee half of the same case-fold handshake as the requester
+    /// test above — a second, independent identity-drift case. See
+    /// [ADR-0021](../../../docs/decisions/ADR-0021-case-insensitive-identity.md).
     #[test]
     fn submit_matches_an_assignee_that_drifted_in_case() {
         let store = open_test_store();
         let item = store
             .create_item("iyulab/docket", "t", None, &[], None)
             .unwrap();
-        store
-            .claim_item(&item.id, "iyu-devstack/Schemorph")
-            .unwrap();
+        store.claim_item(&item.id, "other-org/Handler").unwrap();
         let submitted = store
-            .submit_item(&item.id, "iyu-devstack/schemorph", None)
+            .submit_item(&item.id, "other-org/handler", None)
             .unwrap();
         assert_eq!(submitted.state, State::Resolved);
-        assert_eq!(
-            submitted.assignee.as_deref(),
-            Some("iyu-devstack/Schemorph")
-        );
+        assert_eq!(submitted.assignee.as_deref(), Some("other-org/Handler"));
     }
 
     /// ADR-0019, as amended by ADR-0022: the requester check is equality of
@@ -3630,7 +3803,7 @@ mod tests {
     /// is to fix the item — not to approve under the wrong spelling. Pinned
     /// here because the tool description said "doesn't have one yet" long after
     /// the behavior and ADR-0019 both said otherwise, and a reader believed the
-    /// description (docket-works#37).
+    /// description.
     #[test]
     fn set_item_requester_repairs_an_identity_that_is_already_set() {
         let store = open_test_store();
@@ -3709,6 +3882,105 @@ mod tests {
     }
 
     #[test]
+    fn set_item_assignee_backfills_an_unclaimed_item_and_bumps_updated_at() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        assert_eq!(item.assignee, None);
+        let created_updated_at = item.updated_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let updated = store
+            .set_item_assignee(&item.id, "admin", "  acme/worker  ")
+            .unwrap();
+        assert_eq!(updated.assignee.as_deref(), Some("acme/worker"));
+        assert!(updated.updated_at > created_updated_at);
+    }
+
+    /// The assignee half of the same handshake `set_item_requester` covers
+    /// for `requester`: a workspace that claimed under a spelling that later
+    /// drifted (or vanished) leaves nothing else able to move `assignee`
+    /// off of it.
+    #[test]
+    fn set_item_assignee_reassigns_an_item_already_claimed() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "acme/widget").unwrap();
+
+        let updated = store
+            .set_item_assignee(&item.id, "acme/widget", "acme/Widget")
+            .unwrap();
+        assert_eq!(updated.assignee.as_deref(), Some("acme/Widget"));
+    }
+
+    #[test]
+    fn set_item_assignee_records_the_change_as_a_comment_and_no_ops_when_unchanged() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+
+        store
+            .set_item_assignee(&item.id, "acme/fixer", "acme/widget")
+            .unwrap();
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].author, "acme/fixer");
+        assert_eq!(comments[0].body, "assignee: (unset) -> acme/widget");
+
+        store
+            .set_item_assignee(&item.id, "acme/fixer", "acme/Widget")
+            .unwrap();
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[1].body, "assignee: acme/widget -> acme/Widget");
+
+        // Re-running the same correction adds nothing — a repeated call must
+        // not fill the thread with noise.
+        store
+            .set_item_assignee(&item.id, "acme/fixer", "acme/Widget")
+            .unwrap();
+        assert_eq!(store.list_comments(&item.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn set_item_assignee_works_on_a_closed_item_and_keeps_it_closed() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        store.claim_item(&item.id, "w1").unwrap();
+        store
+            .defer_item(&item.id, "w1", "cross-consumer demand not yet proven")
+            .unwrap();
+
+        let updated = store
+            .set_item_assignee(&item.id, "admin", "w1-renamed")
+            .unwrap();
+        assert_eq!(updated.state, State::Closed);
+        assert_eq!(updated.assignee.as_deref(), Some("w1-renamed"));
+    }
+
+    #[test]
+    fn set_item_assignee_rejects_blank_and_missing_item() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        assert!(matches!(
+            store.set_item_assignee(&item.id, "admin", "   "),
+            Err(StoreError::Validation(_))
+        ));
+        assert!(matches!(
+            store.set_item_assignee("nonexistent-id", "admin", "acme/worker"),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    #[test]
     fn set_item_topic_moves_the_item_and_records_both_values() {
         let store = open_test_store();
         let item = store
@@ -3778,6 +4050,189 @@ mod tests {
         let store = open_test_store();
         let err = store.archive_item("does-not-exist").unwrap_err();
         assert!(matches!(err, StoreError::NotFound));
+    }
+
+    #[test]
+    fn redact_item_clears_body_only_by_default() {
+        let store = open_test_store();
+        let item = store
+            .create_item(
+                "iyulab/docket",
+                "keep this title",
+                Some("leaked body"),
+                &[],
+                None,
+            )
+            .unwrap();
+
+        let redacted = store.redact_item(&item.id, "admin", false).unwrap();
+        assert_eq!(redacted.title, "keep this title");
+        assert_eq!(redacted.body, None);
+    }
+
+    #[test]
+    fn redact_item_also_clears_title_when_requested() {
+        let store = open_test_store();
+        let item = store
+            .create_item(
+                "iyulab/docket",
+                "leaked in the title itself",
+                Some("leaked body"),
+                &[],
+                None,
+            )
+            .unwrap();
+
+        let redacted = store.redact_item(&item.id, "admin", true).unwrap();
+        assert_eq!(redacted.title, "[redacted]");
+        assert_eq!(redacted.body, None);
+    }
+
+    /// The one edit that must never write down what it erased — the whole
+    /// point of the operation is that the leaked value stops being
+    /// recoverable from this database, audit trail included.
+    #[test]
+    fn redact_item_records_which_fields_were_touched_never_the_value() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", Some("super-secret-value"), &[], None)
+            .unwrap();
+
+        store.redact_item(&item.id, "admin", false).unwrap();
+        let comments = store.list_comments(&item.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].body, "redacted: body");
+        assert!(!comments[0].body.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn redact_item_is_idempotent() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", Some("leaked"), &[], None)
+            .unwrap();
+
+        store.redact_item(&item.id, "admin", false).unwrap();
+        assert_eq!(store.list_comments(&item.id).unwrap().len(), 1);
+
+        // Nothing left to redact — no second lifecycle comment.
+        store.redact_item(&item.id, "admin", false).unwrap();
+        assert_eq!(store.list_comments(&item.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn redact_item_works_on_a_closed_item() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", Some("leaked"), &[], None)
+            .unwrap();
+        store.remove_item(&item.id, "admin").unwrap();
+
+        let redacted = store.redact_item(&item.id, "admin", false).unwrap();
+        assert_eq!(redacted.state, State::Closed);
+        assert_eq!(redacted.body, None);
+    }
+
+    #[test]
+    fn redact_nonexistent_item_is_not_found() {
+        let store = open_test_store();
+        let err = store
+            .redact_item("does-not-exist", "admin", false)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::NotFound));
+    }
+
+    #[test]
+    fn redact_comment_overwrites_body_and_updates_the_shadow_index() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        let comment = store
+            .add_comment(&item.id, "acme/alice", "unique-leaked-comment-text")
+            .unwrap();
+
+        let found_before = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("unique-leaked-comment-text"),
+                None,
+                SortOrder::Desc,
+            )
+            .unwrap();
+        assert_eq!(found_before.len(), 1);
+
+        let redacted = store
+            .redact_comment(&item.id, &comment.id, "admin")
+            .unwrap();
+        assert_eq!(redacted.body, "[redacted]");
+
+        // The shadow index (comments_fts) must follow the UPDATE, not just
+        // the row itself — this is exactly the comments_fts_au gap this
+        // operation depends on being closed.
+        let found_after = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("unique-leaked-comment-text"),
+                None,
+                SortOrder::Desc,
+            )
+            .unwrap();
+        assert!(found_after.is_empty());
+
+        let comments = store.list_comments(&item.id).unwrap();
+        assert!(
+            comments
+                .iter()
+                .any(|c| c.body == format!("redacted comment {}", comment.id)),
+            "the audit trail must name the comment, never its content"
+        );
+    }
+
+    #[test]
+    fn redact_comment_is_idempotent() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        let comment = store.add_comment(&item.id, "acme/alice", "leaked").unwrap();
+
+        store
+            .redact_comment(&item.id, &comment.id, "admin")
+            .unwrap();
+        let after_first = store.list_comments(&item.id).unwrap().len();
+
+        store
+            .redact_comment(&item.id, &comment.id, "admin")
+            .unwrap();
+        assert_eq!(store.list_comments(&item.id).unwrap().len(), after_first);
+    }
+
+    #[test]
+    fn redact_comment_rejects_a_mismatched_item_or_comment_id() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        let other_item = store
+            .create_item("iyulab/docket", "t2", None, &[], None)
+            .unwrap();
+        let comment = store.add_comment(&item.id, "acme/alice", "leaked").unwrap();
+
+        assert!(matches!(
+            store.redact_comment(&other_item.id, &comment.id, "admin"),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.redact_comment(&item.id, "does-not-exist", "admin"),
+            Err(StoreError::NotFound)
+        ));
     }
 
     #[test]
@@ -4073,7 +4528,7 @@ mod tests {
         }
     }
 
-    /// docket-works#33: `related_items` resolves the forward direction
+    /// `related_items` resolves the forward direction
     /// (this item's own `related:` tags) whether the target is named by
     /// seq alias or canonical id, silently skips a tag whose target doesn't
     /// exist, and resolves the reverse direction (another item's tag naming
