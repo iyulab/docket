@@ -395,6 +395,21 @@ pub struct TopicCount {
     /// into this count — as of this writing no client renders it yet.
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Registered worker ids whose `topics` jurisdiction
+    /// ([`topic_matches_with`]) covers this row. Empty means the topic is an
+    /// **orphan** — items exist under it but no worker is registered to see
+    /// them via `mine`/`topic_scope`. Advisory only, same spirit as
+    /// `aliases`: nothing here blocks `create_item` or rewrites anything.
+    #[serde(default)]
+    pub owned_by: Vec<String>,
+    /// Non-archived items in this row that are `open` with no `assignee` —
+    /// unclaimed work sitting in this topic right now. Distinct from
+    /// `count` (every non-archived item regardless of state). Lets a caller
+    /// combine this with `owned_by` to spot a topic that both has waiting
+    /// work *and* nobody registered to see it via `mine`, computed here once
+    /// instead of once per interested worker.
+    #[serde(default)]
+    pub open_unclaimed: i64,
 }
 
 /// A declared spelling variant of one identity — `alias` names the same thing

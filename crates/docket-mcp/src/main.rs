@@ -197,6 +197,20 @@ struct ListItemsParams {
     /// item).
     #[serde(default)]
     expand_related: Option<bool>,
+    /// Requires `mine` — when `true`, adds an `unregistered_open` field to
+    /// the result: open, unclaimed item counts by topic, for topics whose
+    /// `owned_by` (see `list_topics`) is **empty** — no worker at all is
+    /// registered for them. Surfaces the exact blind spot `mine` alone
+    /// cannot: a topic everyone forgot to register for still returns 0
+    /// rows here, silently indistinguishable from "nothing to do". Not "a
+    /// topic some other worker owns" — that's normal and not this caller's
+    /// business, and would swamp the real signal on a server with many
+    /// topics. Costs one extra request against `docket-core` — opt-in so a
+    /// plain `mine` query pays nothing for it. No effect without `mine`
+    /// (the flag is only meaningful alongside a query about your own
+    /// registration).
+    #[serde(default)]
+    report_gaps: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -260,6 +274,10 @@ struct SearchItemsParams {
     /// bounded by the returned page.
     #[serde(default)]
     expand_related: Option<bool>,
+    /// Same semantics as `list_items`'s field of the same name — requires
+    /// `mine`, adds an `unregistered_open` registration-gap hint.
+    #[serde(default)]
+    report_gaps: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -493,6 +511,15 @@ struct TopicCountDto {
     /// deserializes, rather than failing the whole `list_topics` call.
     #[serde(default)]
     aliases: Vec<String>,
+    /// Registered worker ids covering this topic — empty means orphan.
+    /// Same defaulting reason as `aliases`.
+    #[serde(default)]
+    owned_by: Vec<String>,
+    /// Open, unclaimed items in this topic — distinct from `count`, which
+    /// is every non-archived item regardless of state. Same defaulting
+    /// reason as `aliases`.
+    #[serde(default)]
+    open_unclaimed: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -679,6 +706,27 @@ fn with_topic_advisory(result: CallToolResult, note: String) -> CallToolResult {
     }
 }
 
+/// Inserts an `unregistered_open` key into a successful paginated result —
+/// `with_topic_advisory`'s sibling for `fetch_gap_hint`. Same
+/// fallback-to-unmodified behavior for a result shape this doesn't
+/// recognize.
+fn with_gap_hint(result: CallToolResult, hint: serde_json::Value) -> CallToolResult {
+    let Some(ContentBlock::Text(text)) = result.content.first() else {
+        return result;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text.text) else {
+        return result;
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return result;
+    };
+    obj.insert("unregistered_open".to_string(), hint);
+    match ContentBlock::json(&value) {
+        Ok(block) => CallToolResult::success(vec![block]),
+        Err(_) => result,
+    }
+}
+
 #[tool_router(server_handler)]
 impl DocketMcp {
     #[tool(
@@ -777,6 +825,14 @@ impl DocketMcp {
     /// `GET /topics/candidates` — one sentence when the topic looks
     /// mistargeted, `None` when it does not. Returns `Err` only for a
     /// transport failure the caller is expected to ignore.
+    ///
+    /// An unserved topic is reported **with or without** a candidate
+    /// suggestion — dropping the warning entirely whenever `candidates`
+    /// came back empty would silently miss exactly the case a mismatch
+    /// with a word inserted in the middle produces (e.g. `org/widgets` vs.
+    /// the registered `org/vendor-widgets`: last path segments differ, so
+    /// no candidate is found, but the topic is still unserved and the
+    /// filer still deserves to know).
     async fn fetch_topic_advisory(&self, topic: &str) -> anyhow::Result<Option<String>> {
         #[derive(serde::Deserialize)]
         struct Advisory {
@@ -791,8 +847,16 @@ impl DocketMcp {
             .await?
             .json()
             .await?;
-        if !resp.unserved || resp.candidates.is_empty() {
+        if !resp.unserved {
             return Ok(None);
+        }
+        if resp.candidates.is_empty() {
+            return Ok(Some(format!(
+                "No registered worker serves topic `{topic}`. If this is a genuinely new \
+                 topic, an admin can register a worker for it; if it was meant to reach an \
+                 existing topic under a different spelling, an admin can declare an alias \
+                 (POST /aliases) or correct this item's topic (PATCH /items/{{id}})."
+            )));
         }
         Ok(Some(format!(
             "No registered worker serves topic `{topic}`. Served topics sharing its last \
@@ -806,8 +870,57 @@ impl DocketMcp {
         )))
     }
 
+    /// `GET /topics` — registration-gap hint accompanying `mine=<worker>`.
+    /// Topics with open, unclaimed items whose `owned_by` is **empty** —
+    /// no worker at all is registered for them, the same blind spot that
+    /// lets `mine` silently return 0 while items sit under a topic
+    /// everyone forgot to register for. `None` when there is nothing to
+    /// report, or the call fails (advisory only, like
+    /// `fetch_topic_advisory`).
+    ///
+    /// Deliberately **not** "topics `owned_by` doesn't name this caller" —
+    /// that would also match every topic a *different* worker legitimately
+    /// owns, which is normal and not this caller's business; on a server
+    /// with many topics that would bury the real signal (a topic nobody at
+    /// all is registered for) under everyone else's ordinary backlog. The
+    /// result is the same for every caller, since it names no worker —
+    /// `mine` still gates whether the flag applies, because it's only
+    /// meaningful alongside a query about *your own* registration.
+    async fn fetch_gap_hint(&self) -> anyhow::Result<Option<serde_json::Value>> {
+        #[derive(serde::Deserialize)]
+        struct TopicRow {
+            topic: String,
+            #[serde(default)]
+            owned_by: Vec<String>,
+            #[serde(default)]
+            open_unclaimed: i64,
+        }
+        let resp = self
+            .http
+            .get(api_url(&self.base_url, &["topics"]))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let topics: Vec<TopicRow> = resp.json().await?;
+
+        let mut gaps = serde_json::Map::new();
+        for t in topics {
+            if t.open_unclaimed == 0 || !t.owned_by.is_empty() {
+                continue;
+            }
+            gaps.insert(t.topic, serde_json::json!(t.open_unclaimed));
+        }
+        Ok(if gaps.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(gaps))
+        })
+    }
+
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item. Pass report_gaps=true (with mine) to add an unregistered_open hint: open/unclaimed item counts by topic for topics no worker at all is registered for (not topics someone else owns) — the signal that a mine=... 0-result may be an orphaned topic, not really nothing to do"
     )]
     async fn list_items(
         &self,
@@ -838,11 +951,23 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond_paginated(resp).await
+        let result = respond_paginated(resp).await?;
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        if p.report_gaps != Some(true) || p.mine.is_none() {
+            return Ok(result);
+        }
+        // Advisory, never fatal — same treatment create_item gives
+        // fetch_topic_advisory's failure mode.
+        let Ok(Some(hint)) = self.fetch_gap_hint().await else {
+            return Ok(result);
+        };
+        Ok(with_gap_hint(result, hint))
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page. Same report_gaps semantics as list_items too — with mine, adds an unregistered_open registration-gap hint"
     )]
     async fn search_items(
         &self,
@@ -906,7 +1031,17 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond_paginated(resp).await
+        let result = respond_paginated(resp).await?;
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        if p.report_gaps != Some(true) || p.mine.is_none() {
+            return Ok(result);
+        }
+        let Ok(Some(hint)) = self.fetch_gap_hint().await else {
+            return Ok(result);
+        };
+        Ok(with_gap_hint(result, hint))
     }
 
     #[tool(
@@ -1548,6 +1683,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2094,6 +2230,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2192,6 +2329,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2217,6 +2355,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2317,6 +2456,270 @@ mod tests {
         );
     }
 
+    /// A mismatch that inserts an extra word in the middle of an otherwise
+    /// similar name (e.g. `org/data-widgets` vs. a registered
+    /// `org/vendor-data-widgets`) shares no last path segment with anything
+    /// served, so `topic_candidates` finds nothing to suggest. The advisory
+    /// must still fire in that case — dropping it entirely whenever there
+    /// is no candidate would leave exactly this shape of mismatch
+    /// unflagged.
+    #[tokio::test]
+    async fn create_item_tool_warns_of_an_orphan_topic_even_without_a_candidate_suggestion() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("orphan-no-candidate.db");
+        let core = spawn_core(18444, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        // A registered worker exists, but for an unrelated topic that shares
+        // no last path segment with the one below — so `candidates` comes
+        // back empty even though the topic is unserved.
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("iyulab/other".to_string()),
+                topics: vec!["iyulab/other".to_string()],
+            }))
+            .await
+            .unwrap();
+
+        let orphaned = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/lonely".to_string(),
+                title: "orphaned".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = text_of(&orphaned);
+        assert!(
+            text.contains("No registered worker serves topic `acme/lonely`"),
+            "orphan topic must still be flagged with no candidate available: {text}"
+        );
+        assert!(
+            !text.contains("Served topics sharing"),
+            "must not claim a candidate exists when none was found: {text}"
+        );
+    }
+
+    /// `list_topics`' `owned_by` is the bulk-visibility counterpart to the
+    /// single-topic advisory above — an admin scanning the whole vocabulary
+    /// sees every orphan at once instead of tripping over them one
+    /// `create_item` at a time.
+    #[tokio::test]
+    async fn list_topics_tool_reports_owned_by_registered_workers() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("owned-by.db");
+        let core = spawn_core(18445, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("iyulab/bot".to_string()),
+                topics: vec!["iyulab/docket".to_string()],
+            }))
+            .await
+            .unwrap();
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "covered".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/lonely".to_string(),
+                title: "orphaned".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let topics = server.list_topics().await.unwrap();
+        let value = json_value(&topics);
+        let list = value.as_array().unwrap();
+        let covered = list.iter().find(|t| t["topic"] == "iyulab/docket").unwrap();
+        assert_eq!(covered["owned_by"], serde_json::json!(["iyulab/bot"]));
+        let orphan = list.iter().find(|t| t["topic"] == "acme/lonely").unwrap();
+        assert_eq!(
+            orphan["owned_by"],
+            serde_json::json!([]),
+            "no worker is registered for this topic"
+        );
+    }
+
+    /// `mine=w1` alone can't tell "nothing to do" apart from "a topic
+    /// nobody registered for has open work". With `report_gaps=true`, the
+    /// tool result must name that orphan topic and its open-unclaimed
+    /// count instead of staying silent about it — but a topic a *different*
+    /// worker legitimately owns is not w1's business and must not appear,
+    /// even though it's equally outside w1's own registration.
+    #[tokio::test]
+    async fn list_items_report_gaps_surfaces_orphan_topics_but_not_another_workers() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("report-gaps.db");
+        let core = spawn_core(18446, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("w1".to_string()),
+                topics: vec!["iyulab/one".to_string()],
+            }))
+            .await
+            .unwrap();
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("w2".to_string()),
+                topics: vec!["iyulab/three".to_string()],
+            }))
+            .await
+            .unwrap();
+        // Nobody is registered for this topic — the gap `mine=w1` alone
+        // cannot see.
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/two".to_string(),
+                title: "unregistered gap".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        // w2's own topic, also outside w1's registration — but this is w2's
+        // ordinary backlog, not a gap, and must not show up in w1's hint.
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/three".to_string(),
+                title: "w2's own open work".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let mine_alone = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: Some("w1".to_string()),
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+                report_gaps: None,
+            }))
+            .await
+            .unwrap();
+        let mine_value = json_value(&mine_alone);
+        assert_eq!(
+            mine_value["items"].as_array().unwrap().len(),
+            0,
+            "mine=w1 alone sees nothing — exactly the silent gap this issue is about"
+        );
+        assert!(
+            mine_value.get("unregistered_open").is_none(),
+            "no hint without report_gaps=true"
+        );
+
+        let with_hint = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: Some("w1".to_string()),
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+                report_gaps: Some(true),
+            }))
+            .await
+            .unwrap();
+        let hint_value = json_value(&with_hint);
+        assert_eq!(
+            hint_value["unregistered_open"],
+            serde_json::json!({"iyulab/two": 1}),
+            "the gap topic and its open-unclaimed count must be named: {hint_value}"
+        );
+    }
+
+    /// `report_gaps=true` without `mine` has nothing to compare a
+    /// registration against, so it must be a no-op rather than guessing —
+    /// same "requires `mine`" contract `search_items` documents.
+    #[tokio::test]
+    async fn list_items_report_gaps_without_mine_is_a_no_op() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("report-gaps-no-mine.db");
+        let core = spawn_core(18447, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/two".to_string(),
+                title: "unregistered".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+                report_gaps: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert!(json_value(&result).get("unregistered_open").is_none());
+    }
+
     /// A caller can page through a filtered result and trust `total`
     /// against the unpaged count — the regression this guards is
     /// `limit`/`offset` being dropped somewhere between the MCP params and
@@ -2360,6 +2763,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2405,6 +2809,7 @@ mod tests {
                 summary: Some(true),
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2464,6 +2869,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2586,6 +2992,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2692,6 +3099,7 @@ mod tests {
                         summary: None,
                         order: None,
                         expand_related: None,
+                        report_gaps: None,
                     }))
                     .await
                     .unwrap()
@@ -2864,6 +3272,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2888,6 +3297,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2950,6 +3360,7 @@ mod tests {
                 summary: None,
                 order: Some("asc".to_string()),
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -2974,6 +3385,7 @@ mod tests {
                 summary: None,
                 order: Some("asc".to_string()),
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -3186,6 +3598,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: None,
+                report_gaps: None,
             }))
             .await
             .unwrap();
@@ -3208,6 +3621,7 @@ mod tests {
                 summary: None,
                 order: None,
                 expand_related: Some(true),
+                report_gaps: None,
             }))
             .await
             .unwrap();

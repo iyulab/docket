@@ -13,6 +13,14 @@ interface FilterBarProps {
   query: string
   onQueryChange: (query: string) => void
   topics: string[]
+  /**
+   * Declared spellings that fold into each canonical topic (ADR-0022),
+   * keyed by topic — a topic absent here or mapping to `[]` has none. The
+   * backend has returned this for a while; the UI just never rendered it,
+   * so a caller declaring an alias had no way to notice a wrong
+   * declaration except reading the item list itself.
+   */
+  topicAliases: Record<string, string[]>
   perspectiveTopic: string | null
   onPerspectiveTopicChange: (topic: string | null) => void
   states: ItemState[]
@@ -108,6 +116,7 @@ export function FilterBar({
   query,
   onQueryChange,
   topics,
+  topicAliases,
   perspectiveTopic,
   onPerspectiveTopicChange,
   states,
@@ -142,11 +151,16 @@ export function FilterBar({
           onChange={(e) => onPerspectiveTopicChange(e.target.value || null)}
         >
           <option value="">전체</option>
-          {topics.map((topic) => (
-            <option key={topic} value={topic}>
-              {topic}
-            </option>
-          ))}
+          {topics.map((topic) => {
+            const aliases = topicAliases[topic]
+            return (
+              <option key={topic} value={topic}>
+                {aliases && aliases.length > 0
+                  ? `${topic} (aka: ${aliases.join(', ')})`
+                  : topic}
+              </option>
+            )
+          })}
         </select>
       </label>
 

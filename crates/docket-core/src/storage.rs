@@ -1496,7 +1496,9 @@ impl Store {
         let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT topic, COUNT(*) FROM items WHERE archived_at IS NULL GROUP BY topic",
+            "SELECT topic, COUNT(*),
+                    SUM(CASE WHEN state = 'open' AND assignee IS NULL THEN 1 ELSE 0 END)
+             FROM items WHERE archived_at IS NULL GROUP BY topic",
         )?;
         let mut raw: Vec<TopicCount> = stmt
             .query_map([], topic_count_from_row)?
@@ -1512,14 +1514,20 @@ impl Store {
                 .iter_mut()
                 .find(|t| crate::domain::identity_eq(&t.topic, &canonical))
             {
-                Some(existing) => existing.count += row.count,
+                Some(existing) => {
+                    existing.count += row.count;
+                    existing.open_unclaimed += row.open_unclaimed;
+                }
                 None => folded.push(TopicCount {
                     topic: canonical,
                     count: row.count,
                     aliases: Vec::new(),
+                    owned_by: Vec::new(),
+                    open_unclaimed: row.open_unclaimed,
                 }),
             }
         }
+        let workers = self.list_workers()?;
         for row in &mut folded {
             row.aliases = aliases
                 .group_of(&row.topic)
@@ -1527,6 +1535,7 @@ impl Store {
                 .filter(|s| !crate::domain::identity_eq(s, &row.topic))
                 .collect();
             row.aliases.sort();
+            row.owned_by = Self::covering_workers(&aliases, &workers, &row.topic);
         }
         folded.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.topic.cmp(&b.topic)));
         Ok(folded)
@@ -1558,6 +1567,24 @@ impl Store {
                 .iter()
                 .any(|owned| crate::domain::topic_matches_with(aliases, owned, topic))
         })
+    }
+
+    /// Every registered worker id whose jurisdiction covers `topic` — the
+    /// same test `served_by` collapses to a bool, kept as the full id list
+    /// for `list_topics`' `owned_by`. Sorted for a stable wire order
+    /// independent of `workers`' row order.
+    fn covering_workers(aliases: &AliasMap, workers: &[Worker], topic: &str) -> Vec<String> {
+        let mut ids: Vec<String> = workers
+            .iter()
+            .filter(|w| {
+                w.topics
+                    .iter()
+                    .any(|owned| crate::domain::topic_matches_with(aliases, owned, topic))
+            })
+            .map(|w| w.id.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Whether some registered worker's topics match `topic` — the same
@@ -2184,6 +2211,8 @@ fn topic_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TopicCount> {
         topic: row.get(0)?,
         count: row.get(1)?,
         aliases: Vec::new(),
+        owned_by: Vec::new(),
+        open_unclaimed: row.get(2)?,
     })
 }
 
@@ -4631,6 +4660,71 @@ mod tests {
         let topics = store.list_topics().unwrap();
         assert_eq!(topics.len(), 1);
         assert_eq!(topics[0].topic, "iyulab/node-packages");
+    }
+
+    #[test]
+    fn list_topics_reports_owned_by_registered_workers() {
+        let store = open_test_store();
+        store
+            .register_worker("iyulab/bot", &["iyulab/docket".to_string()])
+            .unwrap();
+        store
+            .create_item("iyulab/docket", "covered", None, &[], None)
+            .unwrap();
+        store
+            .create_item("acme/lonely", "orphaned", None, &[], None)
+            .unwrap();
+
+        let topics = store.list_topics().unwrap();
+        let covered = topics.iter().find(|t| t.topic == "iyulab/docket").unwrap();
+        assert_eq!(covered.owned_by, vec!["iyulab/bot"]);
+        let orphan = topics.iter().find(|t| t.topic == "acme/lonely").unwrap();
+        assert!(
+            orphan.owned_by.is_empty(),
+            "no worker is registered for this topic"
+        );
+    }
+
+    #[test]
+    fn list_topics_reports_open_unclaimed_count_separately_from_total_count() {
+        let store = open_test_store();
+        let claimed = store
+            .create_item("iyulab/docket", "a", None, &[], None)
+            .unwrap();
+        store.claim_item(&claimed.id, "iyulab/bot").unwrap();
+        store
+            .create_item("iyulab/docket", "b", None, &[], None)
+            .unwrap();
+        store
+            .create_item("iyulab/docket", "c", None, &[], None)
+            .unwrap();
+
+        let topics = store.list_topics().unwrap();
+        let row = topics.iter().find(|t| t.topic == "iyulab/docket").unwrap();
+        assert_eq!(row.count, 3, "total counts every non-archived item");
+        assert_eq!(
+            row.open_unclaimed, 2,
+            "only the two still-open, still-unassigned items count as unclaimed work"
+        );
+    }
+
+    #[test]
+    fn list_topics_owned_by_matches_a_prefix_registered_worker() {
+        let store = open_test_store();
+        store
+            .register_worker("iyulab/scout", &["iyulab".to_string()])
+            .unwrap();
+        store
+            .create_item("iyulab/docket", "a", None, &[], None)
+            .unwrap();
+
+        let topics = store.list_topics().unwrap();
+        let docket = topics.iter().find(|t| t.topic == "iyulab/docket").unwrap();
+        assert_eq!(
+            docket.owned_by,
+            vec!["iyulab/scout"],
+            "a worker registered on the parent prefix covers the child topic"
+        );
     }
 
     #[test]

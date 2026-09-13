@@ -122,6 +122,11 @@ export default function App() {
   const { items, connected, loading, refresh } = useItems(query, archived)
   const [availableTags, setAvailableTags] = useState<string[]>([])
   const [serverTopics, setServerTopics] = useState<string[]>([])
+  // Declared spellings that fold into each canonical topic (ADR-0022) — kept
+  // separate from `serverTopics` because `deriveTopics(items)` below adds
+  // topic-like identities `list_topics` never returns, which have no alias
+  // list to look up. Empty for a topic with no aliases, same as the API.
+  const [topicAliases, setTopicAliases] = useState<Record<string, string[]>>({})
 
   // A tag mutation (add_tags with a brand-new tag) can introduce a value
   // this list doesn't have yet — re-load whenever an item mutation
@@ -143,8 +148,14 @@ export default function App() {
   // way to know about.
   const loadTopics = useCallback(() => {
     fetchTopics()
-      .then((topics) => setServerTopics(topics.map((t) => t.topic)))
-      .catch(() => setServerTopics([]))
+      .then((topics) => {
+        setServerTopics(topics.map((t) => t.topic))
+        setTopicAliases(Object.fromEntries(topics.map((t) => [t.topic, t.aliases ?? []])))
+      })
+      .catch(() => {
+        setServerTopics([])
+        setTopicAliases({})
+      })
   }, [])
 
   useEffect(() => {
@@ -221,6 +232,7 @@ export default function App() {
             query={query}
             onQueryChange={setQuery}
             topics={topics}
+            topicAliases={topicAliases}
             perspectiveTopic={perspectiveTopic}
             onPerspectiveTopicChange={setPerspectiveTopic}
             states={states}
