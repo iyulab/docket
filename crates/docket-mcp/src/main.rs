@@ -379,6 +379,23 @@ struct SetAssigneeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SetTopicParams {
+    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    item_id: String,
+    /// The corrected topic. Must not be blank. For a spelling people
+    /// actually use across many items, declare an alias instead
+    /// (`docs/usage.md`) — this is the one-off, single-item fix.
+    topic: String,
+    /// Who is making the correction — recorded on the lifecycle comment the
+    /// change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
+    /// `resolve_identity`), same treatment as every other authored operation.
+    #[serde(default)]
+    author: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ListTagsParams {
     /// Scope the vocabulary to items under this exact-match topic.
     #[serde(default)]
@@ -1284,8 +1301,7 @@ impl DocketMcp {
             closed item too — this corrects metadata, it isn't a workflow transition) and \
             idempotent (setting the value it already has changes nothing). A real change is \
             recorded as a comment naming the old and new value. Does not cover turn/title/body — \
-            use set_item_assignee to correct assignee. topic can also be corrected on the same \
-            PATCH /items/{id} request but has no MCP tool of its own (docs/usage.md). author may \
+            use set_item_assignee to correct assignee, set_item_topic to correct topic. author may \
             be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn set_item_requester(
@@ -1329,6 +1345,35 @@ impl DocketMcp {
             .http
             .patch(items_url(&self.base_url, &p.item_id, &[]))
             .json(&serde_json::json!({ "assignee": p.assignee, "author": author }))
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<ItemDto>(resp).await
+    }
+
+    #[tool(
+        description = "Correct an item's topic — the third correction in the same family as \
+            set_item_requester/set_item_assignee. For an item filed under the wrong topic: a \
+            typo, or a mismatch caught by create_item's topic_advisory / GET /topics/candidates \
+            after the fact. For a spelling people actually use across many items, declare an \
+            alias instead (put_alias) — this is the one-off, single-item fix, not a standing \
+            declaration. State-independent (works on a closed item too — this corrects metadata, \
+            it isn't a workflow transition) and idempotent (setting the value it already has \
+            changes nothing). A real change is recorded as a comment naming the old and new \
+            value. author may be omitted if this session's DOCKET_WORKER_ID is set"
+    )]
+    async fn set_item_topic(
+        &self,
+        Parameters(p): Parameters<SetTopicParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let author = match resolve_identity(p.author, docket_worker_id(), "author") {
+            Ok(a) => a,
+            Err(error) => return Ok(error),
+        };
+        let resp = self
+            .http
+            .patch(items_url(&self.base_url, &p.item_id, &[]))
+            .json(&serde_json::json!({ "topic": p.topic, "author": author }))
             .send()
             .await
             .map_err(unreachable_error)?;
@@ -3013,6 +3058,76 @@ mod tests {
         let rendered = text_of(&comments);
         assert!(
             rendered.contains("assignee: acme/widget -> acme/Widget"),
+            "correction must be recorded in the thread, got: {rendered}"
+        );
+    }
+
+    /// The third correction in the same family — an item filed under a
+    /// topic that turned out to be a typo, without declaring a standing
+    /// alias for what was really a one-off mistake.
+    #[tokio::test]
+    async fn set_item_topic_corrects_a_mistargeted_item() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-set-topic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("set-topic.db");
+        let core = spawn_core(18448, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/dcoket".to_string(),
+                title: "filed under a typo'd topic".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+
+        let rejected = server
+            .set_item_topic(Parameters(SetTopicParams {
+                item_id: item_id.clone(),
+                topic: "   ".to_string(),
+                author: Some("acme/fixer".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+
+        let corrected = server
+            .set_item_topic(Parameters(SetTopicParams {
+                item_id: item_id.clone(),
+                topic: "iyulab/docket".to_string(),
+                author: Some("acme/fixer".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(corrected.is_error, Some(true));
+        assert_eq!(json_value(&corrected)["topic"], "iyulab/docket");
+
+        let refetched = server
+            .get_item(Parameters(GetItemParams {
+                item_id: item_id.clone(),
+                expand_related: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(json_value(&refetched)["topic"], "iyulab/docket");
+
+        let comments = server
+            .list_comments(Parameters(ItemIdParams {
+                item_id: item_id.clone(),
+            }))
+            .await
+            .unwrap();
+        let rendered = text_of(&comments);
+        assert!(
+            rendered.contains("topic: iyulab/dcoket -> iyulab/docket"),
             "correction must be recorded in the thread, got: {rendered}"
         );
     }
