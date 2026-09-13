@@ -1573,18 +1573,27 @@ impl Store {
     /// same test `served_by` collapses to a bool, kept as the full id list
     /// for `list_topics`' `owned_by`. Sorted for a stable wire order
     /// independent of `workers`' row order.
+    ///
+    /// Folds each matching row to its alias-group canonical before
+    /// collecting: a legacy DB can hold two physical `workers` rows for the
+    /// same identity (both spellings registered before `put_alias` linked
+    /// them — `register_worker` only routes *future* registrations onto one
+    /// row, it does not retroactively merge rows that already exist). Without
+    /// this fold, `owned_by` would list the same worker twice under its two
+    /// spellings, and a topic no one currently serves could read as "owned"
+    /// by a dead spelling — exactly the false negative `report_gaps`
+    /// (`unregistered_open`) exists to catch.
     fn covering_workers(aliases: &AliasMap, workers: &[Worker], topic: &str) -> Vec<String> {
-        let mut ids: Vec<String> = workers
+        let ids: std::collections::BTreeSet<String> = workers
             .iter()
             .filter(|w| {
                 w.topics
                     .iter()
                     .any(|owned| crate::domain::topic_matches_with(aliases, owned, topic))
             })
-            .map(|w| w.id.clone())
+            .map(|w| aliases.resolve(&w.id).to_string())
             .collect();
-        ids.sort();
-        ids
+        ids.into_iter().collect()
     }
 
     /// Whether some registered worker's topics match `topic` — the same
@@ -4724,6 +4733,36 @@ mod tests {
             docket.owned_by,
             vec!["iyulab/scout"],
             "a worker registered on the parent prefix covers the child topic"
+        );
+    }
+
+    /// A legacy DB can hold two physical `workers` rows for one identity —
+    /// both spellings registered before `put_alias` ever linked them, which
+    /// `register_worker` cannot retroactively merge (it only routes *future*
+    /// registrations onto one row). `owned_by` must still report that
+    /// identity once, not once per surviving row.
+    #[test]
+    fn list_topics_owned_by_folds_legacy_orphan_worker_rows_into_one_identity() {
+        let store = open_test_store();
+        store
+            .register_worker("widget-bot", &["acme/widget".to_string()])
+            .unwrap();
+        store
+            .register_worker("acme/widget-bot", &["acme/widget".to_string()])
+            .unwrap();
+        store
+            .create_item("acme/widget", "a", None, &[], None)
+            .unwrap();
+
+        // Declared only afterward — same order the real legacy DB hit it in.
+        store.put_alias("widget-bot", "acme/widget-bot").unwrap();
+
+        let topics = store.list_topics().unwrap();
+        let row = topics.iter().find(|t| t.topic == "acme/widget").unwrap();
+        assert_eq!(
+            row.owned_by,
+            vec!["acme/widget-bot"],
+            "two physical rows for the same identity must fold into one owner, not double-count"
         );
     }
 
