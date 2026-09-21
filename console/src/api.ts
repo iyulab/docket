@@ -26,6 +26,14 @@ export interface Item {
   tags: string[]
   created_at: number
   updated_at: number
+  /**
+   * When the item entered its current `state`, in epoch millis — derived
+   * from the transition log, not stored. `updated_at` cannot answer this:
+   * a comment moves it without the item moving. `null` means the log
+   * doesn't cover the item's last transition (it predates the log). See
+   * ADR-0024.
+   */
+  state_since: number | null
   /** `null` unless archived. Independent of `state`/`open`. See ADR-0013. */
   archived_at: number | null
 }

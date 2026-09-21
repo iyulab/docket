@@ -173,6 +173,18 @@ body {
   color: #b95000;
 }
 
+/* Sits inside the turn badge, qualifying it — "→ requester · 15일째".
+   Inherits the badge's own colour so it reads as one statement, dimmed
+   because whose turn it is comes first and how long second. */
+.turn-age {
+  margin-left: 0.3rem;
+  opacity: 0.75;
+}
+
+.turn-age::before {
+  content: '· ';
+}
+
 .badge-archived {
   background: #ebecf0;
   color: #5e6c84;

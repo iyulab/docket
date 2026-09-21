@@ -2,7 +2,7 @@ import { Fragment } from 'react'
 import type { Item } from '../api'
 import { assigneeDisplay } from '../api'
 import { FOUND_IN_PREFIX } from '../filters'
-import { formatRelativeTime } from '../time'
+import { formatRelativeTime, formatStandingFor } from '../time'
 
 interface ItemListProps {
   items: Item[]
@@ -91,6 +91,9 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
                   {item.turn ? (
                     <span className={`badge badge-turn-${item.turn}`}>
                       {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
+                      {formatStandingFor(item.state_since) && (
+                        <span className="turn-age">{formatStandingFor(item.state_since)}</span>
+                      )}
                     </span>
                   ) : (
                     '—'

@@ -132,6 +132,28 @@ pub struct Item {
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When the item entered its current `state`, in epoch millis.
+    ///
+    /// Derived from `item_events` — the latest `created`/`transition` row —
+    /// and never stored, the same treatment `turn` and `open` get and for
+    /// the same reason (ADR-0010/ADR-0012): the transition log already holds
+    /// this fact, so a column beside it would be a second source of truth
+    /// that could drift. Comments are excluded by kind, which is the whole
+    /// difference from `updated_at`, and the reason that field cannot answer
+    /// "how long has this stood here": it moves on every write, including
+    /// the progress narration that typically accompanies a long wait.
+    ///
+    /// Because `turn` is a function of `state`, `now - state_since` is the
+    /// age of the current turn — exactly, except across a `claim`, which
+    /// resets this while `turn` stays `assignee` (`open` and `claimed` both
+    /// read as the assignee's turn).
+    ///
+    /// `None` means the event log does not cover this item's last
+    /// transition — it happened before the log existed. Not `created_at`:
+    /// that would assert the item has stood here since it was filed, which
+    /// is false for anything that moved pre-log. Self-heals at the item's
+    /// next transition. See [ADR-0024](../../../docs/decisions/ADR-0024-item-state-since.md).
+    pub state_since: Option<i64>,
     /// `None` unless archived. Independent of `state`/`open` — an
     /// archived item can be any workflow state. See ADR-0013.
     pub archived_at: Option<i64>,

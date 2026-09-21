@@ -18,6 +18,7 @@ function makeItem(overrides: Partial<Item> = {}): Item {
     tags: [],
     created_at: 1000,
     updated_at: 1000,
+    state_since: 1000,
     archived_at: null,
     ...overrides,
   }

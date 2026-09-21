@@ -1,5 +1,5 @@
 import type { Item, Resolution } from '../api'
-import { formatRelativeTime } from '../time'
+import { formatRelativeTime, formatStandingFor } from '../time'
 
 const RESOLUTION_LABEL: Record<Resolution, string> = {
   done: 'done',
@@ -16,6 +16,10 @@ interface CardProps {
   onSelect: (id: string) => void
 }
 
+function standingFor(item: Item): string | null {
+  return formatStandingFor(item.state_since)
+}
+
 export function Card({ item, selected, onSelect }: CardProps) {
   return (
     <div
@@ -29,6 +33,7 @@ export function Card({ item, selected, onSelect }: CardProps) {
       {item.turn && (
         <span className={`badge badge-turn-${item.turn}`}>
           {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
+          {standingFor(item) && <span className="turn-age">{standingFor(item)}</span>}
         </span>
       )}
       {item.resolution && (

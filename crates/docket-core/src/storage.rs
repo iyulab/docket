@@ -512,6 +512,9 @@ impl Store {
             tags: tags.to_vec(),
             created_at: now,
             updated_at: now,
+            // The `created` event written just above is what a re-read would
+            // find here, so this is the derived value, not a parallel one.
+            state_since: Some(now),
             archived_at: None,
             seq,
         })
@@ -828,9 +831,7 @@ impl Store {
     ) -> Result<Vec<Item>> {
         let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut sql = String::from(
-            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at, seq FROM items WHERE 1=1",
-        );
+        let mut sql = format!("SELECT {} FROM items WHERE 1=1", item_columns("items."));
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(t) = topic {
@@ -1789,10 +1790,7 @@ impl Store {
     ) -> Result<Vec<Item>> {
         let aliases = self.alias_map()?;
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut sql = String::from(
-            "SELECT i.id, i.topic, i.title, i.body, i.state, i.resolution, i.requester, i.assignee, i.created_at, i.updated_at, i.archived_at, i.seq
-             FROM items i WHERE 1=1",
-        );
+        let mut sql = format!("SELECT {} FROM items i WHERE 1=1", item_columns("i."));
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(t) = topic {
@@ -2094,8 +2092,10 @@ fn record_event(
 fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
     let item = conn
         .query_row(
-            "SELECT id, topic, title, body, state, resolution, requester, assignee, created_at, updated_at, archived_at, seq
-             FROM items WHERE id = ?1",
+            &format!(
+                "SELECT {} FROM items WHERE items.id = ?1",
+                item_columns("items.")
+            ),
             params![id],
             item_from_row_without_tags,
         )
@@ -2106,10 +2106,33 @@ fn row_to_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
     }
 }
 
+/// The column list every item `SELECT` in this module shares, in the order
+/// [`item_from_row_without_tags`] reads them. `qualifier` is the table name
+/// or alias plus a dot — always qualified, never bare, so the correlated
+/// subquery below can't be read as referring to `item_events` and so one
+/// spelling of this list serves a query that aliases `items` and one that
+/// doesn't.
+///
+/// The last column is `state_since` ([ADR-0024]): derived here rather than
+/// stored, so it can't drift from the transition log it summarizes — the
+/// same treatment `turn`/`open` get. Only `created`/`transition` rows count,
+/// which is what keeps a comment from moving it the way it moves
+/// `updated_at`. `MAX` over both kinds needs no `CASE`: a transition is
+/// always later than the creation it followed, so it wins whenever one
+/// exists, and an item with neither row predates the event log and correctly
+/// reads `NULL` rather than claiming to have stood here since it was filed.
+///
+/// [ADR-0024]: ../../../docs/decisions/ADR-0024-item-state-since.md
+fn item_columns(qualifier: &str) -> String {
+    format!(
+        "{q}id, {q}topic, {q}title, {q}body, {q}state, {q}resolution, {q}requester, {q}assignee,          {q}created_at, {q}updated_at, {q}archived_at, {q}seq,          (SELECT MAX(e.created_at) FROM item_events e           WHERE e.item_id = {q}id AND e.kind IN ('created', 'transition')) AS state_since",
+        q = qualifier
+    )
+}
+
 /// Reads every non-tag column. Safe to use inside `query_map` closures
-/// because it never re-borrows `conn`. Expects the column order every SQL
-/// string in this module uses: `id, topic, title, body, state, resolution,
-/// requester, assignee, created_at, updated_at, archived_at, seq`.
+/// because it never re-borrows `conn`. Expects the column order
+/// [`item_columns`] emits.
 fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
     let state_str: String = row.get(4)?;
     let resolution_str: Option<String> = row.get(5)?;
@@ -2130,6 +2153,7 @@ fn item_from_row_without_tags(row: &rusqlite::Row) -> rusqlite::Result<Item> {
         updated_at: row.get(9)?,
         archived_at: row.get(10)?,
         seq: row.get(11)?,
+        state_since: row.get(12)?,
     })
 }
 
@@ -5671,5 +5695,171 @@ mod tests {
                 "every completed write must be visible once all threads have joined"
             );
         }
+    }
+
+    /// ADR-0024's whole point: `updated_at` answers "last touched" and moves
+    /// on a comment, which is exactly what a party does while a wait drags
+    /// on. `state_since` must not move there — otherwise the two fields are
+    /// the same axis under two names and neither reports a long stand.
+    #[test]
+    fn state_since_tracks_the_last_transition_not_the_last_touch() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], Some("acme/filer"))
+            .unwrap();
+        assert_eq!(
+            item.state_since,
+            Some(item.created_at),
+            "a just-created item has stood in `open` since it was filed"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.claim_item(&item.id, "acme/worker").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let submitted = store.submit_item(&item.id, "acme/worker", None).unwrap();
+        assert_eq!(
+            submitted.state_since,
+            Some(submitted.updated_at),
+            "submit is a transition, so entering `resolved` is when it stood from"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .add_comment(&item.id, "acme/filer", "still looking at this")
+            .unwrap();
+        let after_comment = store.get_item(&item.id).unwrap();
+        assert!(
+            after_comment.updated_at > submitted.updated_at,
+            "a comment is a touch: `updated_at` moves"
+        );
+        assert_eq!(
+            after_comment.state_since, submitted.state_since,
+            "...but the item has not moved, so `state_since` must not either"
+        );
+    }
+
+    /// The other half of the same distinction: corrections and tagging are
+    /// writes, not transitions. Archiving is the sharpest case — it has its
+    /// own timestamp and is deliberately independent of `state` (ADR-0013),
+    /// so it must leave this alone too.
+    #[test]
+    fn state_since_ignores_writes_that_are_not_transitions() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], Some("acme/filer"))
+            .unwrap();
+        let at_creation = item.state_since;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .set_item_requester(&item.id, "acme/admin", "acme/filer-renamed")
+            .unwrap();
+        store
+            .add_tags(&item.id, &["kind:feature-request".to_string()])
+            .unwrap();
+        let archived = store.archive_item(&item.id).unwrap();
+
+        assert_eq!(
+            archived.state_since, at_creation,
+            "none of these moved the item's state, so none may move `state_since`"
+        );
+    }
+
+    /// Documents the one place `state_since` and the age of `turn` diverge:
+    /// `open` and `claimed` are both the assignee's turn, so a claim resets
+    /// this while `turn` reads the same before and after. Recovering a true
+    /// turn-entry timestamp would mean inferring each past event's resulting
+    /// state, which ADR-0024 rejects — this test pins the documented
+    /// behavior so the divergence stays a known property, not a surprise.
+    #[test]
+    fn state_since_resets_on_a_claim_although_turn_does_not_change() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], Some("acme/filer"))
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let claimed = store.claim_item(&item.id, "acme/worker").unwrap();
+
+        assert_eq!(
+            claimed.turn, item.turn,
+            "both states are the assignee's turn"
+        );
+        assert!(
+            claimed.state_since > item.state_since,
+            "but the item did change state, and that is what this field reports"
+        );
+    }
+
+    /// An item whose last transition predates `item_events` reads `null`,
+    /// not `created_at`: claiming it has stood in its current state since it
+    /// was filed would overstate the age of exactly the oldest items, which
+    /// are the ones this field exists to surface (ADR-0024). Simulated by
+    /// dropping the log rows, which is what such an item looks like.
+    #[test]
+    fn state_since_is_null_when_the_event_log_does_not_cover_the_item() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t1", None, &[], Some("acme/filer"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/worker").unwrap();
+        store.submit_item(&item.id, "acme/worker", None).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM item_events WHERE item_id = ?1",
+                params![item.id],
+            )
+            .unwrap();
+
+        let pre_log = store.get_item(&item.id).unwrap();
+        assert_eq!(pre_log.state, State::Resolved);
+        assert_eq!(
+            pre_log.state_since, None,
+            "no covering log row: report nothing rather than something untrue"
+        );
+
+        let reopened = store
+            .reject_item(&item.id, "acme/filer", "one more thing")
+            .unwrap();
+        assert_eq!(
+            reopened.state_since,
+            Some(reopened.updated_at),
+            "the next transition self-heals it, permanently"
+        );
+    }
+
+    /// The field has to reach the surfaces a caller actually scans a queue
+    /// with, not only `get_item` — the reported gap was a list query that
+    /// returned the standing items every day without ever saying how long
+    /// they had stood.
+    #[test]
+    fn state_since_is_carried_by_every_item_returning_query() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "findable", None, &[], Some("acme/filer"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let claimed = store.claim_item(&item.id, "acme/worker").unwrap();
+
+        let listed = store
+            .list_items(Some("acme/widget"), None, None, SortOrder::Desc)
+            .unwrap();
+        assert_eq!(listed[0].state_since, claimed.state_since);
+
+        let found = store
+            .search_items(
+                None,
+                None,
+                &[],
+                TagMatch::Any,
+                Some("findable"),
+                None,
+                SortOrder::Desc,
+            )
+            .unwrap();
+        assert_eq!(found[0].state_since, claimed.state_since);
     }
 }

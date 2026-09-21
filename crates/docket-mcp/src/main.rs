@@ -489,6 +489,13 @@ struct ItemDto {
     tags: Vec<String>,
     created_at: i64,
     updated_at: i64,
+    /// When the item entered its current `state` (ADR-0024). Absent from
+    /// servers older than that ADR, and `null` from a new enough server
+    /// whose event log doesn't cover the item's last transition — the two
+    /// are indistinguishable from this DTO alone, the same older-server
+    /// defaulting `turn`/`open`/`archived_at` already accept.
+    #[serde(default)]
+    state_since: Option<i64>,
     /// Only present when `get_item` was called with `expand_related=true`
     /// against a server that supports it — omitted (not `null`/`[]`)
     /// otherwise, same older-server-defaulting convention as `tags` above.
@@ -937,7 +944,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item. Pass report_gaps=true (with mine) to add an unregistered_open hint: open/unclaimed item counts by topic for topics no worker at all is registered for (not topics someone else owns) — the signal that a mine=... 0-result may be an orphaned topic, not really nothing to do"
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item. Pass report_gaps=true (with mine) to add an unregistered_open hint: open/unclaimed item counts by topic for topics no worker at all is registered for (not topics someone else owns) — the signal that a mine=... 0-result may be an orphaned topic, not really nothing to do. Every row carries state_since (epoch ms): when the item entered its current state, so now - state_since is how long it has stood there — the axis updated_at cannot give you, since a comment moves updated_at without the item moving. turn is a function of state, so this is the age of the current turn too, except a claim resets it while turn stays assignee. null means the event log doesn't cover this item's last transition (it predates the log) — read that as \"standing at least since the log began\", not as \"just now\""
     )]
     async fn list_items(
         &self,
@@ -984,7 +991,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page. Same report_gaps semantics as list_items too — with mine, adds an unregistered_open registration-gap hint"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page. Same report_gaps semantics as list_items too — with mine, adds an unregistered_open registration-gap hint. Rows carry state_since exactly as list_items' do"
     )]
     async fn search_items(
         &self,
@@ -1256,7 +1263,7 @@ impl DocketMcp {
             direct id lookup, not a list query). Pass expand_related=true to also resolve any \
             related:<id> tags (both directions — this item referencing another, or another \
             item referencing this one back) into a related field, instead of having to \
-            dereference each related:<id> tag yourself with a separate get_item call."
+            dereference each related:<id> tag yourself with a separate get_item call. \n            Carries state_since (epoch ms) like list_items' rows do — when the item \n            entered its current state, which updated_at does not answer because a \n            comment moves it."
     )]
     async fn get_item(
         &self,
@@ -3419,6 +3426,109 @@ mod tests {
         let searched_items = json_value(&searched)["items"].as_array().unwrap().clone();
         assert_eq!(searched_items.len(), 1);
         assert_eq!(searched_items[0]["id"], held_id);
+    }
+
+    /// `state_since` survives the DTO — the layer where a new `docket-core`
+    /// field is silently dropped if nobody adds it, since `ItemDto` is a
+    /// strict struct and the tool result is re-serialized from it, not
+    /// passed through. Also pins the distinction the field exists for
+    /// (ADR-0024): a comment moves `updated_at` and must leave
+    /// `state_since` where the transition put it.
+    #[tokio::test]
+    async fn state_since_survives_the_dto_and_ignores_a_comment() {
+        let dir = std::env::temp_dir().join(format!(
+            "docket-mcp-test-state-since-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("state-since.db");
+        let core = spawn_core(18449, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "standing somewhere".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/filer".to_string()),
+            }))
+            .await
+            .unwrap();
+        let id = field(&created, "id");
+        server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: id.clone(),
+                worker_id: Some("w1".to_string()),
+            }))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let submitted = server
+            .submit_item(Parameters(SubmitParams {
+                item_id: id.clone(),
+                worker_id: Some("w1".to_string()),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+        let at_submit = json_value(&submitted)["state_since"].clone();
+        assert!(
+            at_submit.is_i64(),
+            "the DTO must carry the field, not drop it: {submitted:?}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        server
+            .add_comment(Parameters(AddCommentParams {
+                item_id: id.clone(),
+                author: Some("acme/filer".to_string()),
+                body: "still thinking".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let fetched = json_value(
+            &server
+                .get_item(Parameters(GetItemParams {
+                    item_id: id.clone(),
+                    expand_related: None,
+                }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(fetched["state_since"], at_submit);
+        assert!(
+            fetched["updated_at"].as_i64().unwrap() > at_submit.as_i64().unwrap(),
+            "the comment did move `updated_at` — that is what makes this a real check"
+        );
+
+        let listed = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: Some(true),
+                order: None,
+                expand_related: None,
+                report_gaps: None,
+            }))
+            .await
+            .unwrap();
+        let rows = json_value(&listed)["items"].as_array().unwrap().clone();
+        assert_eq!(
+            rows[0]["state_since"], at_submit,
+            "summary mode drops `body`, not this"
+        );
     }
 
     /// `order` is forwarded end to end through both `list_items` and
