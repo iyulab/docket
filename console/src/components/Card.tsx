@@ -16,11 +16,8 @@ interface CardProps {
   onSelect: (id: string) => void
 }
 
-function standingFor(item: Item): string | null {
-  return formatStandingFor(item.state_since)
-}
-
 export function Card({ item, selected, onSelect }: CardProps) {
+  const standing = formatStandingFor(item.state_since)
   return (
     <div
       className={selected ? 'card card-selected' : 'card'}
@@ -33,7 +30,7 @@ export function Card({ item, selected, onSelect }: CardProps) {
       {item.turn && (
         <span className={`badge badge-turn-${item.turn}`}>
           {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
-          {standingFor(item) && <span className="turn-age">{standingFor(item)}</span>}
+          {standing && <span className="turn-age">{standing}</span>}
         </span>
       )}
       {item.resolution && (

@@ -62,58 +62,60 @@ export function ItemList({ items, selectedId, onSelect }: ItemListProps) {
                 {topic} <span className="item-list-group-count">{groupItems.length}</span>
               </th>
             </tr>
-            {groupItems.map((item) => (
-              <tr
-                key={item.id}
-                className={item.id === selectedId ? 'item-row item-row-selected' : 'item-row'}
-                onClick={() => onSelect(item.id)}
-              >
-                <td className="item-list-seq-cell">#{item.seq}</td>
-                <td>{item.title}</td>
-                <td>
-                  <span className={`badge badge-state-${item.state}`}>{item.state}</span>
-                  {item.resolution && (
-                    <span className={`badge badge-${item.resolution}`}>{item.resolution}</span>
-                  )}
-                </td>
-                <td className="item-list-worker-cell">{item.requester ?? '—'}</td>
-                <td className="item-list-worker-cell">
-                  {(() => {
-                    const assignee = assigneeDisplay(item)
-                    return (
-                      <span className={assignee.isFallback ? 'item-assignee-fallback' : undefined}>
-                        {assignee.value}
+            {groupItems.map((item) => {
+              // Hoisted: the turn cell below reads it twice (guard + render).
+              const standing = formatStandingFor(item.state_since)
+              return (
+                <tr
+                  key={item.id}
+                  className={item.id === selectedId ? 'item-row item-row-selected' : 'item-row'}
+                  onClick={() => onSelect(item.id)}
+                >
+                  <td className="item-list-seq-cell">#{item.seq}</td>
+                  <td>{item.title}</td>
+                  <td>
+                    <span className={`badge badge-state-${item.state}`}>{item.state}</span>
+                    {item.resolution && (
+                      <span className={`badge badge-${item.resolution}`}>{item.resolution}</span>
+                    )}
+                  </td>
+                  <td className="item-list-worker-cell">{item.requester ?? '—'}</td>
+                  <td className="item-list-worker-cell">
+                    {(() => {
+                      const assignee = assigneeDisplay(item)
+                      return (
+                        <span className={assignee.isFallback ? 'item-assignee-fallback' : undefined}>
+                          {assignee.value}
+                        </span>
+                      )
+                    })()}
+                  </td>
+                  <td>
+                    {item.turn ? (
+                      <span className={`badge badge-turn-${item.turn}`}>
+                        {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
+                        {standing && <span className="turn-age">{standing}</span>}
                       </span>
-                    )
-                  })()}
-                </td>
-                <td>
-                  {item.turn ? (
-                    <span className={`badge badge-turn-${item.turn}`}>
-                      {item.turn === 'assignee' ? '→ assignee' : '→ requester'}
-                      {formatStandingFor(item.state_since) && (
-                        <span className="turn-age">{formatStandingFor(item.state_since)}</span>
-                      )}
-                    </span>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-                <td>
-                  {item.tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className={
-                        tag.startsWith(FOUND_IN_PREFIX) ? 'tag-chip tag-chip-found-in' : 'tag-chip'
-                      }
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </td>
-                <td>{formatRelativeTime(item.updated_at)}</td>
-              </tr>
-            ))}
+                    ) : (
+                      '—'
+                    )}
+                  </td>
+                  <td>
+                    {item.tags.map((tag) => (
+                      <span
+                        key={tag}
+                        className={
+                          tag.startsWith(FOUND_IN_PREFIX) ? 'tag-chip tag-chip-found-in' : 'tag-chip'
+                        }
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </td>
+                  <td>{formatRelativeTime(item.updated_at)}</td>
+                </tr>
+              )
+            })}
           </Fragment>
         ))}
       </tbody>
