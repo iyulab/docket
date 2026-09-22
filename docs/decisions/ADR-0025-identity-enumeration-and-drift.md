@@ -198,6 +198,23 @@ it was handed. The retrospective surfaces deliberately do **not** apply this gat
 about one identity has already narrowed the question, and would be worse served by an answer that
 silently dropped the cross-scope half.
 
+### The same gate at the other entry point
+
+`create_item` is where a `requester` spelling enters the server; `register_worker` is where a
+`worker id` does, and it needed the same warning for a sharper reason.
+[ADR-0021](ADR-0021-case-insensitive-identity.md) made `register_worker` fold a **case** drift onto
+the existing row and hand back the canonical spelling, deliberately in preference to a `409` that
+would have stopped the one session whose id drifted from registering at all. A bare-vs-scoped drift
+cannot take that path: the two spellings are genuinely different identities, so there is no
+existing row to fold onto and a second worker row appears instead — quietly, and with a *different
+jurisdiction* than the one holding the work, so that session's `mine`/`topic_scope` go empty rather
+than merely short.
+
+Same gate, same never-blocking contract: the registration succeeds under whatever spelling was
+given, and the result carries an advisory naming the scoped spellings it collides with. The reason
+not to reject here is the reason ADR-0021 already recorded for case, unchanged by the fact that
+this drift is a new row rather than a fold.
+
 ### Also in this update: `not_closed`
 
 `IdentityCount`'s role counts include closed items, so "another spelling holds 2 items" reads as

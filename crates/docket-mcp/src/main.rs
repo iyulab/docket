@@ -807,7 +807,7 @@ fn with_extra_field(result: CallToolResult, key: &str, hint: serde_json::Value) 
 #[tool_router(server_handler)]
 impl DocketMcp {
     #[tool(
-        description = "Register as a worker, reporting which topic prefixes you own. id may be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Register as a worker, reporting which topic prefixes you own. id may be omitted if this session's DOCKET_WORKER_ID is set. Re-registering an id that differs only in case lands on the existing row and returns its canonical spelling -- adopt what comes back. A bare id with no org scope (`widget` where the server knows `acme/widget`) is a *different* identity, so it creates a second worker row instead; that case cannot be folded automatically, so the result carries an id_advisory naming the scoped spellings it collides with. Registration always succeeds either way"
     )]
     async fn register_worker(
         &self,
@@ -824,7 +824,20 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<WorkerDto>(resp).await
+        let result = respond::<WorkerDto>(resp).await?;
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        // Advisory, never fatal -- same contract `create_item`'s two
+        // advisories have. The registration already happened.
+        let Ok(Some(note)) = self.fetch_unscoped_advisory(&id, "worker id").await else {
+            return Ok(result);
+        };
+        Ok(with_extra_field(
+            result,
+            "id_advisory",
+            serde_json::Value::String(note),
+        ))
     }
 
     #[tool(
@@ -900,7 +913,7 @@ impl DocketMcp {
         let Some(requester) = p.requester.as_deref() else {
             return Ok(result);
         };
-        let Ok(Some(note)) = self.fetch_requester_advisory(requester).await else {
+        let Ok(Some(note)) = self.fetch_unscoped_advisory(requester, "requester").await else {
             return Ok(result);
         };
         Ok(with_extra_field(
@@ -910,9 +923,10 @@ impl DocketMcp {
         ))
     }
 
-    /// `GET /identities/candidates` — one sentence when the `requester`
-    /// just written looks like a short form of an identity the server
-    /// already knows, `None` otherwise.
+    /// `GET /identities/candidates` — one sentence when the identity just
+    /// written looks like a short form of one the server already knows,
+    /// `None` otherwise. `role` names what the spelling was written as, so
+    /// the sentence can say which field to correct.
     ///
     /// **Two conditions, and the first is what makes this safe on the
     /// hottest path there is.** `create_item` runs on every filing, and the
@@ -927,7 +941,11 @@ impl DocketMcp {
     ///
     /// Never blocks: the item is already created by the time this runs, the
     /// same contract `fetch_topic_advisory` has.
-    async fn fetch_requester_advisory(&self, requester: &str) -> anyhow::Result<Option<String>> {
+    async fn fetch_unscoped_advisory(
+        &self,
+        identity: &str,
+        role: &str,
+    ) -> anyhow::Result<Option<String>> {
         #[derive(serde::Deserialize)]
         struct Advisory {
             #[serde(default)]
@@ -938,7 +956,7 @@ impl DocketMcp {
         let resp: Advisory = self
             .http
             .get(api_url(&self.base_url, &["identities", "candidates"]))
-            .query(&[("identity", requester)])
+            .query(&[("identity", identity)])
             .send()
             .await?
             .json()
@@ -947,11 +965,11 @@ impl DocketMcp {
             return Ok(None);
         }
         Ok(Some(format!(
-            "`{requester}` has no org scope, and this server already knows scoped \
-             identities with the same name: {}. If one of those is the same party, an \
-             admin can declare an alias (POST /aliases) or correct this item's requester \
-             (set_item_requester) — otherwise the two spellings stay separate and neither \
-             one's queries will see the other's items.",
+            "This {role} `{identity}` has no org scope, and this server already knows \
+             scoped identities with the same name: {}. If one of those is the same party, \
+             an admin can declare an alias (POST /aliases) — otherwise the two spellings \
+             stay separate identities and neither one's queries will ever see the other's \
+             items.",
             resp.candidates
                 .iter()
                 .map(|c| format!("`{c}`"))
@@ -3195,6 +3213,80 @@ mod tests {
             serde_json::json!(true),
             "the registered spelling must be named as the reason: {value}"
         );
+    }
+
+    /// `register_worker` upserts a *case* drift onto the existing row and
+    /// returns the canonical spelling (ADR-0021 chose that over a 409). A
+    /// bare-vs-scoped drift is a different identity, so the upsert cannot
+    /// see it -- a second worker row appears silently, and from then on
+    /// that session's `mine`/`topic_scope` are a different jurisdiction
+    /// than the one holding the work.
+    #[tokio::test]
+    async fn register_worker_warns_when_the_id_is_a_bare_leaf_of_an_existing_scoped_identity() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("register-id-advisory.db");
+        let core = spawn_core(18456, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("acme/packages".to_string()),
+                topics: vec!["acme/packages".to_string()],
+            }))
+            .await
+            .unwrap();
+
+        let drifted = server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("packages".to_string()),
+                topics: vec!["acme/packages".to_string()],
+            }))
+            .await
+            .unwrap();
+        let value = json_value(&drifted);
+        assert_eq!(
+            value["id"], "packages",
+            "registration still succeeds under the spelling given: {value}"
+        );
+        let note = value["id_advisory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("advisory attached: {value}"));
+        assert!(
+            note.contains("acme/packages"),
+            "names the scoped spelling: {note}"
+        );
+    }
+
+    /// Re-registering the spelling that is already canonical is the normal
+    /// startup path every session takes. It must stay silent.
+    #[tokio::test]
+    async fn register_worker_does_not_warn_for_a_scoped_id() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("register-id-advisory-scoped.db");
+        let core = spawn_core(18457, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        for _ in 0..2 {
+            let result = server
+                .register_worker(Parameters(RegisterWorkerParams {
+                    id: Some("acme/packages".to_string()),
+                    topics: vec!["acme/packages".to_string()],
+                }))
+                .await
+                .unwrap();
+            assert!(
+                json_value(&result).get("id_advisory").is_none(),
+                "the ordinary startup registration must stay silent"
+            );
+        }
     }
 
     /// The drift this catches is a caller writing the bare leaf where the
