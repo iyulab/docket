@@ -151,8 +151,26 @@ jobs:
           path: dist/*
           retention-days: 1
 
+  # Gates publication, not the builds. v0.24.0 was cut four minutes after the
+  # audit workflow went red on the same lockfile, because nothing connected the
+  # two - its binaries shipped linking a vulnerable dependency and had to be
+  # superseded within the hour. This re-runs the check against the tagged ref so
+  # a release cannot be published over a live advisory.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit
+        run: cargo audit
+
   release:
-    needs: [build, build-windows, build-console]
+    needs: [build, build-windows, build-console, audit]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -22,18 +22,27 @@ on:
     # not just dependency changes — for both ecosystems this repo uses.
     - cron: "0 0 * * *"
 
-permissions:
-  issues: write
-  checks: write
-
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # cargo-audit is run directly rather than through rustsec/audit-check.
+      # That action only fails the job on push and pull_request; on `schedule`
+      # it opens an issue and exits green, which inverts the intent of the cron
+      # above - the one trigger meant to catch advisories against an unchanged
+      # lockfile was the one that could not turn red. It also reports only once,
+      # deduplicating against the issue it already opened, and never closes it.
+      # Running the tool directly exits non-zero on every trigger, so a
+      # scheduled failure surfaces the way any other failing workflow does.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # An advisory with no patched release yet is waived in .cargo/audit.toml
+      # (`[advisories] ignore = [...]`), not by weakening this step.
+      - name: Audit
+        run: cargo audit
 
   npm-audit:
     runs-on: ubuntu-latest
