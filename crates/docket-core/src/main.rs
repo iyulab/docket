@@ -86,6 +86,8 @@ fn api_routes() -> Router<Arc<Store>> {
         .route("/events", get(list_events))
         .route("/topics", get(list_topics))
         .route("/topics/candidates", get(topic_candidates))
+        .route("/identities", get(list_identities))
+        .route("/identities/candidates", get(identity_candidates))
         .route(
             "/aliases",
             post(put_alias).get(list_aliases).delete(delete_alias),
@@ -902,6 +904,46 @@ async fn topic_candidates(
     let candidates = store.topic_candidates(&q.topic)?;
     Ok(Json(TopicCandidatesResponse {
         unserved,
+        candidates,
+    }))
+}
+
+/// The identity-class counterpart of `GET /topics`: every spelling in use
+/// across `requester`, `assignee`, `topic` and registered `worker id`, which
+/// ADR-0022 made one namespace. Reading the list is how an owner finds a
+/// spelling that drifted, since nothing else reports one
+/// ([ADR-0025](../../../docs/decisions/ADR-0025-identity-enumeration-and-drift.md)).
+async fn list_identities(
+    State(store): State<Arc<Store>>,
+) -> Result<Json<Vec<docket_core::domain::IdentityCount>>, ApiError> {
+    Ok(Json(store.list_identities()?))
+}
+
+#[derive(Deserialize)]
+struct IdentityCandidatesQuery {
+    identity: String,
+}
+
+#[derive(Serialize)]
+struct IdentityCandidatesResponse {
+    /// Echoed back so a caller holding several of these responses can tell
+    /// which spelling each one answered for, without tracking the request.
+    identity: String,
+    candidates: Vec<String>,
+}
+
+/// Advisory only, exactly like `/topics/candidates` -- nothing here rejects
+/// or rewrites anything. Unlike that endpoint there is no `unserved` field:
+/// being registered is not evidence a party identity is correctly spelled
+/// (a `requester` is never registered at all), so there is nothing truthful
+/// to put there. See `Store::identity_candidates`.
+async fn identity_candidates(
+    State(store): State<Arc<Store>>,
+    Query(q): Query<IdentityCandidatesQuery>,
+) -> Result<Json<IdentityCandidatesResponse>, ApiError> {
+    let candidates = store.identity_candidates(&q.identity)?;
+    Ok(Json(IdentityCandidatesResponse {
+        identity: q.identity,
         candidates,
     }))
 }
@@ -2989,6 +3031,67 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["unserved"], serde_json::json!(true));
         assert_eq!(body["candidates"], serde_json::json!(["acme/widget"]));
+    }
+
+    #[tokio::test]
+    async fn list_identities_route_reports_every_role_of_one_spelling() {
+        let store = Arc::new(open_test_store());
+        let item = store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/filer").unwrap();
+        store
+            .register_worker("acme/filer", &["acme/widget".to_string()])
+            .unwrap();
+
+        let resp = app(store)
+            .oneshot(
+                Request::builder()
+                    .uri("/identities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows = json_body(resp).await;
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["identity"] == "acme/filer")
+            .expect("the identity is enumerated");
+        assert_eq!(row["requester"], 1);
+        assert_eq!(row["assignee"], 1);
+        assert_eq!(row["registered_worker"], serde_json::json!(true));
+    }
+
+    /// The failure this endpoint exists for: two spellings of one party, each
+    /// invisible from the other's query, with nothing anywhere reporting that
+    /// the split exists.
+    #[tokio::test]
+    async fn identity_candidates_route_reports_a_drifted_spelling() {
+        let store = Arc::new(open_test_store());
+        store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], Some("filer"))
+            .unwrap();
+
+        let resp = app(store)
+            .oneshot(
+                Request::builder()
+                    .uri("/identities/candidates?identity=acme%2Ffiler")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["identity"], "acme/filer");
+        assert_eq!(body["candidates"], serde_json::json!(["filer"]));
     }
 
     /// ADR-0014: a caller that asks for nothing gets `DEFAULT_LIST_LIMIT`

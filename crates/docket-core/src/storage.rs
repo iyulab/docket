@@ -5,8 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::domain::{
-    Alias, AliasMap, Comment, Event, Item, RelatedItemRef, RelatedRelation, Resolution, SortOrder,
-    State, TagCount, TagMatch, TopicCount, Worker,
+    Alias, AliasMap, Comment, Event, IdentityCount, Item, RelatedItemRef, RelatedRelation,
+    Resolution, SortOrder, State, TagCount, TagMatch, TopicCount, Worker,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -1657,6 +1657,184 @@ impl Store {
             .filter(|t| !crate::domain::identity_eq(aliases.resolve(t), aliases.resolve(topic)))
             .filter(|t| crate::domain::identity_eq(last_segment(t), wanted))
             .filter(|t| Self::served_by(&aliases, &workers, t))
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        Ok(candidates)
+    }
+
+    /// Every identity currently in use, with how it is used in each role.
+    ///
+    /// The counterpart of `list_topics` for the whole identity class rather
+    /// than one field of it. `worker id`, `requester`, `assignee` and `topic`
+    /// are one namespace (ADR-0022 "One namespace"), and drift crosses
+    /// between them -- a party that files as `acme/widget` and claims as
+    /// `widget` splits across two *different* fields, so a per-field listing
+    /// shows one half and drops the other.
+    ///
+    /// **Population is `items`' three identity columns union `workers.id`**,
+    /// which is where this deliberately diverges from `list_topics` (a
+    /// `GROUP BY` over items alone). A worker whose registered spelling
+    /// drifted receives no items *by definition* -- zero items is the
+    /// symptom, not a reason to omit the row -- so enumerating over items
+    /// alone would blind the one surface built to find that. See
+    /// [ADR-0025](../../../docs/decisions/ADR-0025-identity-enumeration-and-drift.md).
+    ///
+    /// Folding matches `list_topics` exactly: declared aliases fold into
+    /// their canonical (ADR-0022), case variants fold together (ADR-0021),
+    /// and the surviving spelling is the lexicographically-first one, decided
+    /// by sorting before the fold rather than left to row order. Archived
+    /// items are excluded, the same default `list_topics` uses.
+    pub fn list_identities(&self) -> Result<Vec<IdentityCount>> {
+        let aliases = self.alias_map()?;
+        let workers = self.list_workers()?;
+
+        // Which column a raw (spelling, count) pair came from. Local because
+        // outside this fold the distinction is carried by `IdentityCount`'s
+        // named fields, not by a tag.
+        #[derive(Clone, Copy)]
+        enum Role {
+            Requester,
+            Assignee,
+            Topic,
+        }
+
+        let mut raw: Vec<(String, Role, i64)> = Vec::new();
+        {
+            let conn = self.conn.lock().expect("store mutex poisoned");
+            for (column, role) in [
+                ("requester", Role::Requester),
+                ("assignee", Role::Assignee),
+                ("topic", Role::Topic),
+            ] {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {column}, COUNT(*) FROM items
+                     WHERE archived_at IS NULL AND {column} IS NOT NULL
+                     GROUP BY {column}"
+                ))?;
+                for row in stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                {
+                    raw.push((row.0, role, row.1));
+                }
+            }
+        }
+        raw.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut folded: Vec<IdentityCount> = Vec::new();
+        for (spelling, role, count) in raw {
+            let canonical = aliases.resolve(&spelling).to_string();
+            let index = match folded
+                .iter()
+                .position(|r| crate::domain::identity_eq(&r.identity, &canonical))
+            {
+                Some(index) => index,
+                None => {
+                    folded.push(IdentityCount {
+                        identity: canonical,
+                        aliases: Vec::new(),
+                        requester: 0,
+                        assignee: 0,
+                        topic: 0,
+                        registered_worker: false,
+                    });
+                    folded.len() - 1
+                }
+            };
+            match role {
+                Role::Requester => folded[index].requester += count,
+                Role::Assignee => folded[index].assignee += count,
+                Role::Topic => folded[index].topic += count,
+            }
+        }
+
+        // A registered worker contributes its spelling even with no counts,
+        // so an idle -- or drifted -- registration still gets a row. Sorted
+        // first for the same reason the item rows are: which spelling
+        // survives a case fold must not depend on `workers` row order.
+        let mut worker_ids: Vec<&String> = workers.iter().map(|w| &w.id).collect();
+        worker_ids.sort();
+        for id in worker_ids {
+            let canonical = aliases.resolve(id).to_string();
+            if !folded
+                .iter()
+                .any(|r| crate::domain::identity_eq(&r.identity, &canonical))
+            {
+                folded.push(IdentityCount {
+                    identity: canonical,
+                    aliases: Vec::new(),
+                    requester: 0,
+                    assignee: 0,
+                    topic: 0,
+                    registered_worker: false,
+                });
+            }
+        }
+
+        for row in &mut folded {
+            row.aliases = aliases
+                .group_of(&row.identity)
+                .into_iter()
+                .filter(|s| !crate::domain::identity_eq(s, &row.identity))
+                .collect();
+            row.aliases.sort();
+            row.registered_worker = workers
+                .iter()
+                .any(|w| crate::domain::identity_eq(aliases.resolve(&w.id), &row.identity));
+        }
+        folded.sort_by(|a, b| {
+            let total = |r: &IdentityCount| r.requester + r.assignee + r.topic;
+            total(b)
+                .cmp(&total(a))
+                .then_with(|| a.identity.cmp(&b.identity))
+        });
+        Ok(folded)
+    }
+
+    /// Identities that are plausibly the same party as `identity`, spelled
+    /// differently: a different canonical identity whose last `/` segment
+    /// equals this one's.
+    ///
+    /// The same exact, unscored rule `topic_candidates` uses -- segment
+    /// equality, no edit distance (ADR-0022) -- applied to the whole identity
+    /// class instead of `topic` alone.
+    ///
+    /// **`topic_candidates`' unserved gate has no counterpart here, on
+    /// purpose.** That gate is evidence a topic is not a mistake, and it
+    /// exists because `topic_candidates` answers a speculative question about
+    /// a topic the caller has just typed. A party identity has no such
+    /// evidence available -- a `requester` is never a registered worker -- so
+    /// porting the gate would disable the detector for precisely the observed
+    /// cases, where neither spelling was registered. Precision comes instead
+    /// from the question being about one identity the caller already named.
+    ///
+    /// Always advisory. Two parties legitimately sharing a last segment
+    /// (`acme/widget` and `other-org/widget`) is normal, so nothing here
+    /// rejects, rewrites, or auto-corrects; a `put_alias` declaration folds
+    /// the pair away, and a pair that is genuinely two parties simply stays
+    /// reported -- this surface asserts no sameness, and there is
+    /// deliberately no way to declare two identities permanently distinct.
+    pub fn identity_candidates(&self, identity: &str) -> Result<Vec<String>> {
+        let identity = identity.trim();
+        if identity.is_empty() {
+            return Ok(Vec::new());
+        }
+        let aliases = self.alias_map()?;
+        let wanted = last_segment(aliases.resolve(identity));
+        if wanted.is_empty() {
+            // Same degenerate case `topic_candidates` guards: two identities
+            // that both collapse to an empty last segment share nothing.
+            return Ok(Vec::new());
+        }
+        let mut candidates: Vec<String> = self
+            .list_identities()?
+            .into_iter()
+            .map(|r| r.identity)
+            .filter(|c| !crate::domain::identity_eq(aliases.resolve(c), aliases.resolve(identity)))
+            .filter(|c| crate::domain::identity_eq(last_segment(c), wanted))
             .collect();
         candidates.sort();
         candidates.dedup();
@@ -4909,6 +5087,188 @@ mod tests {
             .unwrap();
         assert!(store.topic_candidates("acme/widgets").unwrap().is_empty());
         assert!(store.topic_candidates("acme/wdiget").unwrap().is_empty());
+    }
+
+    // --- identity enumeration and drift detection (ADR-0025) ---
+
+    #[test]
+    fn list_identities_counts_each_role_of_one_spelling_separately() {
+        let store = open_test_store();
+        let a = store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+        store.claim_item(&a.id, "acme/filer").unwrap();
+        store
+            .create_item("acme/filer", "b", None, &[], None)
+            .unwrap();
+
+        let rows = store.list_identities().unwrap();
+        let row = rows.iter().find(|r| r.identity == "acme/filer").unwrap();
+        assert_eq!(row.requester, 1, "one item names it as requester");
+        assert_eq!(row.assignee, 1, "one item names it as assignee");
+        assert_eq!(row.topic, 1, "one item is filed under it as a topic");
+        assert!(!row.registered_worker);
+    }
+
+    /// The enumeration's population is `items`' three identity columns **union
+    /// `workers.id`**, which is the one place it deliberately diverges from
+    /// `list_topics` (a `GROUP BY` over items alone). A worker whose registered
+    /// spelling drifted receives no items *by definition*, so an items-only
+    /// enumeration would hide exactly the drift this surface exists to find.
+    #[test]
+    fn list_identities_includes_a_registered_worker_that_holds_no_items() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/idle-bot", &["acme/nothing".to_string()])
+            .unwrap();
+
+        let rows = store.list_identities().unwrap();
+        let row = rows.iter().find(|r| r.identity == "acme/idle-bot").unwrap();
+        assert!(row.registered_worker);
+        assert_eq!((row.requester, row.assignee, row.topic), (0, 0, 0));
+    }
+
+    #[test]
+    fn list_identities_folds_case_variants_and_declared_aliases_into_one_row() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "a", None, &[], Some("acme/Filer"))
+            .unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], Some("acme/filer"))
+            .unwrap();
+        store
+            .create_item("acme/widget", "c", None, &[], Some("filer"))
+            .unwrap();
+        store.put_alias("filer", "acme/Filer").unwrap();
+
+        let rows = store.list_identities().unwrap();
+        let folded: Vec<&IdentityCount> = rows
+            .iter()
+            .filter(|r| crate::domain::identity_eq(&r.identity, "acme/filer"))
+            .collect();
+        assert_eq!(
+            folded.len(),
+            1,
+            "case variants and aliases are one identity"
+        );
+        assert_eq!(folded[0].requester, 3);
+        assert_eq!(folded[0].aliases, vec!["filer"]);
+    }
+
+    /// The whole point of widening the axis: a spelling that appears only as an
+    /// `assignee` still has to be enumerable, because the other spelling of the
+    /// same party may appear only as a `requester`. A per-field listing shows
+    /// one of them and silently drops the other.
+    #[test]
+    fn list_identities_enumerates_a_spelling_that_appears_in_only_one_role() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "a", None, &[], Some("acme/board-umbrella"))
+            .unwrap();
+        store.claim_item(&item.id, "board-umbrella").unwrap();
+
+        let rows = store.list_identities().unwrap();
+        assert!(
+            rows.iter().any(|r| r.identity == "board-umbrella"),
+            "assignee-only spelling is enumerated"
+        );
+        assert!(
+            rows.iter().any(|r| r.identity == "acme/board-umbrella"),
+            "requester-only spelling is enumerated"
+        );
+    }
+
+    #[test]
+    fn identity_candidates_reports_another_spelling_sharing_the_last_segment() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], Some("filer"))
+            .unwrap();
+
+        assert_eq!(
+            store.identity_candidates("filer").unwrap(),
+            vec!["acme/filer"]
+        );
+        assert_eq!(
+            store.identity_candidates("acme/filer").unwrap(),
+            vec!["filer"],
+            "the detector is symmetric -- either spelling finds the other"
+        );
+    }
+
+    /// `topic_candidates` reports nothing for a *served* topic, because being
+    /// served is evidence the topic is not a mistake. Party identities have no
+    /// such notion -- a requester is never registered -- so porting the gate
+    /// would silently disable the detector for the observed cases, where both
+    /// spellings were unregistered. Precision comes from the query being about
+    /// one identity instead.
+    #[test]
+    fn identity_candidates_has_no_registered_worker_gate() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], Some("filer"))
+            .unwrap();
+        store
+            .register_worker("acme/filer", &["acme/widget".to_string()])
+            .unwrap();
+
+        assert_eq!(
+            store.identity_candidates("acme/filer").unwrap(),
+            vec!["filer"],
+            "a registered spelling still reports the drifted one"
+        );
+    }
+
+    #[test]
+    fn identity_candidates_excludes_the_identitys_own_alias_group() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "a", None, &[], Some("acme/Filer"))
+            .unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], Some("filer"))
+            .unwrap();
+        store.put_alias("filer", "acme/Filer").unwrap();
+
+        assert!(
+            store.identity_candidates("filer").unwrap().is_empty(),
+            "a declared alias is the same identity, not a candidate to fix"
+        );
+    }
+
+    /// Segment equality only, exactly as `topic_candidates` -- no edit
+    /// distance, no scoring (ADR-0022's reasoning, applied to the wider class).
+    #[test]
+    fn identity_candidates_does_not_guess_at_a_different_last_segment() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+        assert!(store.identity_candidates("acme/filers").unwrap().is_empty());
+        assert!(store.identity_candidates("flier").unwrap().is_empty());
+    }
+
+    #[test]
+    fn identity_candidates_is_empty_for_a_degenerate_identity() {
+        let store = open_test_store();
+        store
+            .create_item("acme/widget", "a", None, &[], Some("/"))
+            .unwrap();
+        store
+            .create_item("acme/widget", "b", None, &[], Some("other/"))
+            .unwrap();
+        assert!(
+            store.identity_candidates("/").unwrap().is_empty(),
+            "an identity with no real last segment shares nothing"
+        );
+        assert!(store.identity_candidates("").unwrap().is_empty());
     }
 
     /// The candidate pool is real, item-bearing topics -- not registration

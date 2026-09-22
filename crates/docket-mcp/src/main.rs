@@ -211,6 +211,21 @@ struct ListItemsParams {
     /// registration).
     #[serde(default)]
     report_gaps: Option<bool>,
+    /// Requires one of `mine`/`requester`/`assignee`/`topic_scope` — when
+    /// `true`, adds an
+    /// `other_spellings` field to the result: for each identity you filtered
+    /// on, any *other* identity on this server whose last `/` segment is the
+    /// same, with what sits under it. Surfaces the blind spot a spelling
+    /// drift creates — `requester=acme/filer` returning fewer rows than the
+    /// party actually has, with nothing anywhere saying the rest are filed
+    /// under `filer`. Advisory: two parties can legitimately share a last
+    /// segment, so this asserts nothing and corrects nothing (fix a real
+    /// drift with `set_item_requester` for one item, or a declared alias for
+    /// the identity — see ADR-0022). Costs two extra requests against
+    /// `docket-core`, so it is opt-in. No effect without one of those three
+    /// filters — there would be no identity to compare against.
+    #[serde(default)]
+    report_drift: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -278,6 +293,11 @@ struct SearchItemsParams {
     /// `mine`, adds an `unregistered_open` registration-gap hint.
     #[serde(default)]
     report_gaps: Option<bool>,
+    /// Same semantics as `list_items`'s field of the same name — requires
+    /// one of `mine`/`requester`/`assignee`/`topic_scope`, adds an
+    /// `other_spellings` identity-drift hint.
+    #[serde(default)]
+    report_drift: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -526,6 +546,25 @@ struct TagCountDto {
     count: i64,
 }
 
+/// One row of `list_identities`. Mirrors `docket-core`'s `IdentityCount`
+/// (ADR-0025) — every count field is defaulted so an older `docket-core`
+/// that predates one of them still deserializes rather than failing the
+/// whole call, the same tolerance `TopicCountDto` applies.
+#[derive(Debug, Serialize, Deserialize)]
+struct IdentityCountDto {
+    identity: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    requester: i64,
+    #[serde(default)]
+    assignee: i64,
+    #[serde(default)]
+    topic: i64,
+    #[serde(default)]
+    registered_worker: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TopicCountDto {
     topic: String,
@@ -735,6 +774,14 @@ fn with_topic_advisory(result: CallToolResult, note: String) -> CallToolResult {
 /// fallback-to-unmodified behavior for a result shape this doesn't
 /// recognize.
 fn with_gap_hint(result: CallToolResult, hint: serde_json::Value) -> CallToolResult {
+    with_extra_field(result, "unregistered_open", hint)
+}
+
+/// Splices one advisory field into an already-serialized tool result, or
+/// returns it untouched if anything about that is not possible. Every
+/// advisory goes through here, so the "parse, insert, re-serialize, never
+/// fail the call over a hint" contract exists once instead of once per hint.
+fn with_extra_field(result: CallToolResult, key: &str, hint: serde_json::Value) -> CallToolResult {
     let Some(ContentBlock::Text(text)) = result.content.first() else {
         return result;
     };
@@ -744,7 +791,7 @@ fn with_gap_hint(result: CallToolResult, hint: serde_json::Value) -> CallToolRes
     let Some(obj) = value.as_object_mut() else {
         return result;
     };
-    obj.insert("unregistered_open".to_string(), hint);
+    obj.insert(key.to_string(), hint);
     match ContentBlock::json(&value) {
         Ok(block) => CallToolResult::success(vec![block]),
         Err(_) => result,
@@ -943,6 +990,105 @@ impl DocketMcp {
         })
     }
 
+    /// The identities a `report_drift` query is *about*: whichever of
+    /// `mine`/`requester`/`assignee`/`topic_scope` the caller actually
+    /// filtered on. `topic_scope` belongs here for the sharpest reason of
+    /// the four: it names a worker identity, and a drifted worker spelling
+    /// is registered for nothing at all, so the query returns zero rather
+    /// than merely fewer. An
+    /// empty result means the flag has no subject and the hint is skipped —
+    /// reporting every collision on the server instead would turn an
+    /// advisory into a standing nag, which ADR-0025 deliberately does not
+    /// build.
+    fn drift_subjects(filters: [Option<&str>; 4]) -> Vec<String> {
+        let mut subjects: Vec<String> = Vec::new();
+        for filter in filters.into_iter().flatten() {
+            let filter = filter.trim();
+            if !filter.is_empty() && !subjects.iter().any(|s| s.eq_ignore_ascii_case(filter)) {
+                subjects.push(filter.to_string());
+            }
+        }
+        subjects
+    }
+
+    /// For each queried identity, the other spellings sharing its last
+    /// segment, each with its per-role counts.
+    ///
+    /// The segment rule itself is **not** reimplemented here — that is
+    /// `docket-core`'s (`GET /identities/candidates`), and duplicating it in
+    /// an adapter is exactly the "every consumer re-derives one of the
+    /// library's own domain facts" that ADR-0022 rejected. This only joins
+    /// core's answer to core's counts.
+    async fn fetch_drift_hint(
+        &self,
+        subjects: &[String],
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        #[derive(serde::Deserialize)]
+        struct CandidatesResponse {
+            #[serde(default)]
+            candidates: Vec<String>,
+        }
+
+        let mut candidates: Vec<String> = Vec::new();
+        for subject in subjects {
+            let resp = self
+                .http
+                .get(api_url(&self.base_url, &["identities", "candidates"]))
+                .query(&[("identity", subject.as_str())])
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Ok(None);
+            }
+            let body: CandidatesResponse = resp.json().await?;
+            for candidate in body.candidates {
+                if !candidates
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&candidate))
+                {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let resp = self
+            .http
+            .get(api_url(&self.base_url, &["identities"]))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let rows: Vec<IdentityCountDto> = resp.json().await?;
+
+        let mut hint = serde_json::Map::new();
+        for candidate in candidates {
+            let Some(row) = rows
+                .iter()
+                .find(|r| r.identity.eq_ignore_ascii_case(&candidate))
+            else {
+                continue;
+            };
+            hint.insert(
+                row.identity.clone(),
+                serde_json::json!({
+                    "requester": row.requester,
+                    "assignee": row.assignee,
+                    "topic": row.topic,
+                    "registered_worker": row.registered_worker,
+                }),
+            );
+        }
+        Ok(if hint.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(hint))
+        })
+    }
+
     #[tool(
         description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item. Pass report_gaps=true (with mine) to add an unregistered_open hint: open/unclaimed item counts by topic for topics no worker at all is registered for (not topics someone else owns) — the signal that a mine=... 0-result may be an orphaned topic, not really nothing to do. Every row carries state_since (epoch ms): when the item entered its current state, so now - state_since is how long it has stood there — the axis updated_at cannot give you, since a comment moves updated_at without the item moving. turn is a function of state, so this is the age of the current turn too, except a claim resets it while turn stays assignee. null means the event log doesn't cover this item's last transition (it predates the log) — read that as \"standing at least since the log began\", not as \"just now\""
     )]
@@ -979,15 +1125,28 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
-        if p.report_gaps != Some(true) || p.mine.is_none() {
-            return Ok(result);
-        }
-        // Advisory, never fatal — same treatment create_item gives
-        // fetch_topic_advisory's failure mode.
-        let Ok(Some(hint)) = self.fetch_gap_hint().await else {
-            return Ok(result);
+        let result = if p.report_gaps == Some(true) && p.mine.is_some() {
+            // Advisory, never fatal — same treatment create_item gives
+            // fetch_topic_advisory's failure mode.
+            match self.fetch_gap_hint().await {
+                Ok(Some(hint)) => with_gap_hint(result, hint),
+                _ => result,
+            }
+        } else {
+            result
         };
-        Ok(with_gap_hint(result, hint))
+        Ok(self
+            .apply_drift_hint(
+                result,
+                p.report_drift,
+                [
+                    p.mine.as_deref(),
+                    p.requester.as_deref(),
+                    p.assignee.as_deref(),
+                    p.topic_scope.as_deref(),
+                ],
+            )
+            .await)
     }
 
     #[tool(
@@ -1059,13 +1218,26 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
-        if p.report_gaps != Some(true) || p.mine.is_none() {
-            return Ok(result);
-        }
-        let Ok(Some(hint)) = self.fetch_gap_hint().await else {
-            return Ok(result);
+        let result = if p.report_gaps == Some(true) && p.mine.is_some() {
+            match self.fetch_gap_hint().await {
+                Ok(Some(hint)) => with_gap_hint(result, hint),
+                _ => result,
+            }
+        } else {
+            result
         };
-        Ok(with_gap_hint(result, hint))
+        Ok(self
+            .apply_drift_hint(
+                result,
+                p.report_drift,
+                [
+                    p.mine.as_deref(),
+                    p.requester.as_deref(),
+                    p.assignee.as_deref(),
+                    p.topic_scope.as_deref(),
+                ],
+            )
+            .await)
     }
 
     #[tool(
@@ -1438,6 +1610,41 @@ impl DocketMcp {
         respond::<Vec<TagCountDto>>(resp).await
     }
 
+    /// The gate both `list_items` and `search_items` route through, so the
+    /// "opt-in, needs a subject, never fatal" contract exists once rather
+    /// than twice.
+    async fn apply_drift_hint(
+        &self,
+        result: CallToolResult,
+        report_drift: Option<bool>,
+        filters: [Option<&str>; 4],
+    ) -> CallToolResult {
+        if report_drift != Some(true) || result.is_error == Some(true) {
+            return result;
+        }
+        let subjects = Self::drift_subjects(filters);
+        if subjects.is_empty() {
+            return result;
+        }
+        match self.fetch_drift_hint(&subjects).await {
+            Ok(Some(hint)) => with_extra_field(result, "other_spellings", hint),
+            _ => result,
+        }
+    }
+
+    #[tool(
+        description = "List every identity in use across the whole identity class — requester, assignee, topic, and registered worker id, which docket treats as one namespace (two spellings that differ only in case, or that a declared alias links, are one row). Each row carries how many non-archived items use it in each role, plus whether a worker is registered under it. This is the counterpart of list_topics for parties: reading it is how you spot one party split across two spellings (`filer` alongside `acme/filer`), which no per-field query reports — a drifted spelling silently returns fewer items and nothing says so. Fix a single item with set_item_requester/set_item_assignee/set_item_topic; a recurring spelling needs a declared alias, which is an owner decision made outside MCP. See also list_items/search_items' report_drift flag, which asks the same question about one identity from inside the query that came up short"
+    )]
+    async fn list_identities(&self) -> Result<CallToolResult, McpError> {
+        let resp = self
+            .http
+            .get(api_url(&self.base_url, &["identities"]))
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        respond::<Vec<IdentityCountDto>>(resp).await
+    }
+
     #[tool(
         description = "List existing topics and how many non-archived items sit under each, most-populated first — call this before list_items/search_items to discover topic names instead of guessing"
     )]
@@ -1736,6 +1943,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2283,6 +2491,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2382,6 +2591,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2408,6 +2618,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2686,6 +2897,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2715,6 +2927,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: Some(true),
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2723,6 +2936,248 @@ mod tests {
             hint_value["unregistered_open"],
             serde_json::json!({"iyulab/two": 1}),
             "the gap topic and its open-unclaimed count must be named: {hint_value}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_identities_enumerates_every_role_of_the_identity_class() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("list-identities.db");
+        let core = spawn_core(18450, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/filer".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let result = server.list_identities().await.unwrap();
+        let value = json_value(&result);
+        let row = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["identity"] == "acme/filer")
+            .expect("the requester spelling is enumerated: {value}");
+        assert_eq!(row["requester"], 1);
+        assert_eq!(row["topic"], 0);
+    }
+
+    /// The failure #47 reported: a query under one spelling returns fewer
+    /// items than the party actually has, and nothing anywhere says so.
+    /// `report_drift=true` has to name the other spelling and what sits
+    /// under it, in the same call that came up short.
+    #[tokio::test]
+    async fn list_items_report_drift_names_the_other_spelling_of_the_queried_identity() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("report-drift.db");
+        let core = spawn_core(18451, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        for (requester, title) in [
+            ("acme/filer", "long spelling a"),
+            ("acme/filer", "long spelling b"),
+            ("filer", "short spelling"),
+        ] {
+            server
+                .create_item(Parameters(CreateItemParams {
+                    topic: "acme/widget".to_string(),
+                    title: title.to_string(),
+                    body: None,
+                    tags: vec![],
+                    requester: Some(requester.to_string()),
+                }))
+                .await
+                .unwrap();
+        }
+
+        let plain = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: Some("acme/filer".to_string()),
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+                report_gaps: None,
+                report_drift: None,
+            }))
+            .await
+            .unwrap();
+        let plain_value = json_value(&plain);
+        assert_eq!(
+            plain_value["items"].as_array().unwrap().len(),
+            2,
+            "the third item is filed under the other spelling and is not returned"
+        );
+        assert!(
+            plain_value.get("other_spellings").is_none(),
+            "no hint without report_drift=true"
+        );
+
+        let with_hint = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: Some("acme/filer".to_string()),
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+                report_gaps: None,
+                report_drift: Some(true),
+            }))
+            .await
+            .unwrap();
+        let hint_value = json_value(&with_hint);
+        assert_eq!(
+            hint_value["other_spellings"]["filer"]["requester"],
+            serde_json::json!(1),
+            "the drifted spelling and its counts must be named: {hint_value}"
+        );
+    }
+
+    /// `topic_scope` names a worker identity exactly as `mine` does, and a
+    /// drifted worker spelling makes it return *nothing* rather than merely
+    /// less -- so leaving it out of the subject set would omit the harshest
+    /// case from the hint that exists to explain a short result.
+    #[tokio::test]
+    async fn list_items_report_drift_treats_topic_scope_as_an_identity_filter() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("report-drift-topic-scope.db");
+        let core = spawn_core(18453, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        // The working registration, holding items.
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("acme/widget-bot".to_string()),
+                topics: vec!["acme/widget".to_string()],
+            }))
+            .await
+            .unwrap();
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        // A session whose derived id lost the org scope asks for its queue.
+        let result = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: Some("widget-bot".to_string()),
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+                report_gaps: None,
+                report_drift: Some(true),
+            }))
+            .await
+            .unwrap();
+        let value = json_value(&result);
+        assert_eq!(
+            value["items"].as_array().unwrap().len(),
+            0,
+            "the drifted spelling is registered for nothing, so the queue looks empty"
+        );
+        assert_eq!(
+            value["other_spellings"]["acme/widget-bot"]["registered_worker"],
+            serde_json::json!(true),
+            "the registered spelling must be named as the reason: {value}"
+        );
+    }
+
+    /// `report_drift` needs an identity to compare against. Without one it is
+    /// a no-op rather than dumping every collision on the server — the same
+    /// "requires a subject" contract `report_gaps` has with `mine`.
+    #[tokio::test]
+    async fn list_items_report_drift_without_an_identity_filter_is_a_no_op() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("report-drift-no-identity.db");
+        let core = spawn_core(18452, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        for requester in ["acme/filer", "filer"] {
+            server
+                .create_item(Parameters(CreateItemParams {
+                    topic: "acme/widget".to_string(),
+                    title: "a".to_string(),
+                    body: None,
+                    tags: vec![],
+                    requester: Some(requester.to_string()),
+                }))
+                .await
+                .unwrap();
+        }
+
+        let result = server
+            .list_items(Parameters(ListItemsParams {
+                topic: None,
+                state: None,
+                assignee: None,
+                requester: None,
+                topic_scope: None,
+                mine: None,
+                archived: None,
+                limit: None,
+                offset: None,
+                summary: None,
+                order: None,
+                expand_related: None,
+                report_gaps: None,
+                report_drift: Some(true),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&result).get("other_spellings").is_none(),
+            "no identity was queried, so there is nothing to report drift against"
         );
     }
 
@@ -2766,6 +3221,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: Some(true),
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2816,6 +3272,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2862,6 +3319,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -2922,6 +3380,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3045,6 +3504,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3222,6 +3682,7 @@ mod tests {
                         order: None,
                         expand_related: None,
                         report_gaps: None,
+                        report_drift: None,
                     }))
                     .await
                     .unwrap()
@@ -3395,6 +3856,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3420,6 +3882,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3521,6 +3984,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3586,6 +4050,7 @@ mod tests {
                 order: Some("asc".to_string()),
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3611,6 +4076,7 @@ mod tests {
                 order: Some("asc".to_string()),
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3824,6 +4290,7 @@ mod tests {
                 order: None,
                 expand_related: None,
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();
@@ -3847,6 +4314,7 @@ mod tests {
                 order: None,
                 expand_related: Some(true),
                 report_gaps: None,
+                report_drift: None,
             }))
             .await
             .unwrap();

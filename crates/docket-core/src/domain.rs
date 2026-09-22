@@ -434,6 +434,39 @@ pub struct TopicCount {
     pub open_unclaimed: i64,
 }
 
+/// One row of `list_identities` — a single identity and how it is currently
+/// used, across every role the identity class covers (ADR-0021's four fields,
+/// unified into one namespace by ADR-0022). The counterpart of [`TopicCount`]
+/// for the whole class rather than one field of it; see
+/// [ADR-0025](../../../docs/decisions/ADR-0025-identity-enumeration-and-drift.md).
+///
+/// A per-field listing cannot serve this purpose: a party whose spelling
+/// drifted typically appears under one spelling as `requester` and the other
+/// as `assignee` or `worker id`, so enumerating one field at a time shows one
+/// half of the split and silently omits the other.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityCount {
+    /// The canonical spelling, chosen exactly as [`TopicCount::topic`] is:
+    /// declared aliases fold into their canonical (ADR-0022), and case
+    /// variants fold to the lexicographically-first spelling (ADR-0021).
+    pub identity: String,
+    /// Which declared spellings folded into this row. Empty when none are
+    /// declared — which is the common case, and the reason this surface
+    /// exists: an *undeclared* variant stands as its own row.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Non-archived items naming this identity as their `requester`.
+    pub requester: i64,
+    /// Non-archived items naming this identity as their `assignee`.
+    pub assignee: i64,
+    /// Non-archived items filed under this identity as their `topic`.
+    pub topic: i64,
+    /// Whether a `workers` row exists for this identity. A registered worker
+    /// with all-zero counts is enumerated too — see `Store::list_identities`
+    /// for why that case is the one this surface must not drop.
+    pub registered_worker: bool,
+}
+
 /// A declared spelling variant of one identity — `alias` names the same thing
 /// as `canonical`. Resolution is always one hop: an `alias` may never itself be
 /// another row's `canonical`, and a `canonical` may never be another row's

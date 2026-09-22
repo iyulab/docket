@@ -178,13 +178,21 @@ in the whole surface — even `delete` at least removes a value along with every
 it, where `redact` deliberately leaves the item or comment in place with one field gone, which is
 exactly the shape a worker could reach for as a casual "oops, let me fix that" and get catastrophically
 wrong (see [ADR-0023](decisions/ADR-0023-redact-item-and-comment.md)).
-`PATCH /items/{id}` splits by field: `requester` and `assignee` are exposed (`set_item_requester`,
-`set_item_assignee`), while `topic` and the alias endpoints (`POST`/`GET`/`DELETE /aliases`) stay
-HTTP-only — declaring an alias, in particular, is a judgment about identity that changes who may
-`approve`/`reject` every item under it, not metadata on one item (see
-[ADR-0022](decisions/ADR-0022-identity-alias.md)). Unlike the buttoned operations above, neither
-`topic` correction, `redact`, nor the alias endpoints have a console surface today — HTTP (or a raw
-client atop it) is the only way to reach them.
+`PATCH /items/{id}` is exposed field by field — `set_item_requester`, `set_item_assignee`,
+`set_item_topic` — because each corrects one item's own metadata, which carries none of the blast
+radius above. The alias endpoints (`POST`/`GET`/`DELETE /aliases`) stay HTTP-only: declaring an
+alias is a judgment about identity that changes who may `approve`/`reject` every item under it,
+past and future, not metadata on one item (see
+[ADR-0022](decisions/ADR-0022-identity-alias.md)). **Reading is not declaring**, which is why
+`GET /identities` *is* exposed (`list_identities`) although it concerns the same identity class —
+the rule turns on what an operation can change, not on which concept it touches, and an
+enumeration changes nothing (see
+[ADR-0025](decisions/ADR-0025-identity-enumeration-and-drift.md)).
+`GET /identities/candidates` has no tool of its own for a different reason — not risk, but scope:
+it reaches a worker through `list_items`/`search_items`' `report_drift` flag, which keeps it
+answering about an identity the caller already named instead of becoming a standing report.
+Unlike the buttoned operations above, neither `redact` nor the alias endpoints have a console
+surface today — HTTP (or a raw client atop it) is the only way to reach them.
 `claim`/`submit`/`approve`/`reject`/`reopen`/`archive`/`block`/`defer` are all MCP tools. `force-approve` in particular must stay off MCP — exposing it there would let
 a worker approve its own (or another item's) completion without ever reaching `resolved`, exactly
 the shortcut the `claim → submit → approve` split exists to prevent (see
