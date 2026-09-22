@@ -929,6 +929,12 @@ struct IdentityCandidatesResponse {
     /// Echoed back so a caller holding several of these responses can tell
     /// which spelling each one answered for, without tracking the request.
     identity: String,
+    /// The queried spelling is a bare leaf with no `/` scope — the
+    /// direction a real drift runs in (a short form written where the
+    /// scoped form is established). Carried here so a caller can gate on it
+    /// without re-deriving segment structure; this is *not* an `unserved`
+    /// analogue, which would have no truthful value for a party identity.
+    unscoped: bool,
     candidates: Vec<String>,
 }
 
@@ -941,9 +947,11 @@ async fn identity_candidates(
     State(store): State<Arc<Store>>,
     Query(q): Query<IdentityCandidatesQuery>,
 ) -> Result<Json<IdentityCandidatesResponse>, ApiError> {
+    let unscoped = store.identity_is_unscoped(&q.identity)?;
     let candidates = store.identity_candidates(&q.identity)?;
     Ok(Json(IdentityCandidatesResponse {
         identity: q.identity,
+        unscoped,
         candidates,
     }))
 }
@@ -3092,6 +3100,36 @@ mod tests {
         let body = json_body(resp).await;
         assert_eq!(body["identity"], "acme/filer");
         assert_eq!(body["candidates"], serde_json::json!(["filer"]));
+        assert_eq!(
+            body["unscoped"],
+            serde_json::json!(false),
+            "the queried spelling carries a scope, so it is not the suspected typo"
+        );
+    }
+
+    /// The direction matters: a bare leaf alongside an existing scoped
+    /// identity is the measured drift shape, and `unscoped` is what lets a
+    /// caller act on that direction without re-deriving segment structure
+    /// for itself.
+    #[tokio::test]
+    async fn identity_candidates_route_marks_a_bare_leaf_as_unscoped() {
+        let store = Arc::new(open_test_store());
+        store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+
+        let resp = app(store)
+            .oneshot(
+                Request::builder()
+                    .uri("/identities/candidates?identity=filer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body["unscoped"], serde_json::json!(true));
+        assert_eq!(body["candidates"], serde_json::json!(["acme/filer"]));
     }
 
     /// ADR-0014: a caller that asks for nothing gets `DEFAULT_LIST_LIMIT`

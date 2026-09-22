@@ -215,7 +215,11 @@ struct ListItemsParams {
     /// `true`, adds an
     /// `other_spellings` field to the result: for each identity you filtered
     /// on, any *other* identity on this server whose last `/` segment is the
-    /// same, with what sits under it. Surfaces the blind spot a spelling
+    /// same, with what sits under it — `requester`/`assignee`/`topic` are
+    /// per-role totals over every non-archived item *including closed
+    /// ones*, while `not_closed` counts the distinct items under that
+    /// spelling still in flight, which is the number that answers "am I
+    /// actually missing live work". Surfaces the blind spot a spelling
     /// drift creates — `requester=acme/filer` returning fewer rows than the
     /// party actually has, with nothing anywhere saying the rest are filed
     /// under `filer`. Advisory: two parties can legitimately share a last
@@ -562,6 +566,8 @@ struct IdentityCountDto {
     #[serde(default)]
     topic: i64,
     #[serde(default)]
+    not_closed: i64,
+    #[serde(default)]
     registered_worker: bool,
 }
 
@@ -887,10 +893,71 @@ impl DocketMcp {
         // Advisory, never fatal: a failed advisory lookup must not turn a
         // successful create into a tool error. The item exists either way,
         // so the worst case is the caller simply isn't told.
-        let Ok(Some(note)) = self.fetch_topic_advisory(&p.topic).await else {
+        let result = match self.fetch_topic_advisory(&p.topic).await {
+            Ok(Some(note)) => with_topic_advisory(result, note),
+            _ => result,
+        };
+        let Some(requester) = p.requester.as_deref() else {
             return Ok(result);
         };
-        Ok(with_topic_advisory(result, note))
+        let Ok(Some(note)) = self.fetch_requester_advisory(requester).await else {
+            return Ok(result);
+        };
+        Ok(with_extra_field(
+            result,
+            "requester_advisory",
+            serde_json::Value::String(note),
+        ))
+    }
+
+    /// `GET /identities/candidates` — one sentence when the `requester`
+    /// just written looks like a short form of an identity the server
+    /// already knows, `None` otherwise.
+    ///
+    /// **Two conditions, and the first is what makes this safe on the
+    /// hottest path there is.** `create_item` runs on every filing, and the
+    /// warning is unbidden — so unlike `report_drift`, which the caller
+    /// opts into and scopes to an identity it named, this one cannot afford
+    /// to fire on a pair that is legitimately two parties. Mere segment
+    /// equality would: `acme/booster` and `other-org/booster` share a leaf
+    /// and are unrelated, and they would collide on every create, forever.
+    /// Gating on `unscoped` — the given spelling is a bare leaf, the
+    /// direction a real drift actually runs in — makes the two-scoped case
+    /// structurally unreachable rather than merely unlikely.
+    ///
+    /// Never blocks: the item is already created by the time this runs, the
+    /// same contract `fetch_topic_advisory` has.
+    async fn fetch_requester_advisory(&self, requester: &str) -> anyhow::Result<Option<String>> {
+        #[derive(serde::Deserialize)]
+        struct Advisory {
+            #[serde(default)]
+            unscoped: bool,
+            #[serde(default)]
+            candidates: Vec<String>,
+        }
+        let resp: Advisory = self
+            .http
+            .get(api_url(&self.base_url, &["identities", "candidates"]))
+            .query(&[("identity", requester)])
+            .send()
+            .await?
+            .json()
+            .await?;
+        if !resp.unscoped || resp.candidates.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "`{requester}` has no org scope, and this server already knows scoped \
+             identities with the same name: {}. If one of those is the same party, an \
+             admin can declare an alias (POST /aliases) or correct this item's requester \
+             (set_item_requester) — otherwise the two spellings stay separate and neither \
+             one's queries will see the other's items.",
+            resp.candidates
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
     }
 
     /// `GET /topics/candidates` — one sentence when the topic looks
@@ -1078,6 +1145,7 @@ impl DocketMcp {
                     "requester": row.requester,
                     "assignee": row.assignee,
                     "topic": row.topic,
+                    "not_closed": row.not_closed,
                     "registered_worker": row.registered_worker,
                 }),
             );
@@ -3126,6 +3194,99 @@ mod tests {
             value["other_spellings"]["acme/widget-bot"]["registered_worker"],
             serde_json::json!(true),
             "the registered spelling must be named as the reason: {value}"
+        );
+    }
+
+    /// The drift this catches is a caller writing the bare leaf where the
+    /// rest of the server writes the scoped form -- 8 of the 11 pairs
+    /// measured on a live server had exactly that shape. Warning at
+    /// `create_item` is what stops a *new* one being added; the enumeration
+    /// and `report_drift` only find ones already there.
+    #[tokio::test]
+    async fn create_item_warns_when_the_requester_is_a_bare_leaf_of_an_existing_scoped_identity() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("create-requester-advisory.db");
+        let core = spawn_core(18454, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "established spelling".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/filer".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let drifted = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "short spelling".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("filer".to_string()),
+            }))
+            .await
+            .unwrap();
+        let value = json_value(&drifted);
+        assert_eq!(
+            value["state"], "open",
+            "the item is still created -- the warning never blocks: {value}"
+        );
+        let note = value["requester_advisory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("advisory attached: {value}"));
+        assert!(
+            note.contains("acme/filer"),
+            "names the scoped spelling: {note}"
+        );
+    }
+
+    /// Two scoped identities sharing a leaf are a normal, legitimate
+    /// occurrence (`acme/widget` and `other-org/widget` are unrelated), and
+    /// `create_item` runs on the hottest path there is. Firing there would
+    /// make the warning noise on every filing forever -- which is why the
+    /// gate is the bare-leaf direction, not mere segment equality.
+    #[tokio::test]
+    async fn create_item_does_not_warn_for_two_scoped_identities_sharing_a_leaf() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("create-requester-advisory-scoped.db");
+        let core = spawn_core(18455, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/booster".to_string()),
+            }))
+            .await
+            .unwrap();
+        let other = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "b".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("other-org/booster".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&other).get("requester_advisory").is_none(),
+            "a scoped identity is not a suspected short form"
         );
     }
 

@@ -1700,6 +1700,7 @@ impl Store {
         }
 
         let mut raw: Vec<(String, Role, i64)> = Vec::new();
+        let live_item_identities: Vec<[Option<String>; 3]>;
         {
             let conn = self.conn.lock().expect("store mutex poisoned");
             for (column, role) in [
@@ -1721,6 +1722,13 @@ impl Store {
                     raw.push((row.0, role, row.1));
                 }
             }
+            let mut stmt = conn.prepare(
+                "SELECT topic, requester, assignee FROM items
+                 WHERE archived_at IS NULL AND state != 'closed'",
+            )?;
+            live_item_identities = stmt
+                .query_map([], |row| Ok([row.get(0)?, row.get(1)?, row.get(2)?]))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
         }
         raw.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1739,6 +1747,7 @@ impl Store {
                         requester: 0,
                         assignee: 0,
                         topic: 0,
+                        not_closed: 0,
                         registered_worker: false,
                     });
                     folded.len() - 1
@@ -1769,8 +1778,36 @@ impl Store {
                     requester: 0,
                     assignee: 0,
                     topic: 0,
+                    not_closed: 0,
                     registered_worker: false,
                 });
+            }
+        }
+
+        // `not_closed` counts *items*, not (item, role) pairs, so it cannot
+        // be folded out of the per-column `GROUP BY` above — an item naming
+        // one identity twice would be counted twice. One pass over the live
+        // rows, deduplicating each item's identities, gets it right by
+        // construction.
+        for mentions in live_item_identities {
+            let mut seen: Vec<String> = Vec::new();
+            for spelling in mentions.into_iter().flatten() {
+                let canonical = aliases.resolve(&spelling).to_string();
+                if seen
+                    .iter()
+                    .any(|s| crate::domain::identity_eq(s, &canonical))
+                {
+                    continue;
+                }
+                seen.push(canonical);
+            }
+            for canonical in seen {
+                if let Some(row) = folded
+                    .iter_mut()
+                    .find(|r| crate::domain::identity_eq(&r.identity, &canonical))
+                {
+                    row.not_closed += 1;
+                }
             }
         }
 
@@ -1817,6 +1854,35 @@ impl Store {
     /// the pair away, and a pair that is genuinely two parties simply stays
     /// reported -- this surface asserts no sameness, and there is
     /// deliberately no way to declare two identities permanently distinct.
+    /// Whether `identity`, once alias-resolved, is a bare leaf — no `/`
+    /// scope in front of it.
+    ///
+    /// This is the direction the measured drift actually runs in: a caller
+    /// writes the short form (`widget`) where the rest of the server writes
+    /// the scoped one (`acme/widget`), the case
+    /// [ADR-0022](../../../docs/decisions/ADR-0022-identity-alias.md) names
+    /// in its own opening. Segment *count* is the same kind of knowledge as
+    /// the segment *equality* that ADR-0022 already admitted into the core:
+    /// exact, structural, no scoring.
+    ///
+    /// Resolution runs first on purpose. A declared alias makes the bare
+    /// spelling a *known* identity, so it is no longer a suspected typo —
+    /// declaring the alias is precisely how a caller says "this short form
+    /// is intended", and this must stop reporting it at that point.
+    ///
+    /// Exists so a caller can gate on the direction without re-deriving
+    /// segment structure for itself; see
+    /// [ADR-0025](../../../docs/decisions/ADR-0025-identity-enumeration-and-drift.md)'s
+    /// 2026-09-22 update.
+    pub fn identity_is_unscoped(&self, identity: &str) -> Result<bool> {
+        let identity = identity.trim();
+        if identity.is_empty() {
+            return Ok(false);
+        }
+        let aliases = self.alias_map()?;
+        Ok(!aliases.resolve(identity).contains('/'))
+    }
+
     pub fn identity_candidates(&self, identity: &str) -> Result<Vec<String>> {
         let identity = identity.trim();
         if identity.is_empty() {
@@ -5176,6 +5242,79 @@ mod tests {
         assert!(
             rows.iter().any(|r| r.identity == "acme/board-umbrella"),
             "requester-only spelling is enumerated"
+        );
+    }
+
+    /// The role counts answer "how much is filed under this spelling" over
+    /// every non-archived item, closed ones included. That is the wrong
+    /// number for "is anything still in flight under the other spelling" --
+    /// a drift that is entirely historical looks identical to one holding
+    /// live work. `not_closed` is the second count that separates them, the
+    /// same way `TopicCount::open_unclaimed` separates live work from
+    /// `count`.
+    #[test]
+    fn list_identities_counts_not_closed_items_separately_from_the_role_totals() {
+        let store = open_test_store();
+        let live = store
+            .create_item("acme/widget", "live", None, &[], Some("acme/filer"))
+            .unwrap();
+        store.claim_item(&live.id, "acme/bot").unwrap();
+        let done = store
+            .create_item("acme/widget", "done", None, &[], Some("acme/filer"))
+            .unwrap();
+        store.claim_item(&done.id, "acme/bot").unwrap();
+        store.submit_item(&done.id, "acme/bot", None).unwrap();
+        store.approve_item(&done.id, "acme/filer").unwrap();
+
+        let rows = store.list_identities().unwrap();
+        let row = rows.iter().find(|r| r.identity == "acme/filer").unwrap();
+        assert_eq!(row.requester, 2, "both items name it as requester");
+        assert_eq!(row.not_closed, 1, "only one of them is still in flight");
+    }
+
+    /// One item naming the same identity in two roles is one item, not two,
+    /// for the purpose of "is anything still in flight" -- unlike the role
+    /// counts, which are deliberately per-role.
+    #[test]
+    fn list_identities_counts_a_two_role_item_once_in_not_closed() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "a", None, &[], Some("acme/filer"))
+            .unwrap();
+        store.claim_item(&item.id, "acme/filer").unwrap();
+
+        let rows = store.list_identities().unwrap();
+        let row = rows.iter().find(|r| r.identity == "acme/filer").unwrap();
+        assert_eq!((row.requester, row.assignee), (1, 1));
+        assert_eq!(row.not_closed, 1, "one item, counted once");
+    }
+
+    /// The measured drift mechanism is a caller writing the bare leaf where
+    /// another writes the scoped form. `identity_is_unscoped` is the exact,
+    /// structural test for "the spelling I was given is a bare leaf" -- the
+    /// gate a create-time warning needs so it cannot fire on two legitimately
+    /// distinct scoped identities that merely share a leaf.
+    #[test]
+    fn identity_is_unscoped_is_true_only_for_a_bare_leaf() {
+        let store = open_test_store();
+        assert!(store.identity_is_unscoped("filer").unwrap());
+        assert!(!store.identity_is_unscoped("acme/filer").unwrap());
+        assert!(
+            !store.identity_is_unscoped("").unwrap(),
+            "a blank identity is not a spelling at all"
+        );
+    }
+
+    /// A declared alias makes the bare spelling a *known* identity, so it is
+    /// no longer a suspected typo -- resolution runs before the test, exactly
+    /// as it does everywhere else in the class.
+    #[test]
+    fn identity_is_unscoped_folds_a_declared_alias_first() {
+        let store = open_test_store();
+        store.put_alias("filer", "acme/filer").unwrap();
+        assert!(
+            !store.identity_is_unscoped("filer").unwrap(),
+            "a declared alias resolves to its scoped canonical"
         );
     }
 

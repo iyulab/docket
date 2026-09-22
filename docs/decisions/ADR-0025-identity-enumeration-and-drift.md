@@ -1,4 +1,4 @@
-Status: v0 implementation | 2026-09-22 | implemented
+Status: v0 implementation | 2026-09-22 | implemented (updated 2026-09-22 — create-time advisory, `not_closed`)
 
 # ADR-0025: Enumerating the identity class, and detecting a drifted spelling
 
@@ -31,7 +31,7 @@ last segment**, spread across every field of the class:
 
 | Shape of the pair | Groups | Example |
 |---|---|---|
-| bare short form vs scoped form | 8 | `widget-works` and `acme/widget-works`, 74 items vs 2 |
+| bare short form vs scoped form | 8 | `widget-works` and `acme/widget-works`, dozens of items against a handful |
 | two different scopes, same leaf | 3 | `acme/booster` and `other-org/booster` |
 
 Only **5** of the 11 have both spellings appearing as a `requester`; the other 6 have one spelling
@@ -95,7 +95,9 @@ alias group. Same exact, unscored rule; **no unserved gate**, per the option abo
 
 There is no `unserved` field in the response either. `/topics/candidates` carries one because
 served-ness is real evidence there; here there is no truthful value to put in it, and a field that
-means something different on a sibling endpoint is worse than an absent one.
+means something different on a sibling endpoint is worse than an absent one. (The response does
+carry an `unscoped` flag, added by the 2026-09-22 update below — a fact about the string, not a
+substitute for `unserved`.)
 
 ### Precision comes from request scope, not from a gate
 
@@ -107,8 +109,10 @@ reported, forever, and costs nothing, because nobody is shown it who did not ask
 
 The one delivery surface that *is* unbidden — the `report_drift` hint the MCP layer adds to
 `list_items`/`search_items` — stays inside the same rule: it is opt-in, and it requires the query
-to already name an identity (`mine`, `requester` or `assignee`), so what it reports is bounded by
-what the caller asked about. With no identity in the query it is a no-op, not a dump of every
+to already name an identity (`mine`, `requester`, `assignee` or `topic_scope` — the last belongs
+for the sharpest reason of the four: it names a worker identity, and a drifted worker spelling is
+registered for nothing, so the query returns zero rather than merely fewer), so what it reports is
+bounded by what the caller asked about. With no identity in the query it is a no-op, not a dump of every
 collision on the server.
 
 ### Still advisory, still nothing automatic
@@ -154,6 +158,55 @@ make the unbuilt suppression mechanism necessary, and it should be decided toget
 after. Separately: an identity whose drift is *not* a last-segment match (a rename that changes
 the leaf, which segment equality cannot see by construction) appearing in practice, since that is
 the case this rule is known not to cover.
+
+## 2026-09-22 update — warning at the moment a drift is created
+
+The decision above gives two surfaces, and both are **retrospective**: they find drift that is
+already there. Neither stops a new one being added, and the measured 11 groups are what "already
+there" accumulates into. The topic arm does not have that hole — `create_item` attaches a
+`topic_advisory` when the topic it was just handed is unserved — so this is the third of the three
+topic-arm devices, which the decision above did not port.
+
+**The obstacle was that the argument above does not straightforwardly extend to it.** "Precision
+comes from request scope" rests on both surfaces answering a question the caller asked;
+`create_item`'s advisory is unbidden, and it runs on the hottest path there is. Mere segment
+equality there would fire on every legitimately-distinct pair on every filing forever — the 3
+measured cross-scope groups would each nag indefinitely. That is the nag this ADR said it does not
+build, and it would have re-opened the case for the suppression table rejected above.
+
+**Resolved by gating on direction, not by adding a suppression mechanism.** The advisory fires only
+when the given identity is a **bare leaf** — no `/` scope — *and* a scoped identity with the same
+leaf exists. Both conditions exact and structural; no scoring, nothing new for a human to declare.
+
+- It is the direction the drift actually runs in. ADR-0022's own opening names this case —
+  "a caller has always used a short form (`widget`) where another uses the full, scoped one
+  (`acme/widget`)" — and it is the shape of 8 of the 11 measured groups.
+- It makes the false positive *unreachable* rather than unlikely: two scoped identities sharing a
+  leaf can never satisfy the first condition, so the case that would nag cannot arise.
+- Segment **count** is the same kind of knowledge as the segment **equality** ADR-0022 already
+  admitted into the core, and admitted on the same terms: exact, positional, no similarity
+  scoring. It adds nothing the core did not already know about the shape of an identity.
+- Alias resolution runs before the test. Declaring an alias is exactly how a caller says "this
+  short form is intended", so a declared short form stops being reported at that moment, with no
+  second mechanism involved.
+
+`GET /identities/candidates` carries the flag as `unscoped`, so a caller gates on the direction
+without re-deriving segment structure for itself (the P-1 reason the segment rule lives in core at
+all). This is **not** the `unserved` analogue the decision above declined: `unserved` would have
+asserted something untrue about a party identity, where `unscoped` states a fact about the string
+it was handed. The retrospective surfaces deliberately do **not** apply this gate — a caller asking
+about one identity has already narrowed the question, and would be worse served by an answer that
+silently dropped the cross-scope half.
+
+### Also in this update: `not_closed`
+
+`IdentityCount`'s role counts include closed items, so "another spelling holds 2 items" reads as
+live work when it may be entirely historical — sharpest under a `mine`-scoped query, whose whole
+subject is what is waiting now. `not_closed` is the second count that separates them: distinct
+non-archived items mentioning the identity in any role whose `state` is not `closed`. Distinct,
+not per-role, because the question is "is an item still in flight", and one item naming the same
+identity twice is one item. This is the separation `TopicCount::open_unclaimed` already draws next
+to `count`, for the same reason.
 
 ## Related
 

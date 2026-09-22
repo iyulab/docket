@@ -461,6 +461,18 @@ pub struct IdentityCount {
     pub assignee: i64,
     /// Non-archived items filed under this identity as their `topic`.
     pub topic: i64,
+    /// Non-archived items mentioning this identity in **any** role whose
+    /// `state` is not `closed` — distinct items, so one item naming it as
+    /// both `requester` and `assignee` counts once here although it counts
+    /// in both role fields above.
+    ///
+    /// The role counts alone cannot answer "is anything still in flight
+    /// under this spelling", because they include closed items: a drift
+    /// that is entirely historical reads identically to one holding live
+    /// work. Same separation [`TopicCount::open_unclaimed`] draws next to
+    /// [`TopicCount::count`], for the same reason.
+    #[serde(default)]
+    pub not_closed: i64,
     /// Whether a `workers` row exists for this identity. A registered worker
     /// with all-zero counts is enumerated too — see `Store::list_identities`
     /// for why that case is the one this surface must not drop.
