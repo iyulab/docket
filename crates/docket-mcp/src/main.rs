@@ -887,7 +887,9 @@ impl DocketMcp {
         respond::<WorkerDto>(resp).await
     }
 
-    #[tool(description = "File a new item in front of a topic")]
+    #[tool(
+        description = "File a new item in front of a topic. Never blocked by an advisory, but the result may carry up to three, each answering a different question: topic_advisory (no registered worker serves this topic -- it may be mistargeted, or genuinely new), topic_spelling_advisory and requester_advisory (the topic/requester you passed is a bare name with no org scope and this server already knows scoped identities with the same name -- the two spellings are separate identities whose queries never see each other, so either declare an alias or correct the field). A topic can draw both topic advisories at once; they are separate fields because they fail for different reasons"
+    )]
     async fn create_item(
         &self,
         Parameters(p): Parameters<CreateItemParams>,
@@ -908,6 +910,15 @@ impl DocketMcp {
         // so the worst case is the caller simply isn't told.
         let result = match self.fetch_topic_advisory(&p.topic).await {
             Ok(Some(note)) => with_topic_advisory(result, note),
+            _ => result,
+        };
+        // A *separate* field from `topic_advisory`, not a second sentence
+        // inside it: that one asks whether anyone serves the topic, this
+        // asks whether the topic is spelled as a bare leaf of one already
+        // known. Both can fail at once, and merging them would lose which
+        // did.
+        let result = match self.fetch_unscoped_advisory(&p.topic, "topic").await {
+            Ok(Some(note)) => with_extra_field(result, "topic_spelling_advisory", note.into()),
             _ => result,
         };
         let Some(requester) = p.requester.as_deref() else {
@@ -3337,6 +3348,155 @@ mod tests {
         assert!(
             note.contains("acme/filer"),
             "names the scoped spelling: {note}"
+        );
+    }
+
+    /// `topic_advisory` asks whether anyone *serves* the topic; this asks
+    /// whether the topic is spelled as a bare leaf of one already known.
+    /// They are different questions, and a topic can fail the second while
+    /// passing the first -- a worker registered on the bare spelling serves
+    /// it, so the unserved gate stays silent while items keep landing under
+    /// an identity separate from the scoped one.
+    #[tokio::test]
+    async fn create_item_warns_for_a_bare_leaf_topic_even_when_that_topic_is_served() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("create-topic-spelling.db");
+        let core = spawn_core(18458, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        // The scoped spelling exists as a topic.
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "scoped".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        // ...and a worker is registered on the bare one, so it *is* served.
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("acme/bot".to_string()),
+                topics: vec!["widget".to_string()],
+            }))
+            .await
+            .unwrap();
+
+        let drifted = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "widget".to_string(),
+                title: "bare".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let value = json_value(&drifted);
+        assert!(
+            value.get("topic_advisory").is_none(),
+            "the unserved gate is silent -- a worker does serve this topic: {value}"
+        );
+        let note = value["topic_spelling_advisory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the spelling advisory fires instead: {value}"));
+        assert!(
+            note.contains("acme/widget"),
+            "names the scoped topic: {note}"
+        );
+    }
+
+    /// The two advisories are separate fields on purpose: merging them would
+    /// lose which of the two questions actually failed, and an unserved bare
+    /// leaf fails both at once.
+    #[tokio::test]
+    async fn create_item_can_attach_both_topic_advisories_at_once() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("create-topic-both.db");
+        let core = spawn_core(18459, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "scoped".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+
+        // Nobody is registered for anything, so the bare topic is unserved
+        // *and* a bare leaf of a known scoped one.
+        let drifted = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "widget".to_string(),
+                title: "bare".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let value = json_value(&drifted);
+        assert!(
+            value["topic_advisory"].is_string(),
+            "no worker serves it: {value}"
+        );
+        assert!(
+            value["topic_spelling_advisory"].is_string(),
+            "and it is a bare leaf of `acme/widget`: {value}"
+        );
+    }
+
+    /// A scoped topic nobody serves is the ordinary first-item-of-a-new-repo
+    /// case. It already gets `topic_advisory`; adding a spelling warning
+    /// there would be noise on a filing that is not a drift at all.
+    #[tokio::test]
+    async fn create_item_does_not_attach_a_spelling_advisory_to_a_scoped_topic() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("create-topic-scoped.db");
+        let core = spawn_core(18460, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let other = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "other-org/widget".to_string(),
+                title: "b".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&other).get("topic_spelling_advisory").is_none(),
+            "two scoped topics sharing a leaf are routinely unrelated"
         );
     }
 

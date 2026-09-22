@@ -1,4 +1,4 @@
-Status: v0 implementation | 2026-09-22 | implemented (updated 2026-09-22 — create-time advisory, `not_closed`)
+Status: v0 implementation | 2026-09-22 | implemented — see the 2026-09-22 update below
 
 # ADR-0025: Enumerating the identity class, and detecting a drifted spelling
 
@@ -231,6 +231,18 @@ leaving stdout exactly the topic so nothing piping it changes. Notably the same 
 refused to report a bare folder name for an uninitialized submodule, on the grounds that it
 misleads more than silence does; this extends that judgment to the path where silence is not an
 option.
+
+### Both entry-point fields, and why the topic gate is a second field
+
+`create_item` takes two identities, and the gate applies to both — but the `topic` arm already had
+an advisory, and the two ask different questions. `topic_advisory` asks whether anyone *serves* the
+topic (jurisdiction); the bare-leaf gate asks whether the spelling collides with a scoped one
+(identity). A topic can pass the first and fail the second — a worker registered on the bare
+spelling serves it, so the unserved gate stays silent while items keep landing under an identity
+separate from the scoped one — and an unscoped, unserved topic fails both at once. They are
+therefore **separate fields**, `topic_advisory` and `topic_spelling_advisory`: folding the second
+into the first would produce one string that cannot say which condition actually failed, and the
+two have different remedies (register a worker; declare an alias).
 
 ### Also in this update: `not_closed`
 
