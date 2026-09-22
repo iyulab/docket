@@ -109,14 +109,39 @@ pub fn derive_topic(start: &Path) -> String {
 /// `start`'s own topic first, then each submodule in `.gitmodules`
 /// declaration order, depth-first. Deduplicated, so an override that
 /// happens to collide with a submodule's derived topic isn't listed twice.
-pub fn derive_all_topics(start: &Path) -> Vec<String> {
+///
+/// Returns the submodules it had to leave out alongside the topics — see
+/// [`AllTopics::skipped`] for why that half is not an implementation
+/// detail.
+pub fn derive_all_topics_detailed(start: &Path) -> AllTopics {
     let mut topics = vec![derive_topic(start)];
+    let mut skipped = Vec::new();
     if let Some((root, _)) = find_repo_root(start) {
-        collect_submodule_topics(&root, &mut topics);
+        collect_submodule_topics(&root, &root, &mut topics, &mut skipped);
     }
     let mut seen = HashSet::new();
     topics.retain(|t| seen.insert(t.clone()));
-    topics
+    AllTopics { topics, skipped }
+}
+
+/// The result of [`derive_all_topics_detailed`].
+#[derive(Debug, Clone)]
+pub struct AllTopics {
+    /// One topic per repository in the tree, `start`'s own first.
+    pub topics: Vec<String>,
+    /// Declared `.gitmodules` paths (relative to `start`'s repository root)
+    /// that were **not** included, because nothing is checked out there.
+    ///
+    /// Skipping them is correct — an uninitialized submodule has no
+    /// `origin` remote to derive from, and guessing a folder name would be
+    /// the very thing [`TopicSource::FolderName`] exists to warn about. But
+    /// the whole point of listing every topic at once is that a caller
+    /// stops missing one by hand, and a silent skip has this function
+    /// committing that omission on the caller's behalf: the output is
+    /// indistinguishable from a complete answer, and it feeds straight into
+    /// a worker registration, where a missing topic shows up only as a
+    /// query quietly returning fewer rows.
+    pub skipped: Vec<String>,
 }
 
 /// Reads `repo_root/.gitmodules` (absent → no submodules, not an error) and
@@ -126,8 +151,15 @@ pub fn derive_all_topics(start: &Path) -> Vec<String> {
 /// was never run) is skipped rather than falling back to a folder-name
 /// topic — an uninitialized submodule has no `origin` remote to derive from
 /// and reporting a bare directory name here would be more misleading than
-/// silence.
-fn collect_submodule_topics(repo_root: &Path, topics: &mut Vec<String>) {
+/// silence. Each such skip is recorded in `skipped` so the caller can say
+/// so; skipping quietly would make this function's output indistinguishable
+/// from a complete one (see [`AllTopics::skipped`]).
+fn collect_submodule_topics(
+    outer_root: &Path,
+    repo_root: &Path,
+    topics: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) {
     let Ok(content) = std::fs::read_to_string(repo_root.join(".gitmodules")) else {
         return;
     };
@@ -135,7 +167,19 @@ fn collect_submodule_topics(repo_root: &Path, topics: &mut Vec<String>) {
         let submodule_dir = repo_root.join(&path);
         if submodule_dir.join(".git").exists() {
             topics.push(derive_topic(&submodule_dir));
-            collect_submodule_topics(&submodule_dir, topics);
+            collect_submodule_topics(outer_root, &submodule_dir, topics, skipped);
+        } else {
+            // Relative to the outermost root, not to the umbrella that
+            // declared it: a bare leaf name leaves the caller hunting for
+            // which nested umbrella it belongs to, and nested umbrellas are
+            // exactly why this function recurses.
+            skipped.push(
+                submodule_dir
+                    .strip_prefix(outer_root)
+                    .unwrap_or(&submodule_dir)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
 }
@@ -529,7 +573,7 @@ mod tests {
         );
 
         assert_eq!(
-            derive_all_topics(&umbrella),
+            derive_all_topics_detailed(&umbrella).topics,
             vec!["acme/umbrella".to_string(), "iyulab/docket".to_string(),]
         );
 
@@ -556,11 +600,102 @@ mod tests {
         // submodule reference with nothing checked out on disk.
 
         assert_eq!(
-            derive_all_topics(&umbrella),
+            derive_all_topics_detailed(&umbrella).topics,
             vec!["acme/umbrella".to_string()]
         );
 
         std::fs::remove_dir_all(&umbrella).unwrap();
+    }
+
+    /// Skipping is the right call -- an uninitialized submodule has no
+    /// remote to derive from -- but `--all` exists precisely so a caller
+    /// stops missing topics, so a silent skip has the command committing
+    /// the very omission it was added to prevent. The skip stays; it stops
+    /// being invisible.
+    #[test]
+    fn derive_all_topics_reports_which_submodules_it_skipped() {
+        let umbrella = temp_dir("all-topics-skips-reported");
+        write_config_with_origin(
+            &umbrella.join(".git"),
+            "https://github.com/acme/umbrella.git",
+        );
+        std::fs::write(
+            umbrella.join(".gitmodules"),
+            "[submodule \"widget\"]\n\tpath = widget\n\turl = https://github.com/acme/widget.git\n",
+        )
+        .unwrap();
+
+        let all = derive_all_topics_detailed(&umbrella);
+        assert_eq!(all.topics, vec!["acme/umbrella".to_string()]);
+        assert_eq!(
+            all.skipped,
+            vec!["widget".to_string()],
+            "the declared path of the submodule that was not checked out"
+        );
+
+        std::fs::remove_dir_all(&umbrella).unwrap();
+    }
+
+    #[test]
+    fn derive_all_topics_reports_nothing_skipped_when_every_submodule_is_checked_out() {
+        let umbrella = temp_dir("all-topics-none-skipped");
+        write_config_with_origin(
+            &umbrella.join(".git"),
+            "https://github.com/acme/umbrella.git",
+        );
+        std::fs::write(
+            umbrella.join(".gitmodules"),
+            "[submodule \"widget\"]\n\tpath = widget\n\turl = https://github.com/acme/widget.git\n",
+        )
+        .unwrap();
+        write_config_with_origin(
+            &umbrella.join("widget").join(".git"),
+            "https://github.com/acme/widget.git",
+        );
+
+        let all = derive_all_topics_detailed(&umbrella);
+        assert_eq!(
+            all.topics,
+            vec!["acme/umbrella".to_string(), "acme/widget".to_string()]
+        );
+        assert!(all.skipped.is_empty());
+
+        std::fs::remove_dir_all(&umbrella).unwrap();
+    }
+
+    /// A skip inside a nested umbrella is just as invisible as one at the
+    /// top, and the path has to say *where* -- a bare leaf name would leave
+    /// the caller hunting for which umbrella it belongs to.
+    #[test]
+    fn derive_all_topics_reports_a_skip_nested_inside_a_submodule_with_its_full_path() {
+        let root = temp_dir("all-topics-nested-skip");
+        write_config_with_origin(&root.join(".git"), "https://github.com/acme/outer.git");
+        std::fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"mid\"]\n\tpath = mid\n\turl = https://github.com/acme/mid.git\n",
+        )
+        .unwrap();
+        write_config_with_origin(
+            &root.join("mid").join(".git"),
+            "https://github.com/acme/mid.git",
+        );
+        std::fs::write(
+            root.join("mid").join(".gitmodules"),
+            "[submodule \"leaf\"]\n\tpath = leaf\n\turl = https://github.com/acme/leaf.git\n",
+        )
+        .unwrap();
+
+        let all = derive_all_topics_detailed(&root);
+        assert_eq!(
+            all.topics,
+            vec!["acme/outer".to_string(), "acme/mid".to_string()]
+        );
+        assert_eq!(
+            all.skipped,
+            vec![format!("mid{}leaf", std::path::MAIN_SEPARATOR)]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Nested umbrellas (a submodule that is itself an umbrella) must
@@ -605,7 +740,7 @@ mod tests {
         );
 
         assert_eq!(
-            derive_all_topics(&root),
+            derive_all_topics_detailed(&root).topics,
             vec![
                 "org/root".to_string(),
                 "org/mid".to_string(),

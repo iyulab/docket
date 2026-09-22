@@ -345,8 +345,24 @@ async fn main() -> anyhow::Result<()> {
             // `topics[]` (or a `docket-mcp` `topics: [...]` call) without
             // the caller having to enumerate `.gitmodules` by hand. See the
             // "docket-cc topic이 엄브렐러+서브모듈..." issue.
-            for t in topic::derive_all_topics(&cwd) {
+            let all = topic::derive_all_topics_detailed(&cwd);
+            for t in &all.topics {
                 println!("{t}");
+            }
+            if !all.skipped.is_empty() {
+                eprintln!(
+                    "docket-cc: warning: {} submodule(s) listed in .gitmodules are not checked \
+                     out, so their topics are missing from this list: {}. Registering these \
+                     topics as-is leaves those repositories unregistered, which shows up only \
+                     as queries quietly returning fewer rows. Run `git submodule update --init \
+                     --recursive` and re-run this command.",
+                    all.skipped.len(),
+                    all.skipped
+                        .iter()
+                        .map(|s| format!("`{s}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
         } else {
             println!("{}", topic::derive_topic(&cwd));

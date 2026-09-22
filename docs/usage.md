@@ -555,7 +555,13 @@ cd path/to/some/umbrella && docket-cc topic --all
 
 One topic per line, in `.gitmodules` declaration order — pass straight into `register_worker`'s
 `topics[]`. An uninitialized submodule (listed in `.gitmodules` but never `git submodule update`d) is
-skipped, not guessed at.
+skipped, not guessed at — it has no `origin` remote to derive from, and a guessed folder name is
+exactly what the fallback warning above exists to prevent. **The skip is named on stderr** (with its
+`.gitmodules` path, relative to the repository root, nested ones included), because stdout alone
+would be indistinguishable from a complete list: this command exists so you stop missing a topic by
+hand, and it feeds a worker registration where a missing topic surfaces only as queries quietly
+returning fewer rows — the failure `report_gaps` (§4) exists to catch after the fact. Run
+`git submodule update --init --recursive` and re-run.
 
 ## 7. File projection & Claude Code hook (`docket-cc`)
 
