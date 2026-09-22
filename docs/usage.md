@@ -524,6 +524,16 @@ through to the repository it was created from. The whole repository is one topic
 many packages live inside it. Drop a `.docket/topic` file (its first non-empty line, plain text) in
 any ancestor directory to override the derivation entirely.
 
+**When there is no `origin` remote** (a repository with no remote yet, or a directory with no
+`.git` above it at all), the topic falls back to the directory's own name and a warning goes to
+**stderr** — stdout stays exactly the topic, so piping is unaffected. Heed the warning: a directory
+name is not an identity. Another clone of the same repository under a different local directory
+name derives a *different* topic, and a bare name with no `org/` scope is a **different identity**
+from the scoped spelling rather than a shorthand for it — the two never see each other's items, and
+no amount of case folding or later aliasing undoes items already filed apart. This is the point at
+which a short-form spelling drift is *created*, as opposed to the surfaces in §4 that only find one
+after the fact. Write the intended topic to `.docket/topic` instead of accepting the guess.
+
 `git worktree` and `claim` are orthogonal: a worktree isolates the filesystem, `claim` isolates
 ownership. Running several sessions in parallel via `git worktree` still means they all resolve to the
 same topic and safely race for items in it via `claim` — the worktree doesn't need to (and shouldn't

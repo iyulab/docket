@@ -324,6 +324,22 @@ async fn main() -> anyhow::Result<()> {
     // registered to get an answer.
     if std::env::args().nth(1).as_deref() == Some("topic") {
         let cwd = std::env::current_dir()?;
+        // On stderr, so stdout stays exactly the topic (or one per line)
+        // that callers pipe into `register_worker`. The derivation itself
+        // is unchanged — this only stops the guess from looking like an
+        // answer.
+        let derived = topic::derive_topic_detailed(&cwd);
+        if derived.source == topic::TopicSource::FolderName {
+            eprintln!(
+                "docket-cc: warning: no `origin` remote above this directory, so the topic \
+                 falls back to the directory's own name `{}`. That is a guess, not an \
+                 identity: another clone of the same repository under a different directory \
+                 name derives a different topic, and a bare name with no `org/` scope is a \
+                 different identity from the scoped spelling rather than a shorthand for it. \
+                 Write the intended topic to `.docket/topic` to pin it.",
+                derived.topic
+            );
+        }
         if std::env::args().nth(2).as_deref() == Some("--all") {
             // One topic per line — pastes directly into `register_worker`'s
             // `topics[]` (or a `docket-mcp` `topics: [...]` call) without

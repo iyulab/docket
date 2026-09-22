@@ -25,21 +25,76 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Where a derived topic actually came from. The distinction exists for
+/// one of the three: `FolderName` is a **guess**, and the other two are
+/// answers. Returning the topic alone threw that away at the one place
+/// that knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopicSource {
+    /// An explicit `.docket/topic`. Whatever it says is intended.
+    Override,
+    /// Parsed from the repository's `origin` remote — stable across clones,
+    /// machines, and however the directory happens to be named locally.
+    OriginRemote,
+    /// **Fallback**: no `.git` above the directory, or a `.git` with no
+    /// `origin` remote. The topic is the directory's own name, which is not
+    /// an identity — another clone of the same repository under a different
+    /// directory name derives a different one, and a bare name with no
+    /// `org/` scope is a *different identity* from the scoped spelling, not
+    /// a shorthand for it. This is where a short-form spelling drift is
+    /// created rather than merely detected.
+    FolderName,
+}
+
+/// A derived topic and where it came from. See [`TopicSource`].
+#[derive(Debug, Clone)]
+pub struct DerivedTopic {
+    pub topic: String,
+    pub source: TopicSource,
+}
+
 /// The public entry point. Never fails — a directory with no `.git`
 /// anywhere above it, or a `.git` with no `origin` remote, still produces a
 /// usable (if less specific) topic rather than an error, since the caller
 /// (a Claude Code session about to create or search for an item) has no
 /// good recovery path for "topic derivation failed".
+///
+/// **The fallback is a guess, and the caller is told so** via
+/// [`TopicSource`] — `collect_submodule_topics` below already refuses to
+/// report a bare folder name on the grounds that it misleads more than
+/// silence does, and the same is true here; the difference is that this
+/// path has no silence available, so it reports the guess *and* labels it.
+pub fn derive_topic_detailed(start: &Path) -> DerivedTopic {
+    if let Some(topic) = find_topic_override(start) {
+        return DerivedTopic {
+            topic,
+            source: TopicSource::Override,
+        };
+    }
+    let (fallback_root, from_remote) = match find_repo_root(start) {
+        Some((root, git_entry)) => {
+            let derived = resolve_git_common_dir(&git_entry)
+                .and_then(|common| remote_origin_org_repo(&common));
+            (root, derived)
+        }
+        None => (start.to_path_buf(), None),
+    };
+    match from_remote {
+        Some(topic) => DerivedTopic {
+            topic,
+            source: TopicSource::OriginRemote,
+        },
+        None => DerivedTopic {
+            topic: folder_name(&fallback_root),
+            source: TopicSource::FolderName,
+        },
+    }
+}
+
+/// [`derive_topic_detailed`] when only the string is wanted — the shape
+/// every caller used before the source became worth knowing.
 pub fn derive_topic(start: &Path) -> String {
-    if let Some(overridden) = find_topic_override(start) {
-        return overridden;
-    }
-    match find_repo_root(start) {
-        Some((root, git_entry)) => resolve_git_common_dir(&git_entry)
-            .and_then(|common| remote_origin_org_repo(&common))
-            .unwrap_or_else(|| folder_name(&root)),
-        None => folder_name(start),
-    }
+    derive_topic_detailed(start).topic
 }
 
 /// `derive_topic`'s upward walk stops at the nearest `.git`, deliberately —
@@ -246,6 +301,66 @@ mod tests {
             format!("[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = {url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"),
         )
         .unwrap();
+    }
+
+    /// A folder name is not an identity. Two clones of one repository under
+    /// different directory names derive different topics, and a topic with
+    /// no `org/` scope is a different identity from the scoped one -- which
+    /// is how a short-form spelling drift gets created rather than merely
+    /// detected. The fallback stays (a caller has no recovery path for
+    /// "derivation failed"), but it stops being silent.
+    #[test]
+    fn a_repo_without_an_origin_remote_reports_the_folder_name_fallback() {
+        let root = temp_dir("no-origin");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n",
+        )
+        .unwrap();
+
+        let derived = derive_topic_detailed(&root);
+        assert_eq!(derived.topic, folder_name(&root));
+        assert_eq!(derived.source, TopicSource::FolderName);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_directory_with_no_git_at_all_reports_the_folder_name_fallback() {
+        let dir = temp_dir("no-git");
+        let derived = derive_topic_detailed(&dir);
+        assert_eq!(derived.topic, folder_name(&dir));
+        assert_eq!(derived.source, TopicSource::FolderName);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_derived_org_repo_is_not_reported_as_a_fallback() {
+        let root = temp_dir("has-origin");
+        write_config_with_origin(&root.join(".git"), "https://github.com/acme/widget.git");
+
+        let derived = derive_topic_detailed(&root);
+        assert_eq!(derived.topic, "acme/widget");
+        assert_eq!(derived.source, TopicSource::OriginRemote);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// An explicit `.docket/topic` is the documented escape hatch, so it is
+    /// never a fallback however it is spelled -- warning there would be
+    /// telling the caller off for doing exactly what the warning asks for.
+    #[test]
+    fn an_explicit_override_is_never_reported_as_a_fallback() {
+        let root = temp_dir("override");
+        std::fs::create_dir_all(root.join(".docket")).unwrap();
+        std::fs::write(root.join(".docket").join("topic"), "widget\n").unwrap();
+
+        let derived = derive_topic_detailed(&root);
+        assert_eq!(derived.topic, "widget");
+        assert_eq!(derived.source, TopicSource::Override);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

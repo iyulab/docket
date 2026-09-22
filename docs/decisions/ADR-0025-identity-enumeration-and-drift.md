@@ -215,6 +215,23 @@ given, and the result carries an advisory naming the scoped spellings it collide
 not to reject here is the reason ADR-0021 already recorded for case, unchanged by the fact that
 this drift is a new row rather than a fold.
 
+### Where the drift is created, not detected
+
+Everything above — enumeration, the detector, both entry-point advisories — runs on the server and
+therefore only after a spelling has arrived there. Two of them also depend on the *other* spelling
+already existing, so whichever spelling lands first is never questioned.
+
+`docket-cc`'s topic derivation is upstream of all of that, and it had the same silence: with no
+`origin` remote to read it falls back to the directory's own name, which is a bare leaf, and
+printed it as though it were an answer. That fallback is the most likely origin of the bare-vs-scoped
+majority in the survey above. It stays — a session asking "what topic am I in" has no recovery path
+for a hard failure, which is the same reasoning ADR-0021 used to reject a `409` on
+`register_worker` — but it is now labelled at the point of derivation and warned about on stderr,
+leaving stdout exactly the topic so nothing piping it changes. Notably the same module already
+refused to report a bare folder name for an uninitialized submodule, on the grounds that it
+misleads more than silence does; this extends that judgment to the path where silence is not an
+option.
+
 ### Also in this update: `not_closed`
 
 `IdentityCount`'s role counts include closed items, so "another spelling holds 2 items" reads as
