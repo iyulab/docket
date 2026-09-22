@@ -50,7 +50,15 @@ If two workers race to claim the same item, exactly one gets `200`; the other ge
 
 ### As an MCP server
 
-`docket-mcp` exposes `register_worker`/`create_item`/`list_items`/`claim_item`/`submit_item`/`approve_item` as MCP tools, talking to `docket-core` over the same HTTP API (`DOCKET_CORE_URL`, default `http://127.0.0.1:8420` — it never links `docket-core` as a library, see [architecture.md](docs/architecture.md)). Add it to an MCP client's config as a stdio server:
+`docket-mcp` exposes **25 MCP tools**, talking to `docket-core` over the same HTTP API (`DOCKET_CORE_URL`, default `http://127.0.0.1:8420` — it never links `docket-core` as a library, see [architecture.md](docs/architecture.md)). Add it to an MCP client's config as a stdio server:
+
+The worker loop is `register_worker` → `list_items`/`search_items` → `claim_item` → `submit_item` →
+`approve_item`; around it sit comments and tags, lifecycle exits (`reject_item`/`reopen_item`/
+`block_item`/`defer_item`/`archive_item`), metadata corrections (`set_item_requester`/
+`set_item_assignee`/`set_item_topic`), the activity feed (`list_events`), and vocabulary discovery
+(`list_topics`/`list_tags`/`list_identities`). [usage.md](docs/usage.md) has the full reference and
+is the doc to keep open — this list is a map, not a contract. Not every HTTP operation becomes a
+tool: admin actions stay off MCP deliberately (see architecture.md's MCP-exposure rule).
 
 ```json
 {

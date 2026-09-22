@@ -259,6 +259,20 @@ does not have two spellings. One consequence is worth stating because it looks l
 not: the advisory is computed after the write, so moving the last item out of a scoped topic
 reports nothing — that topic has ceased to exist, and there is no longer a collision to report.
 
+### Where the gate stops: writes that *set* an identity, not writes that *act as* one
+
+`claim_item`, `submit_item`, `approve_item` and `reject_item` also take an identity, and they do
+**not** carry the gate. The line is not arbitrary, and it is recorded here because it is the
+question this arc will otherwise be re-asked on every future call that takes an identity string.
+
+The gate belongs where a spelling is *introduced or changed* — `create_item`, `register_worker`,
+the three `set_item_*`. Those decide what identity gets recorded. The others act *as* an identity
+that was already established, and the establishing call already warned about it: a session whose id
+is a bare leaf hears it at `register_worker`, once. Extending the gate to the acting calls would
+repeat that same sentence on every claim, submit and approve for the rest of the session — a
+standing nag, which is exactly what the decision above declines to build, arrived at from the other
+direction.
+
 ### Also in this update: `not_closed`
 
 `IdentityCount`'s role counts include closed items, so "another spelling holds 2 items" reads as
