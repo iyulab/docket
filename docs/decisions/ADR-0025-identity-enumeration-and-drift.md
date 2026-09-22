@@ -244,6 +244,21 @@ therefore **separate fields**, `topic_advisory` and `topic_spelling_advisory`: f
 into the first would produce one string that cannot say which condition actually failed, and the
 two have different remedies (register a worker; declare an alias).
 
+### Every write that accepts an identity, including the repair calls
+
+`set_item_requester`, `set_item_assignee` and `set_item_topic` were the last writes taking an
+identity with no gate on it, and they were left out twice on the reasoning that their callers are
+already thinking about identity. That reasoning contradicts the premise the whole mechanism rests
+on: people write short forms naturally, and being alert to the concept does not make someone type
+the scoped spelling. `set_item_requester` in particular is what this documentation points at as
+*the* remedy for a drifted requester — writing the short form there recreates precisely what the
+call was reached for.
+
+All three now carry the same gate, under the same field names `create_item` uses, so one advisory
+does not have two spellings. One consequence is worth stating because it looks like a gap and is
+not: the advisory is computed after the write, so moving the last item out of a scoped topic
+reports nothing — that topic has ceased to exist, and there is no longer a collision to report.
+
 ### Also in this update: `not_closed`
 
 `IdentityCount`'s role counts include closed items, so "another spelling holds 2 items" reads as

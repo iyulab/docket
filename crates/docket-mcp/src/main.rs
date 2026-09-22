@@ -917,21 +917,36 @@ impl DocketMcp {
         // asks whether the topic is spelled as a bare leaf of one already
         // known. Both can fail at once, and merging them would lose which
         // did.
-        let result = match self.fetch_unscoped_advisory(&p.topic, "topic").await {
-            Ok(Some(note)) => with_extra_field(result, "topic_spelling_advisory", note.into()),
-            _ => result,
-        };
+        let result = self
+            .with_unscoped_advisory(result, &p.topic, "topic", "topic_spelling_advisory")
+            .await;
         let Some(requester) = p.requester.as_deref() else {
             return Ok(result);
         };
-        let Ok(Some(note)) = self.fetch_unscoped_advisory(requester, "requester").await else {
-            return Ok(result);
-        };
-        Ok(with_extra_field(
-            result,
-            "requester_advisory",
-            serde_json::Value::String(note),
-        ))
+        Ok(self
+            .with_unscoped_advisory(result, requester, "requester", "requester_advisory")
+            .await)
+    }
+
+    /// Attaches [`Self::fetch_unscoped_advisory`]'s sentence under `field`
+    /// when it has one to say. A failed lookup, or a successful one with
+    /// nothing to report, leaves the result exactly as it was — every
+    /// advisory in this file is the same bargain: worth attaching, never
+    /// worth failing an operation that already succeeded over.
+    async fn with_unscoped_advisory(
+        &self,
+        result: CallToolResult,
+        identity: &str,
+        role: &str,
+        field: &str,
+    ) -> CallToolResult {
+        if result.is_error == Some(true) {
+            return result;
+        }
+        match self.fetch_unscoped_advisory(identity, role).await {
+            Ok(Some(note)) => with_extra_field(result, field, note.into()),
+            _ => result,
+        }
     }
 
     /// `GET /identities/candidates` — one sentence when the identity just
@@ -1595,7 +1610,13 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        let result = respond::<ItemDto>(resp).await?;
+        // The call the docs name as *the* remedy for a drifted requester can
+        // just as easily write the short form and recreate it, so the same
+        // gate applies here as at `create_item`.
+        Ok(self
+            .with_unscoped_advisory(result, &p.requester, "requester", "requester_advisory")
+            .await)
     }
 
     #[tool(
@@ -1624,7 +1645,10 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        let result = respond::<ItemDto>(resp).await?;
+        Ok(self
+            .with_unscoped_advisory(result, &p.assignee, "assignee", "assignee_advisory")
+            .await)
     }
 
     #[tool(
@@ -1653,7 +1677,12 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        let result = respond::<ItemDto>(resp).await?;
+        // Same field name `create_item` uses for the same question, so a
+        // caller does not have to learn two spellings of one advisory.
+        Ok(self
+            .with_unscoped_advisory(result, &p.topic, "topic", "topic_spelling_advisory")
+            .await)
     }
 
     #[tool(
@@ -3348,6 +3377,171 @@ mod tests {
         assert!(
             note.contains("acme/filer"),
             "names the scoped spelling: {note}"
+        );
+    }
+
+    /// `set_item_requester` is what the docs point at as *the* remedy for a
+    /// drifted requester. Typing the short form there recreates exactly what
+    /// the call was reached for -- and the reason to warn is the premise
+    /// this whole line of work rests on: people write short forms naturally,
+    /// which being "identity-aware" does not prevent.
+    #[tokio::test]
+    async fn set_item_requester_warns_when_the_new_value_is_a_bare_leaf() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("set-requester-advisory.db");
+        let core = spawn_core(18461, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "established".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/filer".to_string()),
+            }))
+            .await
+            .unwrap();
+        let target = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "needs a requester".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let item_id = json_value(&target)["id"].as_str().unwrap().to_string();
+
+        let corrected = server
+            .set_item_requester(Parameters(SetRequesterParams {
+                item_id,
+                requester: "filer".to_string(),
+                author: Some("acme/bot".to_string()),
+            }))
+            .await
+            .unwrap();
+        let value = json_value(&corrected);
+        assert_eq!(
+            value["requester"], "filer",
+            "the correction is applied -- the advisory never blocks it: {value}"
+        );
+        let note = value["requester_advisory"]
+            .as_str()
+            .unwrap_or_else(|| panic!("advisory attached: {value}"));
+        assert!(
+            note.contains("acme/filer"),
+            "names the scoped spelling: {note}"
+        );
+    }
+
+    /// Correcting *to* the scoped spelling is the intended use of this call.
+    /// Warning there would fire on every successful repair.
+    #[tokio::test]
+    async fn set_item_requester_is_silent_when_the_new_value_is_scoped() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("set-requester-advisory-scoped.db");
+        let core = spawn_core(18462, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        let target = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("filer".to_string()),
+            }))
+            .await
+            .unwrap();
+        let item_id = json_value(&target)["id"].as_str().unwrap().to_string();
+
+        let corrected = server
+            .set_item_requester(Parameters(SetRequesterParams {
+                item_id,
+                requester: "acme/filer".to_string(),
+                author: Some("acme/bot".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&corrected).get("requester_advisory").is_none(),
+            "repairing towards the scoped spelling must stay silent"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_item_assignee_and_topic_warn_on_a_bare_leaf_too() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("set-assignee-topic-advisory.db");
+        let core = spawn_core(18463, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+
+        // Two items, because the advisory is computed *after* the write: a
+        // move that takes the last item out of `acme/widget` leaves that
+        // topic non-existent, so there would be no collision left to
+        // report -- correct, but not the case under test here.
+        server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "stays behind".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/bot".to_string()),
+            }))
+            .await
+            .unwrap();
+        let target = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "acme/widget".to_string(),
+                title: "a".to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/bot".to_string()),
+            }))
+            .await
+            .unwrap();
+        let item_id = json_value(&target)["id"].as_str().unwrap().to_string();
+
+        let reassigned = server
+            .set_item_assignee(Parameters(SetAssigneeParams {
+                item_id: item_id.clone(),
+                assignee: "bot".to_string(),
+                author: Some("acme/bot".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&reassigned)["assignee_advisory"].is_string(),
+            "`bot` is a bare leaf of `acme/bot`: {}",
+            json_value(&reassigned)
+        );
+
+        let moved = server
+            .set_item_topic(Parameters(SetTopicParams {
+                item_id,
+                topic: "widget".to_string(),
+                author: Some("acme/bot".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&moved)["topic_spelling_advisory"].is_string(),
+            "`widget` is a bare leaf of `acme/widget`: {}",
+            json_value(&moved)
         );
     }
 
