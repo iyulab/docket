@@ -33,7 +33,7 @@ jobs:
       contents: write
       actions: write # to dispatch release.yml for the tag this job creates
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # need full tag history to check for an existing tag
 

@@ -35,7 +35,7 @@ jobs:
             ext: ""
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -62,7 +62,7 @@ jobs:
                "dist/${bin}-${{ matrix.target }}${{ matrix.ext }}"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6 # v7 is not in delete-artifact@v6's compatibility table
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
@@ -81,7 +81,7 @@ jobs:
     env:
       target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -117,7 +117,7 @@ jobs:
                "dist/${bin}-${{ env.target }}.exe"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6 # v7 is not in delete-artifact@v6's compatibility table
         with:
           name: dist-${{ env.target }}
           path: dist/*
@@ -126,12 +126,12 @@ jobs:
   build-console:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -145,7 +145,7 @@ jobs:
           mkdir -p dist
           (cd console/dist && zip -r ../../dist/console-dist.zip .)
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6 # v7 is not in delete-artifact@v6's compatibility table
         with:
           name: dist-console
           path: dist/*
@@ -159,7 +159,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -176,7 +176,7 @@ jobs:
       contents: write
       actions: write # delete the intermediate dist-* artifacts below
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: dist-*
@@ -186,7 +186,7 @@ jobs:
         working-directory: dist
         run: sha256sum * > checksums.txt
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           # A `push: tags:` run has a tag as `github.ref_name` for free: the
           # action defaults to it. A `workflow_dispatch` run doesn't — its
