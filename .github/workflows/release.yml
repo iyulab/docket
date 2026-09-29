@@ -174,6 +174,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write # delete the intermediate dist-* artifacts below
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -194,3 +195,13 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*
           generate_release_notes: true
+
+      # The dist-* artifacts only carry files between jobs; once they are
+      # attached to the Release they are dead weight. Deleted on success only:
+      # after a failure they are what "Re-run failed jobs" needs, and
+      # retention-days: 1 already bounds how long they linger. A failed
+      # cleanup must not mark an already-published release as failed.
+      - uses: geekyeggo/delete-artifact@v6
+        with:
+          name: dist-*
+          failOnError: false
