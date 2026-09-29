@@ -240,8 +240,13 @@ body {
   white-space: nowrap;
 }
 
+/* `.app-body` is a row flex container, so its default `align-items: stretch`
+   would give the table the panel's full height and a table hands that extra
+   height to its rows — a two-item list rendered as two half-screen rows.
+   `flex: 1` still fills the width; `align-self` keeps the natural height. */
 .item-list {
   flex: 1;
+  align-self: flex-start;
   border-collapse: collapse;
   background: white;
   border-radius: 6px;
