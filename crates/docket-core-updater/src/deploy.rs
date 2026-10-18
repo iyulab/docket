@@ -106,7 +106,11 @@ fn extract_zip(zip_bytes: &[u8], dest: &Path) -> anyhow::Result<()> {
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let Some(relative) = file.enclosed_name() else {
-            anyhow::bail!("zip entry {} has an unsafe path", file.name());
+            let name = file
+                .name()
+                .map(|n| n.into_owned())
+                .unwrap_or_else(|e| format!("<{e}>"));
+            anyhow::bail!("zip entry {name} has an unsafe path");
         };
         let out_path = dest.join(relative);
         if file.is_dir() {
