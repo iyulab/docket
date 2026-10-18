@@ -2008,8 +2008,47 @@ mod tests {
         path
     }
 
+    /// Newest modification time under `dir`, recursively.
+    fn newest_mtime(dir: &std::path::Path) -> std::time::SystemTime {
+        std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read {dir:?}: {e}"))
+            .map(|entry| {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    newest_mtime(&entry.path())
+                } else {
+                    entry.metadata().unwrap().modified().unwrap()
+                }
+            })
+            .max()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    }
+
+    /// `cargo test -p docket-mcp` does not rebuild the docket-core binary
+    /// these tests spawn. A binary older than core's sources runs the
+    /// previous core, so a test that depends on a new core field fails as if
+    /// the MCP code were wrong — or passes against behavior core no longer
+    /// has. Refuse to run against one rather than report either.
+    fn assert_core_binary_is_current(binary: &std::path::Path) {
+        let core_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docket-core");
+        let sources = newest_mtime(&core_dir.join("src")).max(
+            std::fs::metadata(core_dir.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+        );
+        let Ok(built) = std::fs::metadata(binary).and_then(|m| m.modified()) else {
+            return; // missing binary: spawn_core's own panic says what to run
+        };
+        assert!(
+            built >= sources,
+            "{binary:?} is older than docket-core's sources — run `cargo build -p docket-core` (or `cargo build --workspace --bins`) before `cargo test -p docket-mcp`"
+        );
+    }
+
     async fn spawn_core(port: u16, db_path: &std::path::Path) -> CoreProcess {
         let binary = docket_core_binary();
+        assert_core_binary_is_current(&binary);
         let child = Command::new(&binary)
             .env("DOCKET_PORT", port.to_string())
             .env("DOCKET_DB_PATH", db_path)
