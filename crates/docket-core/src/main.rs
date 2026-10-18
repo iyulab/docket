@@ -905,6 +905,12 @@ struct TopicCandidatesResponse {
     /// condition without any similarity scoring.
     unserved: bool,
     candidates: Vec<String>,
+    /// Registered workers covering the topic, and the part of them registered
+    /// for it itself — the same pair `GET /topics` reports per row, here for a
+    /// topic that may have no items yet. A served topic with an empty
+    /// `owned_by_exact` is reached only by broad prefix registrations.
+    owned_by: Vec<String>,
+    owned_by_exact: Vec<String>,
 }
 
 /// Advisory only — nothing here rejects or rewrites a topic. Kept a separate
@@ -917,9 +923,12 @@ async fn topic_candidates(
 ) -> Result<Json<TopicCandidatesResponse>, ApiError> {
     let unserved = !store.topic_is_served(&q.topic)?;
     let candidates = store.topic_candidates(&q.topic)?;
+    let (owned_by, owned_by_exact) = store.topic_owners(&q.topic)?;
     Ok(Json(TopicCandidatesResponse {
         unserved,
         candidates,
+        owned_by,
+        owned_by_exact,
     }))
 }
 

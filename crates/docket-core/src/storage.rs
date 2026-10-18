@@ -1524,6 +1524,7 @@ impl Store {
                     count: row.count,
                     aliases: Vec::new(),
                     owned_by: Vec::new(),
+                    owned_by_exact: Vec::new(),
                     open_unclaimed: row.open_unclaimed,
                 }),
             }
@@ -1537,6 +1538,7 @@ impl Store {
                 .collect();
             row.aliases.sort();
             row.owned_by = Self::covering_workers(&aliases, &workers, &row.topic);
+            row.owned_by_exact = Self::exact_owners(&aliases, &workers, &row.topic);
         }
         folded.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.topic.cmp(&b.topic)));
         Ok(folded)
@@ -1595,6 +1597,36 @@ impl Store {
             .map(|w| aliases.resolve(&w.id).to_string())
             .collect();
         ids.into_iter().collect()
+    }
+
+    /// The subset of [`Self::covering_workers`] registered for `topic`
+    /// itself rather than through a shorter prefix — see
+    /// `TopicCount::owned_by_exact`. Same alias folding, same sort.
+    fn exact_owners(aliases: &AliasMap, workers: &[Worker], topic: &str) -> Vec<String> {
+        let topic = aliases.resolve(topic);
+        let ids: std::collections::BTreeSet<String> = workers
+            .iter()
+            .filter(|w| {
+                w.topics
+                    .iter()
+                    .any(|owned| crate::domain::identity_eq(aliases.resolve(owned), topic))
+            })
+            .map(|w| aliases.resolve(&w.id).to_string())
+            .collect();
+        ids.into_iter().collect()
+    }
+
+    /// Who covers `topic`, for a topic that may have no items yet (so no
+    /// `list_topics` row): every covering worker, and the part of them
+    /// registered for the topic itself. `(owned_by, owned_by_exact)`.
+    pub fn topic_owners(&self, topic: &str) -> Result<(Vec<String>, Vec<String>)> {
+        let topic = topic.trim();
+        let aliases = self.alias_map()?;
+        let workers = self.list_workers()?;
+        Ok((
+            Self::covering_workers(&aliases, &workers, topic),
+            Self::exact_owners(&aliases, &workers, topic),
+        ))
     }
 
     /// Whether some registered worker's topics match `topic` — the same
@@ -2489,6 +2521,7 @@ fn topic_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TopicCount> {
         count: row.get(1)?,
         aliases: Vec::new(),
         owned_by: Vec::new(),
+        owned_by_exact: Vec::new(),
         open_unclaimed: row.get(2)?,
     })
 }
@@ -5001,6 +5034,43 @@ mod tests {
             docket.owned_by,
             vec!["iyulab/scout"],
             "a worker registered on the parent prefix covers the child topic"
+        );
+        assert!(
+            docket.owned_by_exact.is_empty(),
+            "but it did not register the child topic itself"
+        );
+    }
+
+    /// `owned_by_exact` separates a worker registered for the topic from one
+    /// that only reaches it through a broad prefix — the difference a filer
+    /// needs to know whether anyone is actually set up to receive the item.
+    #[test]
+    fn list_topics_owned_by_exact_names_only_workers_registered_for_the_topic() {
+        let store = open_test_store();
+        store
+            .register_worker("iyulab/scout", &["iyulab".to_string()])
+            .unwrap();
+        store
+            .register_worker("iyulab/receiver", &["iyulab/Docket".to_string()])
+            .unwrap();
+        store
+            .create_item("iyulab/docket", "a", None, &[], None)
+            .unwrap();
+
+        let topics = store.list_topics().unwrap();
+        let docket = topics.iter().find(|t| t.topic == "iyulab/docket").unwrap();
+        assert_eq!(docket.owned_by, vec!["iyulab/receiver", "iyulab/scout"]);
+        assert_eq!(
+            docket.owned_by_exact,
+            vec!["iyulab/receiver"],
+            "case-folded like every identity comparison (ADR-0021)"
+        );
+
+        let (owned_by, exact) = store.topic_owners("iyulab/new-repo").unwrap();
+        assert_eq!(owned_by, vec!["iyulab/scout"]);
+        assert!(
+            exact.is_empty(),
+            "a topic with no items yet is answered too"
         );
     }
 

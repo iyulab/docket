@@ -205,7 +205,10 @@ struct ListItemsParams {
     /// rows here, silently indistinguishable from "nothing to do". Not "a
     /// topic some other worker owns" — that's normal and not this caller's
     /// business, and would swamp the real signal on a server with many
-    /// topics. Costs one extra request against `docket-core` — opt-in so a
+    /// topics. Also adds `prefix_only_open`: the same counts for topics that
+    /// are covered, but only through a broader prefix (`owned_by_exact`
+    /// empty) — an organization-wide registration otherwise makes them read
+    /// as owned. Costs one extra request against `docket-core` — opt-in so a
     /// plain `mine` query pays nothing for it. No effect without `mine`
     /// (the flag is only meaningful alongside a query about your own
     /// registration).
@@ -294,7 +297,8 @@ struct SearchItemsParams {
     #[serde(default)]
     expand_related: Option<bool>,
     /// Same semantics as `list_items`'s field of the same name — requires
-    /// `mine`, adds an `unregistered_open` registration-gap hint.
+    /// `mine`, adds the `unregistered_open` and `prefix_only_open`
+    /// registration-gap hints.
     #[serde(default)]
     report_gaps: Option<bool>,
     /// Same semantics as `list_items`'s field of the same name — requires
@@ -779,8 +783,33 @@ fn with_topic_advisory(result: CallToolResult, note: String) -> CallToolResult {
 /// `with_topic_advisory`'s sibling for `fetch_gap_hint`. Same
 /// fallback-to-unmodified behavior for a result shape this doesn't
 /// recognize.
-fn with_gap_hint(result: CallToolResult, hint: serde_json::Value) -> CallToolResult {
-    with_extra_field(result, "unregistered_open", hint)
+fn with_gap_hint(result: CallToolResult, hints: GapHints) -> CallToolResult {
+    let result = match hints.unregistered_open {
+        Some(hint) => with_extra_field(result, "unregistered_open", hint),
+        None => result,
+    };
+    match hints.prefix_only_open {
+        Some(hint) => with_extra_field(result, "prefix_only_open", hint),
+        None => result,
+    }
+}
+
+/// What `report_gaps` adds — see `DocketMcp::fetch_gap_hint`.
+#[derive(Default)]
+struct GapHints {
+    unregistered_open: Option<serde_json::Value>,
+    prefix_only_open: Option<serde_json::Value>,
+}
+
+/// The `total` of an already-serialized paginated result, if it has one.
+fn result_total(result: &CallToolResult) -> Option<i64> {
+    let Some(ContentBlock::Text(text)) = result.content.first() else {
+        return None;
+    };
+    serde_json::from_str::<serde_json::Value>(&text.text)
+        .ok()?
+        .get("total")?
+        .as_i64()
 }
 
 /// Splices one advisory field into an already-serialized tool result, or
@@ -888,7 +917,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "File a new item in front of a topic. Never blocked by an advisory, but the result may carry up to three, each answering a different question: topic_advisory (no registered worker serves this topic -- it may be mistargeted, or genuinely new), topic_spelling_advisory and requester_advisory (the topic/requester you passed is a bare name with no org scope and this server already knows scoped identities with the same name -- the two spellings are separate identities whose queries never see each other, so either declare an alias or correct the field). A topic can draw both topic advisories at once; they are separate fields because they fail for different reasons"
+        description = "File a new item in front of a topic. Never blocked by an advisory, but the result may carry up to three, each answering a different question: topic_advisory (no registered worker serves this topic -- it may be mistargeted, or genuinely new -- or only workers registered for a broader prefix reach it, so nobody is set up to receive it specifically), topic_spelling_advisory and requester_advisory (the topic/requester you passed is a bare name with no org scope and this server already knows scoped identities with the same name -- the two spellings are separate identities whose queries never see each other, so either declare an alias or correct the field). A topic can draw both topic advisories at once; they are separate fields because they fail for different reasons"
     )]
     async fn create_item(
         &self,
@@ -1020,6 +1049,11 @@ impl DocketMcp {
         struct Advisory {
             unserved: bool,
             candidates: Vec<String>,
+            // `Option`, not `#[serde(default)]`: a docket-core older than
+            // these fields omits them, and reading that as "empty" would
+            // report every served topic as prefix-only.
+            owned_by: Option<Vec<String>>,
+            owned_by_exact: Option<Vec<String>>,
         }
         let resp: Advisory = self
             .http
@@ -1030,7 +1064,23 @@ impl DocketMcp {
             .json()
             .await?;
         if !resp.unserved {
-            return Ok(None);
+            return Ok(match (resp.owned_by, resp.owned_by_exact) {
+                (Some(owned_by), Some(exact)) if exact.is_empty() && !owned_by.is_empty() => {
+                    Some(format!(
+                        "Topic `{topic}` is covered only by broad registrations ({}) — no \
+                         worker registered this topic itself. Those workers see the item in \
+                         `mine`, but none is set up to receive `{topic}` specifically, so an \
+                         item that needs an answer may sit unclaimed: check later that it was \
+                         claimed, and raise it with a person if it was not.",
+                        owned_by
+                            .iter()
+                            .map(|w| format!("`{w}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }
+                _ => None,
+            });
         }
         if resp.candidates.is_empty() {
             return Ok(Some(format!(
@@ -1052,28 +1102,37 @@ impl DocketMcp {
         )))
     }
 
-    /// `GET /topics` — registration-gap hint accompanying `mine=<worker>`.
-    /// Topics with open, unclaimed items whose `owned_by` is **empty** —
-    /// no worker at all is registered for them, the same blind spot that
-    /// lets `mine` silently return 0 while items sit under a topic
-    /// everyone forgot to register for. `None` when there is nothing to
-    /// report, or the call fails (advisory only, like
-    /// `fetch_topic_advisory`).
+    /// `GET /topics` — registration-gap hints accompanying `mine=<worker>`.
+    ///
+    /// `unregistered_open`: topics with open, unclaimed items whose
+    /// `owned_by` is **empty** — no worker at all is registered for them, the
+    /// same blind spot that lets `mine` silently return 0 while items sit
+    /// under a topic everyone forgot to register for.
+    ///
+    /// `prefix_only_open`: topics with open, unclaimed items that *are*
+    /// covered, but only through a broader prefix — `owned_by_exact` is
+    /// empty. An organization-wide registration makes every topic under it
+    /// read as owned, which hides exactly the topics no session is set up to
+    /// receive; counting `owned_by` alone, a filer cannot tell them apart.
     ///
     /// Deliberately **not** "topics `owned_by` doesn't name this caller" —
     /// that would also match every topic a *different* worker legitimately
     /// owns, which is normal and not this caller's business; on a server
-    /// with many topics that would bury the real signal (a topic nobody at
-    /// all is registered for) under everyone else's ordinary backlog. The
-    /// result is the same for every caller, since it names no worker —
-    /// `mine` still gates whether the flag applies, because it's only
-    /// meaningful alongside a query about *your own* registration.
-    async fn fetch_gap_hint(&self) -> anyhow::Result<Option<serde_json::Value>> {
+    /// with many topics that would bury the real signal under everyone
+    /// else's ordinary backlog. The result is the same for every caller,
+    /// since it names no worker — `mine` still gates whether the flag
+    /// applies, because it's only meaningful alongside a query about *your
+    /// own* registration. Each map is `None` when empty, and both are when
+    /// the call fails (advisory only, like `fetch_topic_advisory`).
+    async fn fetch_gap_hint(&self) -> anyhow::Result<GapHints> {
         #[derive(serde::Deserialize)]
         struct TopicRow {
             topic: String,
             #[serde(default)]
             owned_by: Vec<String>,
+            // Absent from an older docket-core — not the same as empty,
+            // see `fetch_topic_advisory`.
+            owned_by_exact: Option<Vec<String>>,
             #[serde(default)]
             open_unclaimed: i64,
         }
@@ -1083,21 +1142,73 @@ impl DocketMcp {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Ok(None);
+            return Ok(GapHints::default());
         }
         let topics: Vec<TopicRow> = resp.json().await?;
 
-        let mut gaps = serde_json::Map::new();
+        let mut unregistered = serde_json::Map::new();
+        let mut prefix_only = serde_json::Map::new();
         for t in topics {
-            if t.open_unclaimed == 0 || !t.owned_by.is_empty() {
+            if t.open_unclaimed == 0 {
                 continue;
             }
-            gaps.insert(t.topic, serde_json::json!(t.open_unclaimed));
+            if t.owned_by.is_empty() {
+                unregistered.insert(t.topic, serde_json::json!(t.open_unclaimed));
+            } else if t.owned_by_exact.is_some_and(|exact| exact.is_empty()) {
+                prefix_only.insert(t.topic, serde_json::json!(t.open_unclaimed));
+            }
         }
-        Ok(if gaps.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Object(gaps))
+        let non_empty = |map: serde_json::Map<String, serde_json::Value>| {
+            (!map.is_empty()).then_some(serde_json::Value::Object(map))
+        };
+        Ok(GapHints {
+            unregistered_open: non_empty(unregistered),
+            prefix_only_open: non_empty(prefix_only),
+        })
+    }
+
+    /// The rows a `mine` query's `state` filter hid. `mine` already spans
+    /// three kinds of row — items the worker holds, items it filed that now
+    /// wait on its decision (`resolved`), and unclaimed items in its topics
+    /// (`open`) — so narrowing it by `state` silently drops whole kinds,
+    /// most often the `resolved` replies the worker has to answer. Re-asks
+    /// without `state` and reports the difference; `None` when nothing was
+    /// hidden or the check fails (advisory only).
+    async fn fetch_state_filter_advisory(
+        &self,
+        mine: &str,
+        state: &str,
+        archived: Option<&str>,
+        shown_total: i64,
+    ) -> Option<String> {
+        // The total travels in `X-Total-Count`, as `respond_paginated` reads it.
+        let total: i64 = self
+            .http
+            .get(api_url(&self.base_url, &["items"]))
+            .query(&[
+                ("mine", Some(mine)),
+                ("archived", archived),
+                ("limit", Some("1")),
+                ("summary", Some("true")),
+            ])
+            .send()
+            .await
+            .ok()?
+            .headers()
+            .get("X-Total-Count")?
+            .to_str()
+            .ok()?
+            .parse()
+            .ok()?;
+        let hidden = total - shown_total;
+        (hidden > 0).then(|| {
+            format!(
+                "state={state} hid {hidden} of the {} rows mine={mine} matches. mine already \
+                 covers what you hold, what you filed that now waits on your decision \
+                 (resolved) and unclaimed work in your topics (open) — drop state to see \
+                 every row it is meant to surface.",
+                total
+            )
         })
     }
 
@@ -1202,7 +1313,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item. Pass report_gaps=true (with mine) to add an unregistered_open hint: open/unclaimed item counts by topic for topics no worker at all is registered for (not topics someone else owns) — the signal that a mine=... 0-result may be an orphaned topic, not really nothing to do. Pass report_drift=true (with any of mine/requester/assignee/topic_scope) to add an other_spellings hint: for each identity you filtered on, any *other* identity sharing its last / segment, with per-role counts plus not_closed (still in flight) — the signal that your query returned fewer rows than the party actually has because the rest are filed under a second spelling. Advisory: two parties can legitimately share a last segment. Every row carries state_since (epoch ms): when the item entered its current state, so now - state_since is how long it has stood there — the axis updated_at cannot give you, since a comment moves updated_at without the item moving. turn is a function of state, so this is the age of the current turn too, except a claim resets it while turn stays assignee. null means the event log doesn't cover this item's last transition (it predates the log) — read that as \"standing at least since the log began\", not as \"just now\""
+        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item. Pass report_gaps=true (with mine) to add an unregistered_open hint: open/unclaimed item counts by topic for topics no worker at all is registered for (not topics someone else owns) — the signal that a mine=... 0-result may be an orphaned topic, not really nothing to do — and a prefix_only_open hint: the same counts for topics reached only through a broader prefix registration, which nobody registered to receive. Do not add state to a mine query: mine already spans held, resolved-awaiting-your-decision and open-unclaimed rows, and a state filter hides whole kinds of them — when it does, the result carries a state_filter_advisory saying how many. Pass report_drift=true (with any of mine/requester/assignee/topic_scope) to add an other_spellings hint: for each identity you filtered on, any *other* identity sharing its last / segment, with per-role counts plus not_closed (still in flight) — the signal that your query returned fewer rows than the party actually has because the rest are filed under a second spelling. Advisory: two parties can legitimately share a last segment. Every row carries state_since (epoch ms): when the item entered its current state, so now - state_since is how long it has stood there — the axis updated_at cannot give you, since a comment moves updated_at without the item moving. turn is a function of state, so this is the age of the current turn too, except a claim resets it while turn stays assignee. null means the event log doesn't cover this item's last transition (it predates the log) — read that as \"standing at least since the log began\", not as \"just now\""
     )]
     async fn list_items(
         &self,
@@ -1237,12 +1348,26 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
+        let result = match (p.mine.as_deref(), p.state.as_deref(), result_total(&result)) {
+            (Some(mine), Some(state), Some(total)) => {
+                match self
+                    .fetch_state_filter_advisory(mine, state, archived.as_deref(), total)
+                    .await
+                {
+                    Some(note) => {
+                        with_extra_field(result, "state_filter_advisory", serde_json::json!(note))
+                    }
+                    None => result,
+                }
+            }
+            _ => result,
+        };
         let result = if p.report_gaps == Some(true) && p.mine.is_some() {
             // Advisory, never fatal — same treatment create_item gives
             // fetch_topic_advisory's failure mode.
             match self.fetch_gap_hint().await {
-                Ok(Some(hint)) => with_gap_hint(result, hint),
-                _ => result,
+                Ok(hints) => with_gap_hint(result, hints),
+                Err(_) => result,
             }
         } else {
             result
@@ -1262,7 +1387,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page. Same report_gaps semantics as list_items too — with mine, adds an unregistered_open registration-gap hint. Same report_drift semantics too — with any of mine/requester/assignee/topic_scope, adds an other_spellings identity-drift hint. Rows carry state_since exactly as list_items' do"
+        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page. Same report_gaps semantics as list_items too — with mine, adds the unregistered_open and prefix_only_open registration-gap hints. Same report_drift semantics too — with any of mine/requester/assignee/topic_scope, adds an other_spellings identity-drift hint. Rows carry state_since exactly as list_items' do"
     )]
     async fn search_items(
         &self,
@@ -1332,8 +1457,8 @@ impl DocketMcp {
         }
         let result = if p.report_gaps == Some(true) && p.mine.is_some() {
             match self.fetch_gap_hint().await {
-                Ok(Some(hint)) => with_gap_hint(result, hint),
-                _ => result,
+                Ok(hints) => with_gap_hint(result, hints),
+                Err(_) => result,
             }
         } else {
             result
@@ -3069,6 +3194,163 @@ mod tests {
             serde_json::json!({"iyulab/two": 1}),
             "the gap topic and its open-unclaimed count must be named: {hint_value}"
         );
+    }
+
+    fn list_params(mine: &str) -> ListItemsParams {
+        ListItemsParams {
+            topic: None,
+            state: None,
+            assignee: None,
+            requester: None,
+            topic_scope: None,
+            mine: Some(mine.to_string()),
+            archived: None,
+            limit: None,
+            offset: None,
+            summary: None,
+            order: None,
+            expand_related: None,
+            report_gaps: None,
+            report_drift: None,
+        }
+    }
+
+    fn new_item(topic: &str, title: &str, requester: Option<&str>) -> CreateItemParams {
+        CreateItemParams {
+            topic: topic.to_string(),
+            title: title.to_string(),
+            body: None,
+            tags: vec![],
+            requester: requester.map(str::to_string),
+        }
+    }
+
+    /// An organization-wide registration makes every topic under it read as
+    /// owned. `report_gaps` names the topics reached *only* that way apart
+    /// from true orphans, and `create_item` warns the filer of one — a topic
+    /// some worker registered for itself draws neither.
+    #[tokio::test]
+    async fn prefix_only_coverage_is_reported_apart_from_ownership() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("prefix-only.db");
+        let core = spawn_core(18464, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        for (id, topic) in [("iyulab/scout", "iyulab"), ("iyulab/one", "iyulab/one")] {
+            server
+                .register_worker(Parameters(RegisterWorkerParams {
+                    id: Some(id.to_string()),
+                    topics: vec![topic.to_string()],
+                }))
+                .await
+                .unwrap();
+        }
+
+        let to_prefix_only = server
+            .create_item(Parameters(new_item("iyulab/two", "notice", None)))
+            .await
+            .unwrap();
+        let advisory = json_value(&to_prefix_only)["topic_advisory"].clone();
+        assert!(
+            advisory
+                .as_str()
+                .is_some_and(|a| a.contains("`iyulab/scout`")),
+            "a prefix-only topic warns the filer and names the broad worker: {advisory}"
+        );
+        let to_owned = server
+            .create_item(Parameters(new_item("iyulab/one", "work", None)))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&to_owned).get("topic_advisory").is_none(),
+            "a topic registered for itself draws no advisory"
+        );
+
+        let mut params = list_params("iyulab/one");
+        params.report_gaps = Some(true);
+        let value = json_value(&server.list_items(Parameters(params)).await.unwrap());
+        assert_eq!(
+            value["prefix_only_open"],
+            serde_json::json!({"iyulab/two": 1})
+        );
+        assert!(
+            value.get("unregistered_open").is_none(),
+            "covered by a prefix is not an orphan: {value}"
+        );
+    }
+
+    /// `mine` spans what a worker holds, what it filed that now waits on its
+    /// decision, and unclaimed work in its topics. A `state` filter on top of
+    /// it hides whole kinds of row — the result says how many.
+    #[tokio::test]
+    async fn mine_with_state_reports_the_rows_the_filter_hid() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("mine-state.db");
+        let core = spawn_core(18465, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("acme/app".to_string()),
+                topics: vec!["acme/app".to_string()],
+            }))
+            .await
+            .unwrap();
+        server
+            .create_item(Parameters(new_item("acme/app", "unclaimed", None)))
+            .await
+            .unwrap();
+        let filed = json_value(
+            &server
+                .create_item(Parameters(new_item(
+                    "acme/lib",
+                    "a question",
+                    Some("acme/app"),
+                )))
+                .await
+                .unwrap(),
+        );
+        let id = filed["id"].as_str().unwrap().to_string();
+        server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: id.clone(),
+                worker_id: Some("acme/lib".to_string()),
+            }))
+            .await
+            .unwrap();
+        server
+            .submit_item(Parameters(SubmitParams {
+                item_id: id,
+                worker_id: Some("acme/lib".to_string()),
+                reason: Some("answered".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let mut params = list_params("acme/app");
+        params.state = Some("open".to_string());
+        let value = json_value(&server.list_items(Parameters(params)).await.unwrap());
+        assert_eq!(value["total"], 1);
+        let advisory = value["state_filter_advisory"].as_str().unwrap_or_default();
+        assert!(
+            advisory.contains("hid 1 of the 2 rows"),
+            "the resolved reply the filter hid is counted: {value}"
+        );
+
+        let value = json_value(
+            &server
+                .list_items(Parameters(list_params("acme/app")))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(value["total"], 2);
+        assert!(value.get("state_filter_advisory").is_none());
     }
 
     #[tokio::test]

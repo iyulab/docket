@@ -424,6 +424,15 @@ pub struct TopicCount {
     /// `aliases`: nothing here blocks `create_item` or rewrites anything.
     #[serde(default)]
     pub owned_by: Vec<String>,
+    /// The part of `owned_by` registered for **this topic itself** — a
+    /// registration equal to it, not a shorter prefix that happens to cover
+    /// it. A topic whose `owned_by` is non-empty but whose `owned_by_exact` is
+    /// empty is reached only by broad registrations (an organization-wide
+    /// prefix, say): those workers see its items in `mine`, but nobody
+    /// registered to *receive* this topic, and a filer reading `owned_by`
+    /// alone cannot tell the difference. Advisory, like `owned_by`.
+    #[serde(default)]
+    pub owned_by_exact: Vec<String>,
     /// Non-archived items in this row that are `open` with no `assignee` —
     /// unclaimed work sitting in this topic right now. Distinct from
     /// `count` (every non-archived item regardless of state). Lets a caller
