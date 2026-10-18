@@ -130,10 +130,7 @@ fn spa_fallback(console_dir: &std::path::Path) -> axum::routing::MethodRouter {
     axum::routing::any(move |headers: HeaderMap| {
         let index_path = index_path.clone();
         async move {
-            let wants_html = headers
-                .get(axum::http::header::ACCEPT)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|accept| accept.contains("text/html"));
+            let wants_html = wants_html(&headers);
             // Read per request rather than at startup so a console rebuilt
             // under a running server can't serve fresh assets against a stale
             // shell (mismatched asset hashes render as a blank page).
@@ -147,6 +144,14 @@ fn spa_fallback(console_dir: &std::path::Path) -> axum::routing::MethodRouter {
             }
         }
     })
+}
+
+/// Whether the caller is a browser navigating, as opposed to an API client.
+fn wants_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
 }
 
 /// Tracks when `docket-core` last handled a request, using a monotonic
@@ -592,18 +597,28 @@ struct ItemWithRelated {
     related: Option<Vec<docket_core::domain::RelatedItemRef>>,
 }
 
+/// `/items/{id}` is the URL people paste — into a comment, a handoff, a chat —
+/// and it accepts the short `seq` alias (`/items/83`). A browser following
+/// one is a person who wants the item, not its JSON, so a request that asks
+/// for HTML is sent to the console's detail view instead. Every other caller
+/// gets the JSON as before; content negotiation draws the same line
+/// `spa_fallback` does.
 async fn get_item(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
     Query(q): Query<GetItemQuery>,
-) -> Result<Json<ItemWithRelated>, ApiError> {
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let item = store.get_item(&id)?;
+    if wants_html(&headers) {
+        return Ok(axum::response::Redirect::to(&format!("/?item={}", item.seq)).into_response());
+    }
     let related = if q.expand_related.unwrap_or(false) {
         Some(store.related_items(&item.id)?)
     } else {
         None
     };
-    Ok(Json(ItemWithRelated { item, related }))
+    Ok(Json(ItemWithRelated { item, related }).into_response())
 }
 
 #[derive(Deserialize)]
@@ -3529,6 +3544,50 @@ mod tests {
         assert_eq!(json_body(resp).await["error"], "not found");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A pasted `/items/83` opened in a browser lands on the console's detail
+    /// view; the same URL fetched as an API call still returns the item.
+    #[tokio::test]
+    async fn get_item_sends_a_browser_to_the_console_detail_view() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "acme/widget", "title": "t1"}),
+            ))
+            .await
+            .unwrap();
+        let seq = json_body(resp).await["seq"].as_i64().unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{seq}"))
+                    .header("accept", "text/html,application/xhtml+xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_redirection());
+        assert_eq!(resp.headers()["location"], format!("/?item={seq}").as_str());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/items/{seq}"))
+                    .header("accept", "*/*")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["title"], "t1");
     }
 
     #[tokio::test]

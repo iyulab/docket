@@ -4,6 +4,8 @@ import { fetchTags, fetchTopics } from './api'
 import { getActingAs, setActingAs } from './identity'
 import { useItems } from './useItems'
 import { useUrlState } from './useUrlState'
+import { useItemRef } from './useItemRef'
+import { parseSeqRef } from './itemRef'
 import { deriveTopics, matchesFilters, sortItems } from './filters'
 import type { RelationFilter, SortKey } from './filters'
 import { Board } from './components/Board'
@@ -31,10 +33,17 @@ const VALID_STATES: ItemState[] = ['open', 'claimed', 'resolved', 'closed']
 
 // `none` is a sentinel for "every checkbox unchecked" (no state filter,
 // show everything) — distinct from the param being absent, which means the
-// default (open/claimed) applies. Without it, an empty selection serializes
-// to no param at all and a refresh silently reverts to the default.
+// default applies. Without it, an empty selection serializes to no param at
+// all and a refresh silently reverts to the default.
+//
+// The default is every state that still needs someone: `resolved` included,
+// because a resolved item is waiting on its requester's decision — the row a
+// person most often has to act on (approve, or force-approve when no
+// requester session will). Only `closed` is done.
+const DEFAULT_STATES: ItemState[] = ['open', 'claimed', 'resolved']
+
 function parseStates(raw: string | null): ItemState[] {
-  if (raw === null) return ['open', 'claimed']
+  if (raw === null) return DEFAULT_STATES
   if (raw === 'none') return []
   return raw.split(',').filter((s): s is ItemState => (VALID_STATES as string[]).includes(s))
 }
@@ -194,15 +203,24 @@ export default function App() {
     [states, tags, perspectiveTopic, relation],
   )
 
-  const visibleItems = useMemo(
-    () => sortItems(items.filter((item) => matchesFilters(item, filters)), sortKey),
-    [items, filters, sortKey],
-  )
+  // A search for `83` or `#83` is someone who knows the item's number: that
+  // item goes to the top, whatever the filters say, above the full-text
+  // matches the same query still returns.
+  const searchedSeq = parseSeqRef(query)
+  const searchedItem = useItemRef(searchedSeq === null ? null : String(searchedSeq), items)
 
-  const selectedItem = useMemo(
-    () => items.find((item) => item.id === selectedId) ?? null,
-    [items, selectedId],
-  )
+  const visibleItems = useMemo(() => {
+    const matching = sortItems(
+      items.filter((item) => matchesFilters(item, filters)),
+      sortKey,
+    )
+    if (!searchedItem) return matching
+    return [searchedItem, ...matching.filter((item) => item.id !== searchedItem.id)]
+  }, [items, filters, sortKey, searchedItem])
+
+  // `?item=` takes an id or a seq, so `/?item=83` (where docket-core sends a
+  // browser opening `/items/83`) works as a link.
+  const selectedItem = useItemRef(selectedId, items)
 
   return (
     <div className="app">

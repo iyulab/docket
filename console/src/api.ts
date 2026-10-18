@@ -94,6 +94,18 @@ export async function fetchItems(query?: string, archived?: boolean): Promise<It
   return res.json() as Promise<Item[]>
 }
 
+// One item by its `id` or its `seq` alias — docket-core resolves both. For an
+// item the list poll does not hold: past the fetch limit, filtered out by the
+// search, or archived. `null` when no item answers to `ref`.
+export async function fetchItem(ref: string): Promise<Item | null> {
+  const res = await fetch(`/api/items/${encodeURIComponent(ref)}`)
+  if (res.status === 404) return null
+  if (!res.ok) {
+    throw new Error(`GET /api/items/${ref} failed: ${res.status}`)
+  }
+  return res.json() as Promise<Item>
+}
+
 export async function fetchComments(itemId: string): Promise<Comment[]> {
   const res = await fetch(`/api/items/${itemId}/comments`)
   if (!res.ok) {
