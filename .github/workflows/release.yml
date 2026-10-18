@@ -69,14 +69,12 @@ jobs:
           retention-days: 1
 
   build-windows:
-    # Split out of the `build` matrix so `environment: production` (required
-    # for the code-sign composite action's OIDC federated credential) scopes
-    # to this job only — declaring it on the shared matrix job would gate the
-    # linux/macos legs behind the same environment protection rules too.
+    # Builds without any signing credential: `cargo build` runs every
+    # dependency's build script and proc-macro, so the job that compiles must
+    # not also hold the OIDC token that unlocks the code-signing certificate.
+    # Signing happens in `sign-windows`, which runs nothing from this repo.
     runs-on: windows-latest
-    environment: production
     permissions:
-      id-token: write
       contents: read
     env:
       target: x86_64-pc-windows-msvc
@@ -99,29 +97,42 @@ jobs:
           cargo build --release -p docket-mcp-launcher --target ${{ env.target }}
           cargo build --release -p docket-cc-launcher --target ${{ env.target }}
 
-      - uses: iyulab/code-sign@693f7261b2e4aef517ff8972db7d07eb53ffc623 # main @ 2026-08-27
-        with:
-          files: |
-            target/${{ env.target }}/release/docket-core.exe
-            target/${{ env.target }}/release/docket-mcp.exe
-            target/${{ env.target }}/release/docket-cc.exe
-            target/${{ env.target }}/release/docket-mcp-launcher.exe
-            target/${{ env.target }}/release/docket-cc-launcher.exe
-
-      - name: Stage release assets
+      # Staged under their release names, so the signed artifact is already
+      # in the shape `release` publishes. The folder must hold exactly the
+      # files `sign-windows` lists — the signing workflow refuses anything else.
+      - name: Stage files to sign
         shell: bash
         run: |
-          mkdir -p dist
+          mkdir -p to-sign
           for bin in docket-core docket-mcp docket-cc docket-mcp-launcher docket-cc-launcher; do
-            cp "target/${{ env.target }}/release/${bin}.exe" \
-               "dist/${bin}-${{ env.target }}.exe"
+            cp "target/${{ env.target }}/release/${bin}.exe"                "to-sign/${bin}-${{ env.target }}.exe"
           done
 
       - uses: actions/upload-artifact@v6 # v7 is not in delete-artifact@v6's compatibility table
         with:
-          name: dist-${{ env.target }}
-          path: dist/*
+          name: unsigned-x86_64-pc-windows-msvc # not dist-*: must never reach the Release
+          path: to-sign/*
           retention-days: 1
+
+  sign-windows:
+    # code-sign's reusable workflow: downloads the artifact, rejects it unless
+    # it holds exactly these files, signs and verifies them, and uploads the
+    # signed copies. Pinning the workflow pins the action it runs as well.
+    needs: build-windows
+    uses: iyulab/code-sign/.github/workflows/sign.yml@c4c68c25295ce0010a396d54cdb017fd248c5cce # main @ 2026-10-17
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      artifact: unsigned-x86_64-pc-windows-msvc
+      files: |
+        docket-core-x86_64-pc-windows-msvc.exe
+        docket-mcp-x86_64-pc-windows-msvc.exe
+        docket-cc-x86_64-pc-windows-msvc.exe
+        docket-mcp-launcher-x86_64-pc-windows-msvc.exe
+        docket-cc-launcher-x86_64-pc-windows-msvc.exe
+      signed-artifact: dist-x86_64-pc-windows-msvc
+      description: docket
 
   build-console:
     runs-on: ubuntu-latest
@@ -170,7 +181,7 @@ jobs:
         run: cargo audit
 
   release:
-    needs: [build, build-windows, build-console, audit]
+    needs: [build, sign-windows, build-console, audit]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -196,12 +207,14 @@ jobs:
           files: dist/*
           generate_release_notes: true
 
-      # The dist-* artifacts only carry files between jobs; once they are
+      # The dist-* and unsigned-* artifacts only carry files between jobs; once they are
       # attached to the Release they are dead weight. Deleted on success only:
       # after a failure they are what "Re-run failed jobs" needs, and
       # retention-days: 1 already bounds how long they linger. A failed
       # cleanup must not mark an already-published release as failed.
       - uses: geekyeggo/delete-artifact@v6
         with:
-          name: dist-*
+          name: |
+            dist-*
+            unsigned-*
           failOnError: false
