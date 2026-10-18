@@ -8,7 +8,7 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::transport::stdio;
-use rmcp::{ErrorData as McpError, ServiceExt, tool, tool_router};
+use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
@@ -804,7 +804,7 @@ fn with_extra_field(result: CallToolResult, key: &str, hint: serde_json::Value) 
     }
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl DocketMcp {
     #[tool(
         description = "Register as a worker, reporting which topic prefixes you own. id may be omitted if this session's DOCKET_WORKER_ID is set. Re-registering an id that differs only in case lands on the existing row and returns its canonical spelling -- adopt what comes back. A bare id with no org scope (`widget` where the server knows `acme/widget`) is a *different* identity, so it creates a second worker row instead; that case cannot be folded automatically, so the result carries an id_advisory naming the scoped spellings it collides with. Registration always succeeds either way"
@@ -1820,6 +1820,12 @@ impl DocketMcp {
         respond::<Vec<CommentDto>>(resp).await
     }
 }
+
+// Named explicitly: without `name`, the macro reports `rmcp` and *its* crate
+// version as `serverInfo`, so a client (or a person reading `claude mcp get`)
+// cannot tell which docket-mcp release a launcher actually started.
+#[tool_handler(name = "docket-mcp")]
+impl ServerHandler for DocketMcp {}
 
 fn http_client() -> reqwest::Client {
     // Without a timeout, a hung or unreachable docket-core blocks a tool
