@@ -67,6 +67,10 @@ launcher also re-checks once an hour in the background for as long as the sessio
 prints a one-line warning to stderr the first time it finds a newer release than the one the session
 started with — restart the session (or the MCP connection) to pick it up.
 
+The launcher file itself is not replaced by these updates, so its modification date stays at the day
+you installed it and says nothing about which release is running. The running `docket-mcp` reports
+its own version in the MCP `serverInfo` it returns on `initialize`.
+
 `docket-cc`, by contrast, is invoked fresh on every `SessionStart` (§7) rather than staying up for
 the whole session, so its launcher's release check is never stale by more than one session start. When
 that check is the one that *just* downloaded a release no launcher on the machine had cached before,
