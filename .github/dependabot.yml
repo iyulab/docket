@@ -1,0 +1,38 @@
+# The scheduled Security audit workflow turns red when an advisory lands
+# against a pinned dependency, but nothing proposes the fix — a red run can
+# sit for days until someone looks. Weekly grouped updates keep each
+# ecosystem current in one routine pull request, so the fix is usually
+# already waiting by the time the audit notices. Minor and patch updates
+# share one group; a major update keeps a pull request of its own, since
+# taking one is a separate decision.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: "/console"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
