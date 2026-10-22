@@ -26,6 +26,11 @@ on:
     paths:
       - "Cargo.toml"
 
+# Least privilege by default: the repository's default token is read-write,
+# so every job starts read-only and a job that needs more says so itself.
+permissions:
+  contents: read
+
 jobs:
   tag:
     runs-on: ubuntu-latest

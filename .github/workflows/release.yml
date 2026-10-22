@@ -15,6 +15,11 @@ on:
         description: "Tag to build and release (e.g. v0.3.1) — must already exist"
         required: true
 
+# Least privilege by default: the repository's default token is read-write,
+# so every job starts read-only and a job that needs more says so itself.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 

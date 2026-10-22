@@ -22,6 +22,11 @@ on:
     # not just dependency changes — for both ecosystems this repo uses.
     - cron: "0 0 * * *"
 
+# Least privilege by default: the repository's default token is read-write,
+# so every job starts read-only and a job that needs more says so itself.
+permissions:
+  contents: read
+
 jobs:
   audit:
     runs-on: ubuntu-latest
