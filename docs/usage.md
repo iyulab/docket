@@ -145,6 +145,18 @@ each look complete. From inside a query that came up short, `list_items`/`search
 and assert nothing: two parties can legitimately share a last segment. See
 [ADR-0025](decisions/ADR-0025-identity-enumeration-and-drift.md).
 
+**Asking for an alias is an ordinary item, not a tool.** A worker cannot declare one (see
+[ADR-0022](decisions/ADR-0022-identity-alias.md) on why `/aliases` stays off MCP), and it does not
+need a dedicated request call either: when a session believes two spellings are one party, it
+files an item addressed to whoever administers the server — under the topic that server's
+maintainers are registered for — naming both spellings, which one should be canonical, and the
+`list_identities` rows or `report_drift` output that shows the split. The administrator decides
+whether they really are one party (an org migration can leave two parties that merely look alike)
+and declares the alias, or answers why not. Until then, a worker can keep unclaimed work under
+either spelling in view by registering both as topics — items it *filed* under the other spelling
+still will not come back through its `mine`. For a one-off misspelling on a single item, correct
+the item instead (`set_item_requester` / `set_item_assignee` / `set_item_topic`).
+
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id?`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5. `id` **resolvable-required** at this tool layer (cycle-58, same pattern as `claim_item` above) — omit it to use this session's `DOCKET_WORKER_ID`; a tool-level error only if neither is present. Two drift cases behave differently and the difference matters: an `id` differing only in **case** lands on the existing row and the response returns its canonical spelling (adopt it — [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md) chose that over a `409`), but a **bare `id` with no org scope** (`widget` where the server knows `acme/widget`) is a *different* identity, so the upsert cannot fold it and a second worker row appears. That one can't be resolved automatically, so the tool result carries an `id_advisory` naming the scoped spellings it collides with — the same bare-leaf gate `create_item`'s `requester_advisory` uses. Registration succeeds either way; the advisory never blocks it. A worker whose spelling split this way has a *different jurisdiction* than the one holding the work, so its `mine`/`topic_scope` silently go quiet |
