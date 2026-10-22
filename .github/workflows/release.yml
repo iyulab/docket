@@ -67,7 +67,7 @@ jobs:
                "dist/${bin}-${{ matrix.target }}${{ matrix.ext }}"
           done
 
-      - uses: actions/upload-artifact@v6 # v7 is not in delete-artifact@v6's compatibility table
+      - uses: actions/upload-artifact@v7 # v7 is not in delete-artifact@v6's compatibility table
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
@@ -113,7 +113,7 @@ jobs:
             cp "target/${{ env.target }}/release/${bin}.exe"                "to-sign/${bin}-${{ env.target }}.exe"
           done
 
-      - uses: actions/upload-artifact@v6 # v7 is not in delete-artifact@v6's compatibility table
+      - uses: actions/upload-artifact@v7 # v7 is not in delete-artifact@v6's compatibility table
         with:
           name: unsigned-x86_64-pc-windows-msvc # not dist-*: must never reach the Release
           path: to-sign/*
@@ -161,7 +161,7 @@ jobs:
           mkdir -p dist
           (cd console/dist && zip -r ../../dist/console-dist.zip .)
 
-      - uses: actions/upload-artifact@v6 # v7 is not in delete-artifact@v6's compatibility table
+      - uses: actions/upload-artifact@v7 # v7 is not in delete-artifact@v6's compatibility table
         with:
           name: dist-console
           path: dist/*
