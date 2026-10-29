@@ -14,7 +14,6 @@ This is the discipline that keeps layer boundaries from leaking. If a term from 
 | claim | assign, assignment |
 | body | markdown, .md file |
 | stream | hook |
-| budget | token budget |
 | tag | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
 | comment | (none — opaque caller-defined string, not translated; see [ADR-0009](decisions/ADR-0009-tag-and-comment-vocabulary.md)) |
 | alias | (none — an opaque `(alias, canonical)` identifier pair declaring two spellings the same identity, not translated; see [ADR-0022](decisions/ADR-0022-identity-alias.md)) |

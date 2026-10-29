@@ -99,3 +99,7 @@ consumer needs, that addition does not extend this ADR — it goes through the
 application adapter layer instead, per the "domain boundary" principle in the
 upstream-library-extension policy. This ADR only covers the generic primitives
 decided above.
+
+## Update 2026-10-29
+
+`budget` has since left the vocabulary listed above ([ADR-0027](ADR-0027-budget-leaves-the-core-vocabulary.md)); the rest of this decision stands.

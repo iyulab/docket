@@ -42,4 +42,4 @@ Completion rate (quality) is not a stop-loss criterion — being used but produc
 |---|---|---|---|
 | A-1 | Async coordination is good enough | Ends up "too slow to use," like the email model — hits the stop-loss criteria immediately | Observed during real M2 use |
 | A-2 | Sessions spin up often enough that abandoned items eventually get picked up | Only items that never get picked up pile up on the board | 1-week self-observation |
-| A-3 | Budget/extension mechanisms actually stop runaway loops | Tokens quietly get exhausted | M1~M2 integration test |
+| A-3 | ~~Budget/extension mechanisms actually stop runaway loops~~ — withdrawn: nothing in docket extends a session, so there is no loop to cap ([ADR-0027](decisions/ADR-0027-budget-leaves-the-core-vocabulary.md)) | — | — |
