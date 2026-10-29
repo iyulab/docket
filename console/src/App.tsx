@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ItemState } from './api'
 import { fetchTags, fetchTopics } from './api'
 import { getActingAs, setActingAs } from './identity'
+import { setToken } from './token'
 import { useItems } from './useItems'
 import { useUrlState } from './useUrlState'
 import { useItemRef } from './useItemRef'
@@ -121,6 +122,37 @@ function ActingAs() {
   )
 }
 
+// Shown when docket-core runs with `DOCKET_TOKEN` and the console has no valid
+// token yet (ADR-0026). Saving it re-polls straight away.
+function TokenPrompt({ onSaved }: { onSaved: () => void }) {
+  const [value, setValue] = useState('')
+
+  return (
+    <form
+      className="banner banner-error token-prompt"
+      onSubmit={(e) => {
+        e.preventDefault()
+        setToken(value)
+        setValue('')
+        onSaved()
+      }}
+    >
+      <label>
+        docket-core requires an API token (DOCKET_TOKEN)
+        <input
+          type="password"
+          autoComplete="off"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+      </label>
+      <button type="submit" disabled={!value.trim()}>
+        Save
+      </button>
+    </form>
+  )
+}
+
 export default function App() {
   const [query, setQuery] = useUrlState<string>('q', parseQuery, serializeQuery)
   const [archived, setArchived] = useUrlState<boolean>(
@@ -128,7 +160,7 @@ export default function App() {
     parseArchived,
     serializeArchived,
   )
-  const { items, connected, loading, refresh } = useItems(query, archived)
+  const { items, connected, unauthorized, loading, refresh } = useItems(query, archived)
   const [availableTags, setAvailableTags] = useState<string[]>([])
   const [serverTopics, setServerTopics] = useState<string[]>([])
   // Declared spellings that fold into each canonical topic (ADR-0022) — kept
@@ -227,7 +259,8 @@ export default function App() {
       <header className="app-header">
         <h1>docket-console</h1>
         <ActingAs />
-        {!connected && (
+        {unauthorized && <TokenPrompt onSaved={refresh} />}
+        {!connected && !unauthorized && (
           <div className="banner banner-error" role="status">
             Can&rsquo;t reach docket-core &mdash; showing last known state.
           </div>

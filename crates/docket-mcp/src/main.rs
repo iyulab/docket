@@ -1958,8 +1958,26 @@ fn http_client() -> reqwest::Client {
     // an error the model can react to.
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .default_headers(token_headers(std::env::var("DOCKET_TOKEN").ok().as_deref()))
         .build()
         .expect("reqwest client builds with a plain timeout")
+}
+
+/// `Authorization: Bearer <token>` for every request, when `DOCKET_TOKEN` is
+/// set (ADR-0026). Safe as a client default because this client only ever
+/// talks to `DOCKET_CORE_URL`. Marked sensitive so it never shows up in
+/// reqwest's debug output. Unset or blank sends no header — a server without
+/// auth ignores one anyway, and a server with auth answers `401` with the
+/// reason.
+fn token_headers(token: Option<&str>) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty())
+        && let Ok(mut value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    headers
 }
 
 #[tokio::main]
@@ -2047,15 +2065,27 @@ mod tests {
     }
 
     async fn spawn_core(port: u16, db_path: &std::path::Path) -> CoreProcess {
+        spawn_core_with_token(port, db_path, None).await
+    }
+
+    async fn spawn_core_with_token(
+        port: u16,
+        db_path: &std::path::Path,
+        token: Option<&str>,
+    ) -> CoreProcess {
         let binary = docket_core_binary();
         assert_core_binary_is_current(&binary);
-        let child = Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .env("DOCKET_PORT", port.to_string())
             .env("DOCKET_DB_PATH", db_path)
-            .spawn()
-            .unwrap_or_else(|e| {
-                panic!("failed to spawn {binary:?} (run `cargo build -p docket-core` first): {e}")
-            });
+            .env_remove("DOCKET_TOKEN");
+        if let Some(token) = token {
+            command.env("DOCKET_TOKEN", token);
+        }
+        let child = command.spawn().unwrap_or_else(|e| {
+            panic!("failed to spawn {binary:?} (run `cargo build -p docket-core` first): {e}")
+        });
         let base_url = format!("http://127.0.0.1:{port}");
         // Wrap immediately: `Child::drop` doesn't reap the process, so if the
         // readiness loop below panics before returning, an un-wrapped
@@ -2097,6 +2127,47 @@ mod tests {
     /// once it goes back to `null` after a reopen) go through this instead.
     fn json_value(result: &CallToolResult) -> serde_json::Value {
         serde_json::from_str(text_of(result)).expect("tool result is JSON")
+    }
+
+    /// ADR-0026 end to end: a docket-core started with `DOCKET_TOKEN` refuses
+    /// the MCP client's requests unless the client carries the same token.
+    #[tokio::test]
+    async fn client_token_is_accepted_only_when_it_matches_the_servers() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-auth-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = "mcp-e2e-token-0123456789abcdef";
+        let core = spawn_core_with_token(18490, &dir.join("auth.db"), Some(token)).await;
+        let url = api_url(&core.base_url, &["items"]);
+
+        let with = |t: Option<&str>| {
+            reqwest::Client::builder()
+                .default_headers(token_headers(t))
+                .build()
+                .unwrap()
+        };
+        let status = |client: reqwest::Client| {
+            let url = url.clone();
+            async move { client.get(url).send().await.unwrap().status() }
+        };
+
+        assert_eq!(status(with(Some(token))).await, 200);
+        assert_eq!(status(with(None)).await, 401);
+        assert_eq!(status(with(Some("some-other-token-0123456789"))).await, 401);
+
+        drop(core);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_headers_sends_a_sensitive_bearer_only_for_a_non_blank_token() {
+        let headers = token_headers(Some("  abc123  "));
+        let value = headers.get(reqwest::header::AUTHORIZATION).unwrap();
+        assert_eq!(value, "Bearer abc123");
+        assert!(value.is_sensitive());
+
+        assert!(token_headers(None).is_empty());
+        assert!(token_headers(Some("")).is_empty());
+        assert!(token_headers(Some("   ")).is_empty());
     }
 
     /// The ADR-0010 09-09 scenario this feature exists for: an assignee

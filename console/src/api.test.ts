@@ -17,6 +17,7 @@ import {
   removeItem,
   removeItemTags,
   submitItem,
+  UnauthorizedError,
 } from './api'
 
 function mockFetchOnce(body: unknown, ok = true, status = 200) {
@@ -359,5 +360,47 @@ describe('fetchTopics', () => {
     mockFetchOnce({}, false, 500)
 
     await expect(fetchTopics()).rejects.toThrow('GET /api/topics failed: 500')
+  })
+})
+
+describe('API token (ADR-0026)', () => {
+  afterEach(() => {
+    window.localStorage.clear()
+  })
+
+  function headerOf(call: unknown[]): string | null {
+    const init = call[1] as RequestInit | undefined
+    return init?.headers ? new Headers(init.headers).get('Authorization') : null
+  }
+
+  it('sends no Authorization header when no token is saved', async () => {
+    mockFetchOnce([])
+    await fetchTags()
+    const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(headerOf(call)).toBeNull()
+  })
+
+  it('sends the saved token as a Bearer header on reads and writes', async () => {
+    window.localStorage.setItem('docket-console-token', 'secret-token-value')
+
+    mockFetchOnce([])
+    await fetchTags()
+    expect(headerOf((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0])).toBe(
+      'Bearer secret-token-value',
+    )
+
+    mockFetchOnce({ id: 'i1' })
+    await archiveItem('i1')
+    const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(headerOf(call)).toBe('Bearer secret-token-value')
+    expect((call[1] as RequestInit).method).toBe('POST')
+  })
+
+  it('reports a 401 as UnauthorizedError rather than a generic failure', async () => {
+    mockFetchOnce({ error: 'unauthorized' }, false, 401)
+    await expect(fetchItems()).rejects.toBeInstanceOf(UnauthorizedError)
+
+    mockFetchOnce({ error: 'unauthorized' }, false, 401)
+    await expect(archiveItem('i1')).rejects.toBeInstanceOf(UnauthorizedError)
   })
 })

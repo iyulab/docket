@@ -32,7 +32,7 @@ The board, stall detection, the full set of admin operations. Especially "refine
 
 ## M4 — Safeguards and multiple machines
 
-The full budget mechanism, auth, cross-machine routing, distribution channels.
+The full budget mechanism, auth, cross-machine routing, distribution channels. Auth is done ([ADR-0026](decisions/ADR-0026-shared-token-auth.md)); distribution channels are done.
 
 ## Off the roadmap
 

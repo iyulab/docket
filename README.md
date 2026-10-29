@@ -27,7 +27,7 @@ Developers who keep multiple Claude Code (or similar headless) sessions running 
 cargo run -p docket-core
 ```
 
-Binds to `127.0.0.1:8420` by default — no auth exists yet, so this keeps the API off the network until M4 adds it. Override with `DOCKET_BIND` / `DOCKET_PORT`. Opens/creates a SQLite file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Then, acting as two workers from two terminals:
+Binds to `127.0.0.1:8420` by default, which keeps the API off the network. To serve other machines, set `DOCKET_BIND` and also `DOCKET_TOKEN` (a shared bearer token; see [ADR-0026](docs/decisions/ADR-0026-shared-token-auth.md)) — without it the API is open to anyone who can connect. Override with `DOCKET_BIND` / `DOCKET_PORT`. Opens/creates a SQLite file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Then, acting as two workers from two terminals:
 
 ```
 JSON='-H Content-Type:application/json'

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { fetchItems, type Item } from './api'
+import { fetchItems, UnauthorizedError, type Item } from './api'
 
 export interface UseItemsResult {
   items: Item[]
   connected: boolean
+  /** The server wants an API token (ADR-0026) and has none, or a wrong one. */
+  unauthorized: boolean
   loading: boolean
   /** Re-polls immediately and restarts the interval — call after a
    * successful mutation (claim/submit/approve/tag) so its effect shows up
@@ -27,6 +29,7 @@ export function useItems(
 ): UseItemsResult {
   const [items, setItems] = useState<Item[]>([])
   const [connected, setConnected] = useState(true)
+  const [unauthorized, setUnauthorized] = useState(false)
   const [loading, setLoading] = useState(true)
   const [refreshNonce, setRefreshNonce] = useState(0)
 
@@ -39,9 +42,15 @@ export function useItems(
         if (!cancelled) {
           setItems(next)
           setConnected(true)
+          setUnauthorized(false)
         }
-      } catch {
-        if (!cancelled) setConnected(false)
+      } catch (err) {
+        if (!cancelled) {
+          // A refused token is not an unreachable server: keep the two apart
+          // so the banner can say what to do.
+          setUnauthorized(err instanceof UnauthorizedError)
+          setConnected(false)
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -57,5 +66,5 @@ export function useItems(
 
   const refresh = useCallback(() => setRefreshNonce((n) => n + 1), [])
 
-  return { items, connected, loading, refresh }
+  return { items, connected, unauthorized, loading, refresh }
 }

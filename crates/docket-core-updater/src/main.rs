@@ -16,6 +16,10 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("DOCKET_CORE_URL").unwrap_or_else(|_| "http://127.0.0.1:8420".to_string());
     let status_url = format!("{base}/status");
     let smoke_url = format!("{base}/items");
+    let token = std::env::var("DOCKET_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     let api_base = std::env::var("DOCKET_UPDATER_GITHUB_API_BASE")
         .unwrap_or_else(|_| "https://api.github.com".to_string());
     let deploy_root =
@@ -26,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let ctx = docket_core_updater::UpdateContext {
         status_url: &status_url,
         smoke_url: &smoke_url,
+        token: token.as_deref(),
         api_base: &api_base,
         idle_threshold_secs: IDLE_THRESHOLD_SECS,
         deploy_root: std::path::Path::new(&deploy_root),

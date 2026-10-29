@@ -37,6 +37,8 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub struct UpdateContext<'a> {
     pub status_url: &'a str,
     pub smoke_url: &'a str,
+    /// `DOCKET_TOKEN`, for the post-restart smoke probe (ADR-0026).
+    pub token: Option<&'a str>,
     pub api_base: &'a str,
     pub idle_threshold_secs: u64,
     pub deploy_root: &'a Path,
@@ -247,7 +249,7 @@ async fn wait_for_healthy(
         tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
         match status::fetch_status(client, ctx.status_url).await {
             Ok(s) if s.version == expected_version => {
-                return smoke::check(client, ctx.smoke_url).await;
+                return smoke::check(client, ctx.smoke_url, ctx.token).await;
             }
             Ok(s) => {
                 last_err = Some(anyhow::anyhow!(
@@ -296,6 +298,7 @@ mod tests {
         UpdateContext {
             status_url,
             smoke_url: "unused-in-these-tests",
+            token: None,
             api_base,
             idle_threshold_secs: 300,
             deploy_root,

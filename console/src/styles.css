@@ -53,6 +53,16 @@ body {
   border: 1px solid #f3c7c4;
 }
 
+.token-prompt {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.token-prompt input {
+  margin-left: 0.5rem;
+}
+
 .board {
   flex: 1;
   min-width: 0;

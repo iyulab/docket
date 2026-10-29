@@ -1,4 +1,31 @@
 import { getActingAs } from './identity'
+import { getToken } from './token'
+
+/** The server refused the request for want of a valid token (ADR-0026). */
+export class UnauthorizedError extends Error {
+  constructor() {
+    super('unauthorized: docket-core requires an API token')
+    this.name = 'UnauthorizedError'
+  }
+}
+
+// Every API call goes through here so the token (when one is saved) rides
+// along. With none saved the call is exactly the plain `fetch` it replaced.
+// A `401` surfaces as `UnauthorizedError` so callers can ask for a token
+// instead of reporting the server as unreachable.
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  const token = getToken()
+  let res: Response
+  if (token) {
+    const headers = new Headers(init?.headers)
+    headers.set('Authorization', `Bearer ${token}`)
+    res = await fetch(url, { ...init, headers })
+  } else {
+    res = init === undefined ? await fetch(url) : await fetch(url, init)
+  }
+  if (res.status === 401) throw new UnauthorizedError()
+  return res
+}
 
 export type ItemState = 'open' | 'claimed' | 'resolved' | 'closed'
 export type Resolution = 'done' | 'duplicate' | 'wontfix' | 'invalid' | 'blocked' | 'deferred'
@@ -87,7 +114,7 @@ export async function fetchItems(query?: string, archived?: boolean): Promise<It
   if (trimmed) params.set('q', trimmed)
   if (archived) params.set('archived', 'true')
   const url = `/api/items?${params.toString()}`
-  const res = await fetch(url)
+  const res = await apiFetch(url)
   if (!res.ok) {
     throw new Error(`GET /api/items failed: ${res.status}`)
   }
@@ -98,7 +125,7 @@ export async function fetchItems(query?: string, archived?: boolean): Promise<It
 // item the list poll does not hold: past the fetch limit, filtered out by the
 // search, or archived. `null` when no item answers to `ref`.
 export async function fetchItem(ref: string): Promise<Item | null> {
-  const res = await fetch(`/api/items/${encodeURIComponent(ref)}`)
+  const res = await apiFetch(`/api/items/${encodeURIComponent(ref)}`)
   if (res.status === 404) return null
   if (!res.ok) {
     throw new Error(`GET /api/items/${ref} failed: ${res.status}`)
@@ -107,7 +134,7 @@ export async function fetchItem(ref: string): Promise<Item | null> {
 }
 
 export async function fetchComments(itemId: string): Promise<Comment[]> {
-  const res = await fetch(`/api/items/${itemId}/comments`)
+  const res = await apiFetch(`/api/items/${itemId}/comments`)
   if (!res.ok) {
     throw new Error(`GET /api/items/${itemId}/comments failed: ${res.status}`)
   }
@@ -115,7 +142,7 @@ export async function fetchComments(itemId: string): Promise<Comment[]> {
 }
 
 export async function fetchTags(): Promise<TagCount[]> {
-  const res = await fetch('/api/tags')
+  const res = await apiFetch('/api/tags')
   if (!res.ok) {
     throw new Error(`GET /api/tags failed: ${res.status}`)
   }
@@ -123,7 +150,7 @@ export async function fetchTags(): Promise<TagCount[]> {
 }
 
 export async function fetchTopics(): Promise<TopicCount[]> {
-  const res = await fetch('/api/topics')
+  const res = await apiFetch('/api/topics')
   if (!res.ok) {
     throw new Error(`GET /api/topics failed: ${res.status}`)
   }
@@ -144,7 +171,7 @@ async function parseErrorMessage(res: Response): Promise<string> {
 }
 
 async function mutate<T>(url: string, init: RequestInit): Promise<T> {
-  const res = await fetch(url, init)
+  const res = await apiFetch(url, init)
   if (!res.ok) {
     throw new Error(await parseErrorMessage(res))
   }
@@ -248,7 +275,7 @@ export async function archiveItem(id: string): Promise<Item> {
 // to parse; `mutate<T>` isn't reusable here because it always calls
 // `res.json()`.
 export async function deleteItem(id: string): Promise<void> {
-  const res = await fetch(`/api/items/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/items/${id}`, { method: 'DELETE' })
   if (!res.ok) {
     throw new Error(await parseErrorMessage(res))
   }

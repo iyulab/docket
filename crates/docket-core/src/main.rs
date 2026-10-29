@@ -16,6 +16,8 @@ use docket_core::domain::{identity_eq_opt_with, topic_matches_with};
 use docket_core::{Item, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
+mod auth;
+
 #[tokio::main]
 async fn main() {
     let bind = std::env::var("DOCKET_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -28,7 +30,13 @@ async fn main() {
     let store = Store::open(&db_path).expect("failed to open store");
     let console_dir =
         std::env::var("DOCKET_CONSOLE_DIR").unwrap_or_else(|_| "console/dist".to_string());
-    let app = build_router(Arc::new(store), std::path::Path::new(&console_dir));
+    let auth = auth::Auth::from_env_value(std::env::var("DOCKET_TOKEN").ok())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let app = build_router_with_auth(
+        Arc::new(store),
+        std::path::Path::new(&console_dir),
+        auth.clone(),
+    );
 
     let addr: SocketAddr = format!("{bind}:{port}")
         .parse()
@@ -37,6 +45,13 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
     println!("docket-core listening on http://{addr} (db: {db_path})");
+    if auth.is_enabled() {
+        println!("auth: bearer token required on the API (DOCKET_TOKEN)");
+    } else if !addr.ip().is_loopback() {
+        eprintln!(
+            "WARNING: auth is disabled and {addr} is reachable beyond this machine —              anyone who can connect can read and write every item. Set DOCKET_TOKEN."
+        );
+    }
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -202,14 +217,31 @@ async fn status_handler(Extension(last_request): Extension<Arc<LastRequest>>) ->
 /// `console_dir` (the built docket-console, e.g. `console/dist`) can be missing —
 /// `ServeDir`/`ServeFile` defer file I/O to request time, so a missing directory
 /// only produces 404s per-request, not a server startup failure.
+///
+/// Serves without authentication; [`build_router_with_auth`] is the gated form.
+#[cfg(test)]
 fn build_router(store: Arc<Store>, console_dir: &std::path::Path) -> Router {
+    build_router_with_auth(store, console_dir, auth::Auth::default())
+}
+
+/// Like [`build_router`], with the API routes behind `auth` (ADR-0026).
+///
+/// Only the API is gated. `/status`, the console's HTML shell and its assets
+/// stay open: they hold no item data, and the console has to load before it
+/// can ask for a token.
+fn build_router_with_auth(
+    store: Arc<Store>,
+    console_dir: &std::path::Path,
+    auth: auth::Auth,
+) -> Router {
     let static_service =
         tower_http::services::ServeDir::new(console_dir).fallback(spa_fallback(console_dir));
     let last_request = Arc::new(LastRequest::new());
 
+    let gated = || api_routes().layer(middleware::from_fn(auth::require_token));
     let tracked = Router::new()
-        .merge(api_routes())
-        .nest("/api", api_routes())
+        .merge(gated())
+        .nest("/api", gated())
         .fallback_service(static_service)
         .layer(middleware::from_fn(track_idle))
         .with_state(store);
@@ -217,6 +249,7 @@ fn build_router(store: Arc<Store>, console_dir: &std::path::Path) -> Router {
     Router::new()
         .route("/status", get(status_handler))
         .merge(tracked)
+        .layer(Extension(auth))
         .layer(Extension(last_request))
 }
 
@@ -3811,6 +3844,127 @@ mod tests {
         let body = json_body(resp).await;
         assert_eq!(body["version"], format!("v{}", env!("CARGO_PKG_VERSION")));
         assert!(body["idle_seconds"].as_u64().is_some());
+    }
+
+    const TEST_TOKEN: &str = "test-token-0123456789abcdef";
+
+    fn gated_app(console_dir: &std::path::Path) -> Router {
+        build_router_with_auth(
+            Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+            console_dir,
+            auth::Auth::from_env_value(Some(TEST_TOKEN.to_string())).unwrap(),
+        )
+    }
+
+    fn get_request(uri: &str, authorization: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(value) = authorization {
+            builder = builder.header("authorization", value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    /// With a token configured, the API refuses a request that does not carry
+    /// it — at the root where clients call and under the `/api` nest the
+    /// console uses — and says how to authenticate (ADR-0026).
+    #[tokio::test]
+    async fn api_requires_the_token_at_root_and_under_api() {
+        for path in ["/items", "/api/items", "/topics", "/events?for_worker=w"] {
+            let resp = gated_app(std::path::Path::new("/nonexistent-console-dir-for-tests"))
+                .oneshot(get_request(path, None))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(
+                resp.headers().get("www-authenticate").unwrap(),
+                "Bearer",
+                "{path}"
+            );
+            let body = json_body(resp).await;
+            assert!(body["error"].as_str().unwrap().contains("Bearer"));
+        }
+    }
+
+    #[tokio::test]
+    async fn api_rejects_a_wrong_token_and_accepts_the_right_one() {
+        let dir = std::path::Path::new("/nonexistent-console-dir-for-tests");
+        let wrong = gated_app(dir)
+            .oneshot(get_request("/items", Some("Bearer not-the-token-000000")))
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+        for path in ["/items", "/api/items"] {
+            let resp = gated_app(dir)
+                .oneshot(get_request(path, Some(&format!("Bearer {TEST_TOKEN}"))))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        }
+    }
+
+    /// A write is gated as firmly as a read — `POST /items` without the token
+    /// must not create anything.
+    #[tokio::test]
+    async fn api_write_without_the_token_is_refused_and_creates_nothing() {
+        let store = Arc::new(Store::open(":memory:").expect("in-memory store opens"));
+        let app = build_router_with_auth(
+            store.clone(),
+            std::path::Path::new("/nonexistent-console-dir-for-tests"),
+            auth::Auth::from_env_value(Some(TEST_TOKEN.to_string())).unwrap(),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/items")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"topic":"t","title":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            store
+                .list_items(None, None, None, docket_core::domain::SortOrder::Desc)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// `/status` (the updater's probe) and the console's shell and assets carry
+    /// no item data and stay reachable, so the console can load and ask for a
+    /// token.
+    #[tokio::test]
+    async fn status_and_console_shell_stay_open_when_auth_is_enabled() {
+        let dir = temp_console_dir("auth-open-shell");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<html>shell-marker</html>").unwrap();
+
+        let status = gated_app(&dir)
+            .oneshot(get_request("/status", None))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let shell = gated_app(&dir)
+            .oneshot(get_request("/", None))
+            .await
+            .unwrap();
+        assert_eq!(shell.status(), StatusCode::OK);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Without `DOCKET_TOKEN` nothing changes: no header is demanded.
+    #[tokio::test]
+    async fn api_is_open_when_no_token_is_configured() {
+        let resp = test_app()
+            .oneshot(get_request("/items", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

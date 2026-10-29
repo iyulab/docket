@@ -59,8 +59,22 @@ fn http_client() -> reqwest::Client {
     // as an error, not hang the sync forever.
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .default_headers(token_headers(std::env::var("DOCKET_TOKEN").ok().as_deref()))
         .build()
         .expect("reqwest client builds with a plain timeout")
+}
+
+/// `Authorization: Bearer <token>` for every request, when `DOCKET_TOKEN` is
+/// set (ADR-0026). Same behavior as docket-mcp's helper of the same name.
+fn token_headers(token: Option<&str>) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty())
+        && let Ok(mut value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    headers
 }
 
 fn default_root() -> PathBuf {
@@ -405,6 +419,17 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_headers_sends_a_sensitive_bearer_only_for_a_non_blank_token() {
+        let headers = token_headers(Some("  abc123  "));
+        let value = headers.get(reqwest::header::AUTHORIZATION).unwrap();
+        assert_eq!(value, "Bearer abc123");
+        assert!(value.is_sensitive());
+
+        assert!(token_headers(None).is_empty());
+        assert!(token_headers(Some("  ")).is_empty());
+    }
 
     #[test]
     fn plain_segment_passes_through() {

@@ -43,8 +43,13 @@ cargo run -p docket-core
 ```
 
 Binds `127.0.0.1:8420` by default (override with `DOCKET_BIND`/`DOCKET_PORT`), opens/creates a SQLite
-file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). No authentication
-exists yet (see §9) — keep it off any network you don't trust until M4 adds one.
+file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Authentication is
+opt-in: set `DOCKET_TOKEN` (16+ characters, e.g. `openssl rand -hex 32`) and every API call must send
+`Authorization: Bearer <token>`; without it the API is open — keep it off any network you don't trust
+(§9, [ADR-0026](decisions/ADR-0026-shared-token-auth.md)). Every client then needs the same value in
+its own environment: `docket-mcp`, `docket-cc` and `docket-core-updater` read `DOCKET_TOKEN`, and the
+console asks for it once and keeps it in the browser. Give the clients the token **before** setting it
+on the server, or they get `401` in between.
 
 ## 2. Install the clients
 
@@ -670,10 +675,18 @@ default; override via `.env`'s `VITE_DOCKET_CORE_URL`).
 
 ## 9. Current limitations
 
-- **No authentication.** Anyone who can reach `docket-core`'s port can read and write everything.
-  That now includes `DELETE /items/{id}`, which destroys an item, its tags, and its comments with
-  no way to get them back — unlike `reject`/`reopen`/`archive`, every one of which is recoverable.
-  Keep it off untrusted networks until M4.
+- **Authentication is one shared token, and it is opt-in.** With `DOCKET_TOKEN` unset, anyone who can
+  reach `docket-core`'s port can read and write everything — including `DELETE /items/{id}`, which
+  destroys an item, its tags, and its comments with no way to get them back, unlike
+  `reject`/`reopen`/`archive`, every one of which is recoverable. With it set, the API (not `/status`,
+  not the console's shell and assets) requires the bearer token
+  ([ADR-0026](decisions/ADR-0026-shared-token-auth.md)). What it does **not** give you: every token
+  holder is the same party, so there is no per-worker revocation, no topic access control, and no
+  separation of the admin operations; `author`/`requester`/`assignee` stay caller-supplied strings.
+  It does not encrypt: a token sent over plain HTTP is readable on the path, so a server reachable
+  across a network you don't trust belongs behind a TLS-terminating proxy. A server started without a
+  token on a non-loopback address prints a warning; a token that is set but shorter than 16 characters
+  refuses to start.
 - **No push/streaming.** Every read is a poll (`list_items`, `docket-console`'s 5s interval,
   `docket-cc hook`'s one-shot sync on session start) — nothing notifies a worker when new work lands.
 - **No unarchive.** `archive_item` has no inverse yet — setting `archived_at` back to `null` isn't
