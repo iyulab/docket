@@ -183,6 +183,7 @@ for `topic`. Attaches a `requester_advisory` when the value you write is a **bar
 | `list_identities` | — | `GET /identities` | The counterpart of `list_topics` for *parties*, over the whole identity class at once (`requester`, `assignee`, `topic`, registered worker id — one namespace since [ADR-0022](decisions/ADR-0022-identity-alias.md)). Returns `{identity, aliases, requester, assignee, topic, not_closed, registered_worker}[]`, busiest first: one row per identity, with how many non-archived items use it in each role. The three role counts include **closed** items; `not_closed` is the distinct-item count still in flight (one item naming the identity in two roles counts once there) — the same separation `list_topics` draws between `count` and `open_unclaimed`, and the number to read when the question is "am I missing live work". Case variants and declared aliases fold into one row exactly as in `list_topics`, so a row that appears *twice* under two spellings is undeclared drift — that is what this is for. **Enumerates a registered worker with zero items too**, unlike `list_topics`, which only counts what items carry: a worker whose registered spelling drifted receives no items *by definition*, so dropping it would hide the worst case. Asserts nothing about which rows are the same party; see `GET /identities/candidates` below to ask about one identity, and [ADR-0025](decisions/ADR-0025-identity-enumeration-and-drift.md) for why the axis is the whole class rather than one field |
 | `add_comment` | `item_id`, `body`, `author?` | `POST /items/{id}/comments {"author","body"}` | `author` is **resolvable-required** at this tool layer (same treatment as `claim_item`/`submit_item`/`approve_item`/`reject_item`/`reopen_item` above, HD-16/HD-17, cycle-57) — omit it to use this session's `DOCKET_WORKER_ID`; a tool-level error only if neither is present, so a comment never silently lands docket-core's `"unknown"` fallback. Direct HTTP callers hitting `POST /items/{id}/comments` outside this tool (e.g. a script) still get docket-core's own optional-`author`-defaults-to-`"unknown"` behavior — this requirement is MCP-layer only. **Never changes `state` or `turn`** — a fully-narrated workflow told entirely through comments leaves the item exactly where `claim_item`/`submit_item`/etc. last left it |
 | `list_comments` | `item_id` | `GET /items/{id}/comments` | Chronological, append-only |
+| `list_events` | `for_worker?`, `since?`, `limit?` | `GET /events?for=&since=&limit=` | A per-worker activity feed, independent of `state`/`turn`: what happened since the cursor you pass in. `for_worker` must be a registered worker (`404` otherwise; resolvable-required at this tool layer like `author` above). Returns `{events, cursor}` — see [Event log](#event-log-list_events) below for exactly which events exist and what they omit |
 
 `reject_item`/`reopen_item` both send an item backward into the assignee's hands and both require a
 `reason` — the difference is only which edge they start from. Normally both land on `claimed`; the
@@ -455,6 +456,40 @@ topics" (both: empty result), and `mine` doesn't touch registration at all (it o
 against `assignee`/`requester` on items, which exist independently of any worker record) — call
 `get_worker` directly if you need to know whether an id is actually registered.
 
+### Event log (`list_events`)
+
+`list_events` answers "what happened since I last looked" for one worker. It is a feed over the
+append-only `item_events` table and does not read or change `state` or `turn`.
+
+- **Which events a worker sees.** An event is returned when its item's requester or assignee is that
+  worker (declared aliases folded, [ADR-0022](decisions/ADR-0022-identity-alias.md)) **or** the
+  item's topic falls under a topic prefix the worker registered. So a worker registered for a topic
+  sees the events of every item under it, whoever currently holds the item, and any worker may
+  comment on any item (`add_comment` does not check the author against the item's parties). There
+  is no unfiltered, server-wide form of the feed.
+- **Event shape.** `{seq, item_id, kind, actor, created_at}`, where `kind` is one of:
+  - `created` — the item was filed (`actor` is its requester, or `unknown`);
+  - `transition` — a state change: claim, submit, approve, reject, reopen, block, defer, merge, or an
+    admin close;
+  - `comment` — a comment added through `add_comment`.
+
+  Events carry no body, no previous or resulting state, and no field values. Read the item
+  (`get_item`) or its thread (`list_comments`) for content; compare successive reads for what changed.
+- **Cursor.** `since` is exclusive. The response's `cursor` is the highest `seq` the server
+  *scanned*, not the highest one returned, so it advances past events that were not yours — store it
+  and pass it as the next `since`, even when `events` came back empty. The server keeps no read
+  position per worker or per thread; the cursor is the caller's to hold. A single call scans at most
+  5,000 events, so a long catch-up can take several calls (an empty `events` with a larger `cursor`
+  means "keep going"). `limit` defaults to 50 and is capped at 200.
+- **History.** The log began on 2026-09-09; changes made before then have no events
+  ([ADR-0024](decisions/ADR-0024-item-state-since.md)).
+- **What leaves no event.** Corrections (`set_item_requester`, `set_item_assignee`,
+  `set_item_topic`) and redactions write a comment into the thread — for example
+  `topic: <old> -> <new>`, with its author and timestamp — but emit no event. `add_tags` and
+  `remove_tags` record nothing beyond bumping the item's `updated_at`; only the current tag set is
+  stored. `reject_item` and `reopen_item` leave the caller's `reason` as a free-text comment plus a
+  `transition` event; nothing in the data distinguishes the two besides that text.
+
 ## 5. The worker loop
 
 This is the pattern an agent repeats:
@@ -651,6 +686,9 @@ default; override via `.env`'s `VITE_DOCKET_CORE_URL`).
   than one page for the longest-standing item still means paging. Deliberate, not an oversight —
   see [ADR-0024](decisions/ADR-0024-item-state-since.md)'s re-open trigger for the evidence that
   would change it.
+- **No change history for tags, and no before/after values in events.** Only the current tag set
+  is stored, and `list_events` rows carry no field values; a topic, requester or assignee
+  correction survives only as its comment in the thread (see [Event log](#event-log-list_events)).
 - **No cap on reject/reopen cycles.** An item can bounce between `claimed` and `resolved`/`closed`
   indefinitely; there's no loop-detection or count limit. A repeatedly-bounced item just stays in
   the ordinary `claimed` bucket, which existing stall-detection already covers without new logic.
