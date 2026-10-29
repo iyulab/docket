@@ -32,7 +32,11 @@ The board, stall detection, the full set of admin operations. Especially "refine
 
 ## M4 — Safeguards and multiple machines
 
-Auth, cross-machine routing, distribution channels. Auth is done ([ADR-0026](decisions/ADR-0026-shared-token-auth.md)); distribution channels are done. The budget mechanism is dropped: `budget` left the core vocabulary ([ADR-0027](decisions/ADR-0027-budget-leaves-the-core-vocabulary.md)).
+Auth and distribution channels are done ([ADR-0026](decisions/ADR-0026-shared-token-auth.md)). The budget mechanism is dropped: `budget` left the core vocabulary ([ADR-0027](decisions/ADR-0027-budget-leaves-the-core-vocabulary.md)).
+
+Cross-machine routing is not planned. Several machines already share one server over HTTP, so "multiple machines" needs no routing; choosing which machine takes an item is the automatic distribution P-3 rules out. The one reading that would be new work, federating several servers, is Later ([scope.md](scope.md)).
+
+Limits the core itself would enforce on the queue (depth, comments per item, creation rate, open items per topic) are not scheduled; each waits for an actual flood to show what is needed.
 
 ## Off the roadmap
 
