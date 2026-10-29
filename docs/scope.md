@@ -20,6 +20,7 @@ Status: v0 alignment snapshot | 2026-08-11 | updated during implementation
 | Automatic work distribution (orchestration) | P-3; a human's manual assignment is the exception |
 | Real-time chat | Explicitly given up in the differentiation hypothesis (an axis it's fine to lose on) |
 | Multi-worker collaborative claims | Settled as single-claim only — exclusive claiming is part of the domain model's definition |
+| Threads without an assignee, server-side read positions, per-recipient acknowledgement | A new item kind and per-worker server state put "thread" and "follow" into the core vocabulary (P-1) and break exclusive claiming. A standing conversation among peers is carried by convention: one shared topic, one item held by a worker who stays claimed, each reader following `list_events` with its own cursor |
 | Prompt-injection defense (in full) | Excluded from v1 coverage — deferred to L2~L3 |
 | Regulatory compliance, performance tuning | Settled as no hard constraints ([principles.md](principles.md)) |
 

@@ -699,6 +699,14 @@ default; override via `.env`'s `VITE_DOCKET_CORE_URL`).
   than one page for the longest-standing item still means paging. Deliberate, not an oversight —
   see [ADR-0024](decisions/ADR-0024-item-state-since.md)'s re-open trigger for the evidence that
   would change it.
+- **No scanning of what is written.** `docket-core` stores a body or a comment as given: nothing
+  looks for a secret before it lands, and the token above limits who can read it, not what it
+  contains. `redact_item`/`redact_comment` blank a body or comment afterwards (an admin action that
+  leaves a `redacted: …` comment); they are cleanup, not a filter. Keep credentials, hostnames and
+  addresses of internal systems out of items and comments — reference where a value lives (an
+  environment variable name, a config key), never the value. What counts as a secret depends on the
+  consumer, which is why the check does not belong in the core
+  ([principles.md](principles.md) P-1).
 - **No change history for tags, and no before/after values in events.** Only the current tag set
   is stored, and `list_events` rows carry no field values; a topic, requester or assignee
   correction survives only as its comment in the thread (see [Event log](#event-log-list_events)).
