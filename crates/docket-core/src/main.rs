@@ -30,8 +30,11 @@ async fn main() {
     let store = Store::open(&db_path).expect("failed to open store");
     let console_dir =
         std::env::var("DOCKET_CONSOLE_DIR").unwrap_or_else(|_| "console/dist".to_string());
-    let auth = auth::Auth::from_env_value(std::env::var("DOCKET_TOKEN").ok())
-        .unwrap_or_else(|e| panic!("{e}"));
+    let auth = auth::Auth::from_env(
+        std::env::var("DOCKET_TOKEN").ok(),
+        std::env::var("DOCKET_PASSWORD").ok(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     let app = build_router_with_auth(
         Arc::new(store),
         std::path::Path::new(&console_dir),
@@ -46,7 +49,7 @@ async fn main() {
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
     println!("docket-core listening on http://{addr} (db: {db_path})");
     if auth.is_enabled() {
-        println!("auth: bearer token required on the API (DOCKET_TOKEN)");
+        println!("auth: bearer secret required on the API (DOCKET_TOKEN / DOCKET_PASSWORD)");
     } else if !addr.ip().is_loopback() {
         eprintln!(
             "WARNING: auth is disabled and {addr} is reachable beyond this machine —              anyone who can connect can read and write every item. Set DOCKET_TOKEN."
@@ -3852,7 +3855,7 @@ mod tests {
         build_router_with_auth(
             Arc::new(Store::open(":memory:").expect("in-memory store opens")),
             console_dir,
-            auth::Auth::from_env_value(Some(TEST_TOKEN.to_string())).unwrap(),
+            auth::Auth::from_env(Some(TEST_TOKEN.to_string()), None).unwrap(),
         )
     }
 
@@ -3911,7 +3914,7 @@ mod tests {
         let app = build_router_with_auth(
             store.clone(),
             std::path::Path::new("/nonexistent-console-dir-for-tests"),
-            auth::Auth::from_env_value(Some(TEST_TOKEN.to_string())).unwrap(),
+            auth::Auth::from_env(Some(TEST_TOKEN.to_string()), None).unwrap(),
         );
         let resp = app
             .oneshot(
@@ -3955,6 +3958,44 @@ mod tests {
         assert_eq!(shell.status(), StatusCode::OK);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A person's `DOCKET_PASSWORD` opens the same API as the machines' token
+    /// (ADR-0026): the console sends whichever one was typed.
+    #[tokio::test]
+    async fn the_password_is_accepted_alongside_the_token() {
+        let app = |token: Option<&str>, password: Option<&str>| {
+            build_router_with_auth(
+                Arc::new(Store::open(":memory:").expect("in-memory store opens")),
+                std::path::Path::new("/nonexistent-console-dir-for-tests"),
+                auth::Auth::from_env(token.map(String::from), password.map(String::from)).unwrap(),
+            )
+        };
+        let both = |header: &str| {
+            let request = get_request("/api/items", Some(header));
+            app(Some(TEST_TOKEN), Some("k7m2xq9t")).oneshot(request)
+        };
+        assert_eq!(
+            both(&format!("Bearer {TEST_TOKEN}"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            both("Bearer k7m2xq9t").await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            both("Bearer k7m2xq9x").await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // A password-only server gates the API too.
+        let only_password = app(None, Some("k7m2xq9t"))
+            .oneshot(get_request("/items", None))
+            .await
+            .unwrap();
+        assert_eq!(only_password.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Without `DOCKET_TOKEN` nothing changes: no header is demanded.

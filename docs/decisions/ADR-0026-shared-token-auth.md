@@ -108,3 +108,22 @@ whether a worker may be restricted to some topics.
 - The admin operations must be reachable by fewer parties than the ordinary ones: a second token for
   them.
 - A deployment cannot terminate TLS in front: revisit transport.
+
+## Update 2026-10-29: a second secret for people
+
+The console is used by a person in a browser as well as by machines. A 64-character token is the right
+shape for an environment variable and the wrong one to type, so the server also accepts an optional
+`DOCKET_PASSWORD`:
+
+- **Same reach, separate lifecycle.** The password opens exactly what the token opens. It is not a
+  weaker role; it exists so the secret a person types can be short and can be rotated without touching
+  every machine that carries the token. Either value alone enables auth, and a request is accepted when
+  it carries either one.
+- **A lower floor, not a lower bar.** The password must be at least 8 characters (the token's floor
+  stays 16); a shorter one still refuses to start. Nothing limits how often a client may try, so a
+  password that is easy to type must still be random, not a word, a name or a date.
+- **What it costs.** Of everything the API accepts, the password is the weakest secret, so it sets the
+  strength of the whole gate. An operator who wants the gate as strong as the token leaves it unset and
+  gives people the token instead.
+
+Everything above under "What this does not do" still holds: neither secret identifies who is acting.

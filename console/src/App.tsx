@@ -138,7 +138,7 @@ function TokenPrompt({ onSaved }: { onSaved: () => void }) {
       }}
     >
       <label>
-        docket-core requires an API token (DOCKET_TOKEN)
+        docket-core requires a token or password
         <input
           type="password"
           autoComplete="off"

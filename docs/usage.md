@@ -46,7 +46,8 @@ Binds `127.0.0.1:8420` by default (override with `DOCKET_BIND`/`DOCKET_PORT`), o
 file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Authentication is
 opt-in: set `DOCKET_TOKEN` (16+ characters, e.g. `openssl rand -hex 32`) and every API call must send
 `Authorization: Bearer <token>`; without it the API is open — keep it off any network you don't trust
-(§9, [ADR-0026](decisions/ADR-0026-shared-token-auth.md)). Every client then needs the same value in
+(§9, [ADR-0026](decisions/ADR-0026-shared-token-auth.md)). People using the console can have their own, shorter secret: set `DOCKET_PASSWORD` (8+ characters,
+random) and it opens the same API as the token. Every client then needs the token in
 its own environment: `docket-mcp`, `docket-cc` and `docket-core-updater` read `DOCKET_TOKEN`, and the
 console asks for it once and keeps it in the browser. Give the clients the token **before** setting it
 on the server, or they get `401` in between.
