@@ -61,6 +61,44 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps
 
+  # Releases ship Windows, Linux and macOS binaries (see release.yml), but the
+  # `test` job above only ever runs on Linux. This job builds and tests on the
+  # other two so a path, process or filesystem difference fails here instead of
+  # in a published binary. Formatting, clippy, docs and link checks are
+  # platform-independent and stay in `test`.
+  test-platforms:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build binaries
+        # Same reason as in `test`: docket-mcp's tests spawn the real
+        # docket-core binary, which `cargo test` alone does not build.
+        run: cargo build --workspace --bins
+
+      - name: Test
+        run: cargo test --workspace
+
   console:
     runs-on: ubuntu-latest
     steps:
