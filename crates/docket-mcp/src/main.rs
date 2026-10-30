@@ -560,11 +560,19 @@ struct ListTagsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddCommentParams {
-    /// Item id, or its numeric `seq` (`142`, `#142`).
+    /// Item id, or its numeric `seq` (`142`, `#142`). Give this or `topic`.
     // Long form, kept for maintainers (the tool schema carries only the line above):
     // The item's canonical id, or its short numeric alias (`seq`) — e.g.
     // `142` or `#142` — both resolve to the same item. See `get_item`.
-    item_id: String,
+    #[serde(default)]
+    item_id: Option<String>,
+    /// Comment on a topic instead of an item (a channel workers follow). Give this or `item_id`.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // A topic comment belongs to the topic, not to an item: it has no requester,
+    // assignee or turn and never appears in `mine` (ADR-0028). Workers registered for
+    // the topic read it through `list_events`.
+    #[serde(default)]
+    topic: Option<String>,
     /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
     // Long form, kept for maintainers (the tool schema carries only the line above):
     // Who's writing this comment. Omit to use this session's
@@ -614,13 +622,21 @@ struct GetItemParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListCommentsParams {
-    /// Item id, or its numeric `seq` (`142`, `#142`).
+    /// Item id, or its numeric `seq` (`142`, `#142`). Give this or `topic`.
     // Long form, kept for maintainers (the tool schema carries only the line above):
     // The item's canonical id, or its short numeric alias (`seq`).
-    item_id: String,
+    #[serde(default)]
+    item_id: Option<String>,
+    /// A topic whose comments to read instead of an item's. Give this or `item_id`.
+    #[serde(default)]
+    topic: Option<String>,
     /// Epoch milliseconds. Only comments written after this instant.
     #[serde(default)]
     since: Option<i64>,
+    /// A comment `seq` (each comment carries one): only comments after it. The exact
+    /// way to resume a thread or a topic.
+    #[serde(default)]
+    after: Option<i64>,
     /// Only the newest N comments.
     #[serde(default)]
     tail: Option<usize>,
@@ -780,6 +796,9 @@ struct CommentDto {
     author: String,
     body: String,
     created_at: i64,
+    /// Absent from servers older than ADR-0028; 0 is never a real value.
+    #[serde(default)]
+    seq: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1134,6 +1153,7 @@ fn shape_comments(
     item_id: &str,
     comments: Vec<CommentDto>,
     since: Option<i64>,
+    after: Option<i64>,
     tail: Option<usize>,
     max_chars: Option<usize>,
 ) -> serde_json::Value {
@@ -1141,6 +1161,9 @@ fn shape_comments(
     let mut kept: Vec<CommentDto> = comments
         .into_iter()
         .filter(|c| since.is_none_or(|s| c.created_at > s))
+        // A server older than ADR-0028 numbers no comments (0); `after` cannot
+        // apply to those, so they are kept rather than all dropped.
+        .filter(|c| after.is_none_or(|a| c.seq == 0 || c.seq > a))
         .collect();
     if let Some(n) = tail {
         let drop = kept.len().saturating_sub(n);
@@ -1162,21 +1185,35 @@ fn shape_comments(
         }
         kept.drain(..from);
     }
-    comments_value(item_id, &kept, total, total - kept.len())
+    comments_value("item_id", item_id, &kept, total, total - kept.len())
 }
 
 /// The comments result: the item id once, the whole thread's size, the comments, and how many earlier ones
 /// were left out (present only when there are some).
 fn comments_value(
-    item_id: &str,
+    owner_key: &str,
+    owner: &str,
     kept: &[CommentDto],
     total: usize,
     older: usize,
 ) -> serde_json::Value {
+    let rows = kept.iter().map(slim_comment).collect::<Vec<_>>();
+    comments_page(owner_key, owner, rows, total, older)
+}
+
+/// `{<owner_key>: owner, total, comments, older?}` -- the one result shape of a thread, whether it
+/// belongs to an item (`item_id`) or to a topic (`topic`).
+fn comments_page(
+    owner_key: &str,
+    owner: &str,
+    rows: Vec<serde_json::Value>,
+    total: usize,
+    older: usize,
+) -> serde_json::Value {
     let mut out = serde_json::json!({
-        "item_id": item_id,
+        owner_key: owner,
         "total": total,
-        "comments": kept.iter().map(slim_comment).collect::<Vec<_>>(),
+        "comments": rows,
     });
     if older > 0 {
         out["older"] = serde_json::json!(older);
@@ -1185,9 +1222,46 @@ fn comments_value(
 }
 
 fn slim_comment(c: &CommentDto) -> serde_json::Value {
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "id": c.id, "author": c.author, "body": c.body, "created_at": c.created_at,
-    })
+    });
+    if c.seq > 0 {
+        out["seq"] = serde_json::json!(c.seq);
+    }
+    out
+}
+
+/// A topic comment as the thread result shows it: the same fields as `slim_comment`.
+fn slim_topic_comment(c: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for key in ["id", "author", "body", "created_at", "seq"] {
+        if let Some(v) = c.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Why a comment call named the wrong number of owners.
+const ONE_OWNER: &str = "give exactly one of item_id or topic";
+
+/// What a comment call is about: an item's thread or a topic's.
+enum CommentOwner<'a> {
+    Item(&'a str),
+    Topic(&'a str),
+}
+
+fn comment_owner<'a>(
+    item_id: &'a Option<String>,
+    topic: &'a Option<String>,
+) -> Result<CommentOwner<'a>, CallToolResult> {
+    let item = item_id.as_deref().filter(|s| !s.trim().is_empty());
+    let topic = topic.as_deref().filter(|s| !s.trim().is_empty());
+    match (item, topic) {
+        (Some(i), None) => Ok(CommentOwner::Item(i)),
+        (None, Some(t)) => Ok(CommentOwner::Topic(t)),
+        _ => Err(CallToolResult::error(vec![ContentBlock::text(ONE_OWNER)])),
+    }
 }
 
 /// Rows of a whole-table listing narrowed by `q` and `limit`.
@@ -1305,7 +1379,10 @@ const ARCHIVE_ACK: &[&str] = &[
 /// A comment's acknowledgement: that it landed, where, and under whose name
 /// (the one thing a caller relying on the `DOCKET_WORKER_ID` fallback cannot
 /// know in advance) -- not its body back.
-const COMMENT_ACK: &[&str] = &["id", "item_id", "author", "created_at"];
+const COMMENT_ACK: &[&str] = &["id", "item_id", "author", "created_at", "seq"];
+
+/// The same for a comment written to a topic.
+const TOPIC_COMMENT_ACK: &[&str] = &["id", "topic", "author", "created_at", "seq"];
 
 /// Narrows a successful write result to `keep`. Advisories (any key ending in
 /// `_advisory`) always pass: they are the part of a result the caller could
@@ -1451,7 +1528,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "What's new since your cursor: comments and transitions on items you are requester/assignee of, or that sit under your registered topics -- even while turn stays with the other side (an assignee answering in a comment without submitting). Always advance `since` to the returned cursor, even after an empty result. for_worker defaults to this session's DOCKET_WORKER_ID."
+        description = "What's new since your cursor: comments and transitions on items you are requester/assignee of, or that sit under your registered topics -- even while turn stays with the other side (an assignee answering in a comment without submitting) -- and comments written to your registered topics (those events have `topic`, no `item_id`). Always advance `since` to the returned cursor, even after an empty result. for_worker defaults to this session's DOCKET_WORKER_ID."
     )]
     async fn list_events(
         &self,
@@ -1545,11 +1622,13 @@ impl DocketMcp {
         &self,
         item_id: &str,
         since: Option<i64>,
+        after: Option<i64>,
         tail: Option<usize>,
         max_chars: Option<usize>,
     ) -> Result<Result<serde_json::Value, CallToolResult>, McpError> {
-        let (since_q, tail_q, max_q) = (
+        let (since_q, after_q, tail_q, max_q) = (
             since.map(|v| v.to_string()),
+            after.map(|v| v.to_string()),
             tail.map(|v| v.to_string()),
             max_chars.map(|v| v.to_string()),
         );
@@ -1558,6 +1637,7 @@ impl DocketMcp {
             .get(items_url(&self.base_url, item_id, &["comments"]))
             .query(&[
                 ("since", since_q.as_deref()),
+                ("after", after_q.as_deref()),
                 ("tail", tail_q.as_deref()),
                 ("max_chars", max_q.as_deref()),
             ])
@@ -1578,14 +1658,67 @@ impl DocketMcp {
         Ok(Ok(if meta.shaped {
             let n = comments.len();
             comments_value(
+                "item_id",
                 item_id,
                 &comments,
                 meta.total.unwrap_or(n),
                 meta.omitted.unwrap_or(0),
             )
         } else {
-            shape_comments(item_id, comments, since, tail, max_chars)
+            shape_comments(item_id, comments, since, after, tail, max_chars)
         }))
+    }
+
+    /// Reads a topic's comments (ADR-0028). Only a docket-core that has topic comments answers, so
+    /// there is no adapter-side shaping: the server applies `since` / `after` / `tail` / `max_chars`
+    /// and reports what it left out in headers. `Err` is a tool error to hand back as is.
+    async fn read_topic_thread(
+        &self,
+        topic: &str,
+        since: Option<i64>,
+        after: Option<i64>,
+        tail: Option<usize>,
+        max_chars: Option<usize>,
+    ) -> Result<Result<serde_json::Value, CallToolResult>, McpError> {
+        let (since_q, after_q, tail_q, max_q) = (
+            since.map(|v| v.to_string()),
+            after.map(|v| v.to_string()),
+            tail.map(|v| v.to_string()),
+            max_chars.map(|v| v.to_string()),
+        );
+        let resp = self
+            .http
+            .get(api_url(&self.base_url, &["topic-comments"]))
+            .query(&[
+                ("topic", Some(topic)),
+                ("since", since_q.as_deref()),
+                ("after", after_q.as_deref()),
+                ("tail", tail_q.as_deref()),
+                ("max_chars", max_q.as_deref()),
+            ])
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        let meta = meta_from_headers(resp.headers());
+        let result = respond::<Vec<serde_json::Value>>(resp).await?;
+        if result.is_error == Some(true) {
+            return Ok(Err(result));
+        }
+        let Some(ContentBlock::Text(text)) = result.content.first() else {
+            return Ok(Err(result));
+        };
+        let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&text.text) else {
+            return Ok(Err(result));
+        };
+        let n = rows.len();
+        let rows = rows.iter().map(slim_topic_comment).collect();
+        Ok(Ok(comments_page(
+            "topic",
+            topic,
+            rows,
+            meta.total.unwrap_or(n),
+            meta.omitted.unwrap_or(0),
+        )))
     }
 
     /// Attaches [`Self::fetch_unscoped_advisory`]'s sentence under `field`
@@ -2354,7 +2487,10 @@ impl DocketMcp {
         }
         // Advisory-grade: the item was read fine, so a failed thread read must
         // not turn it into an error -- the caller just does not get comments.
-        let Ok(Ok(shaped)) = self.read_thread(&p.item_id, None, Some(n), None).await else {
+        let Ok(Ok(shaped)) = self
+            .read_thread(&p.item_id, None, None, Some(n), None)
+            .await
+        else {
             return Ok(result);
         };
         let result = with_extra_field(result, "comment_total", shaped["total"].clone());
@@ -2609,7 +2745,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices. Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it. `author` is required — identify yourself (your worker id, or another stable caller identity) so the thread stays readable instead of filling up with docket-core's \"unknown\" fallback. May be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices -- or, with `topic` instead of `item_id`, a comment on a topic that workers registered for it read through list_events (it is not an item). Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it. `author` is required — identify yourself (your worker id, or another stable caller identity) so the thread stays readable instead of filling up with docket-core's \"unknown\" fallback. May be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn add_comment(
         &self,
@@ -2619,28 +2755,62 @@ impl DocketMcp {
             Ok(a) => a,
             Err(error) => return Ok(error),
         };
-        let body = serde_json::json!({ "body": p.body, "author": author });
-        let resp = self
-            .http
-            .post(items_url(&self.base_url, &p.item_id, &["comments"]))
-            .json(&body)
-            .send()
-            .await
-            .map_err(unreachable_error)?;
-        respond::<CommentDto>(resp)
-            .await
-            .map(|r| ack(r, COMMENT_ACK))
+        let owner = match comment_owner(&p.item_id, &p.topic) {
+            Ok(owner) => owner,
+            Err(error) => return Ok(error),
+        };
+        match owner {
+            CommentOwner::Item(item_id) => {
+                let body = serde_json::json!({ "body": p.body, "author": author });
+                let resp = self
+                    .http
+                    .post(items_url(&self.base_url, item_id, &["comments"]))
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(unreachable_error)?;
+                respond::<CommentDto>(resp)
+                    .await
+                    .map(|r| ack(r, COMMENT_ACK))
+            }
+            CommentOwner::Topic(topic) => {
+                let body = serde_json::json!({ "topic": topic, "body": p.body, "author": author });
+                let resp = self
+                    .http
+                    .post(api_url(&self.base_url, &["topic-comments"]))
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(unreachable_error)?;
+                respond::<serde_json::Value>(resp)
+                    .await
+                    .map(|r| ack(r, TOPIC_COMMENT_ACK))
+            }
+        }
     }
 
-    #[tool(description = "List an item's comment thread in chronological order")]
+    #[tool(
+        description = "List an item's comment thread in chronological order -- or a topic's, with `topic`. Each comment carries a `seq`; pass the last one as `after` to read only what came since."
+    )]
     async fn list_comments(
         &self,
         Parameters(p): Parameters<ListCommentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        match self
-            .read_thread(&p.item_id, p.since, p.tail, p.max_chars)
-            .await?
-        {
+        let owner = match comment_owner(&p.item_id, &p.topic) {
+            Ok(owner) => owner,
+            Err(error) => return Ok(error),
+        };
+        let read = match owner {
+            CommentOwner::Item(item_id) => {
+                self.read_thread(item_id, p.since, p.after, p.tail, p.max_chars)
+                    .await?
+            }
+            CommentOwner::Topic(topic) => {
+                self.read_topic_thread(topic, p.since, p.after, p.tail, p.max_chars)
+                    .await?
+            }
+        };
+        match read {
             Ok(shaped) => Ok(CallToolResult::success(vec![ContentBlock::json(shaped)?])),
             Err(error) => Ok(error),
         }
@@ -2921,7 +3091,8 @@ mod tests {
 
         server
             .add_comment(Parameters(AddCommentParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
                 body: "answered your question".to_string(),
                 author: Some("acme/assignee".to_string()),
             }))
@@ -3404,7 +3575,8 @@ mod tests {
         }
         let without_fallback = server
             .add_comment(Parameters(AddCommentParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
                 author: None,
                 body: "no identity available".to_string(),
             }))
@@ -3432,7 +3604,8 @@ mod tests {
         }
         let with_fallback = server
             .add_comment(Parameters(AddCommentParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
                 author: None,
                 body: "identity from env".to_string(),
             }))
@@ -3602,7 +3775,8 @@ mod tests {
 
         let added = server
             .add_comment(Parameters(AddCommentParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
                 author: Some("maintainer".to_string()),
                 body: "root cause found".to_string(),
             }))
@@ -3612,7 +3786,9 @@ mod tests {
 
         let listed = server
             .list_comments(Parameters(ListCommentsParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
+                after: None,
                 since: None,
                 tail: None,
                 max_chars: None,
@@ -3689,13 +3865,17 @@ mod tests {
 
         let commented = server
             .add_comment(Parameters(AddCommentParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
                 author: Some("worker-a".to_string()),
                 body: "progress note the caller just wrote".to_string(),
             }))
             .await
             .unwrap();
-        assert_eq!(keys(&commented), ["author", "created_at", "id", "item_id"]);
+        assert_eq!(
+            keys(&commented),
+            ["author", "created_at", "id", "item_id", "seq"]
+        );
 
         let submitted = server
             .submit_item(Parameters(SubmitParams {
@@ -4039,13 +4219,14 @@ mod tests {
             author: "w".to_string(),
             body: body.to_string(),
             created_at: 1000 + i,
+            seq: 0,
         }
     }
 
     #[test]
     fn shape_comments_states_the_item_once_and_keeps_every_comment_by_default() {
         let all: Vec<CommentDto> = (0..4).map(|i| comment(i, "x")).collect();
-        let v = shape_comments("item-1", all, None, None, None);
+        let v = shape_comments("item-1", all, None, None, None, None);
         assert_eq!(v["item_id"], "item-1");
         assert_eq!(v["total"], 4);
         let list = v["comments"].as_array().unwrap();
@@ -4061,7 +4242,7 @@ mod tests {
     #[test]
     fn shape_comments_tail_and_since_keep_the_newest_in_chronological_order() {
         let all: Vec<CommentDto> = (0..5).map(|i| comment(i, "x")).collect();
-        let v = shape_comments("item-1", all, None, Some(2), None);
+        let v = shape_comments("item-1", all, None, None, Some(2), None);
         let ids: Vec<&str> = v["comments"]
             .as_array()
             .unwrap()
@@ -4073,7 +4254,7 @@ mod tests {
         assert_eq!(v["older"], 3);
 
         let all: Vec<CommentDto> = (0..5).map(|i| comment(i, "x")).collect();
-        let v = shape_comments("item-1", all, Some(1002), None, None);
+        let v = shape_comments("item-1", all, Some(1002), None, None, None);
         let ids: Vec<&str> = v["comments"]
             .as_array()
             .unwrap()
@@ -4091,7 +4272,7 @@ mod tests {
             .to_string()
             .chars()
             .count();
-        let v = shape_comments("item-1", all, None, None, Some(2 * one + 5));
+        let v = shape_comments("item-1", all, None, None, None, Some(2 * one + 5));
         let ids: Vec<&str> = v["comments"]
             .as_array()
             .unwrap()
@@ -4102,7 +4283,7 @@ mod tests {
         assert_eq!(v["older"], 2);
 
         let all: Vec<CommentDto> = (0..3).map(|i| comment(i, &"b".repeat(100))).collect();
-        let v = shape_comments("item-1", all, None, None, Some(1));
+        let v = shape_comments("item-1", all, None, None, None, Some(1));
         assert_eq!(
             v["comments"].as_array().unwrap().len(),
             1,
@@ -4113,7 +4294,7 @@ mod tests {
 
     #[test]
     fn shape_comments_of_an_empty_thread_is_an_empty_list() {
-        let v = shape_comments("item-1", vec![], Some(5), Some(3), Some(10));
+        let v = shape_comments("item-1", vec![], Some(5), None, Some(3), Some(10));
         assert_eq!(v["total"], 0);
         assert_eq!(v["comments"].as_array().unwrap().len(), 0);
     }
@@ -4136,7 +4317,8 @@ mod tests {
         for i in 0..4 {
             server
                 .add_comment(Parameters(AddCommentParams {
-                    item_id: item_id.clone(),
+                    item_id: Some(item_id.clone()),
+                    topic: None,
                     author: Some("w".to_string()),
                     body: format!("note {i}"),
                 }))
@@ -4145,7 +4327,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(3)).await;
         }
         let params = |tail: Option<usize>| ListCommentsParams {
-            item_id: item_id.clone(),
+            item_id: Some(item_id.clone()),
+            topic: None,
+            after: None,
             since: None,
             tail,
             max_chars: None,
@@ -5998,7 +6182,9 @@ mod tests {
 
         let comments = server
             .list_comments(Parameters(ListCommentsParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
+                after: None,
                 since: None,
                 tail: None,
                 max_chars: None,
@@ -6103,7 +6289,9 @@ mod tests {
 
         let comments = server
             .list_comments(Parameters(ListCommentsParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
+                after: None,
                 since: None,
                 tail: None,
                 max_chars: None,
@@ -6177,7 +6365,9 @@ mod tests {
 
         let comments = server
             .list_comments(Parameters(ListCommentsParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
+                after: None,
                 since: None,
                 tail: None,
                 max_chars: None,
@@ -6307,7 +6497,9 @@ mod tests {
 
         let comments = server
             .list_comments(Parameters(ListCommentsParams {
-                item_id: item_id.clone(),
+                item_id: Some(item_id.clone()),
+                topic: None,
+                after: None,
                 since: None,
                 tail: None,
                 max_chars: None,
@@ -6551,7 +6743,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         server
             .add_comment(Parameters(AddCommentParams {
-                item_id: id.clone(),
+                item_id: Some(id.clone()),
+                topic: None,
                 author: Some("acme/filer".to_string()),
                 body: "still thinking".to_string(),
             }))
@@ -7016,5 +7209,166 @@ mod tests {
             text_of(&by_hash_seq)
         );
         assert_eq!(json_value(&by_hash_seq)["id"], item_id);
+    }
+
+    // ---- ADR-0028 through the tool surface: a comment on a topic ----
+
+    #[test]
+    fn a_comment_call_names_exactly_one_owner() {
+        let some = |s: &str| Some(s.to_string());
+        assert!(matches!(
+            comment_owner(&some("142"), &None),
+            Ok(CommentOwner::Item("142"))
+        ));
+        assert!(matches!(
+            comment_owner(&None, &some("channel/agents")),
+            Ok(CommentOwner::Topic("channel/agents"))
+        ));
+        assert!(comment_owner(&None, &None).is_err(), "neither");
+        assert!(
+            comment_owner(&some("142"), &some("channel/agents")).is_err(),
+            "both"
+        );
+        assert!(
+            comment_owner(&some("  "), &some("channel/agents")).is_ok(),
+            "a blank id is not an id"
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_comments_work_through_the_real_request() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-topic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(19120, &dir.join("topic.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        let write = |topic: Option<&str>, item: Option<&str>, body: &str| {
+            let server = &server;
+            let params = AddCommentParams {
+                item_id: item.map(str::to_string),
+                topic: topic.map(str::to_string),
+                author: Some("acme/alice".to_string()),
+                body: body.to_string(),
+            };
+            async move { server.add_comment(Parameters(params)).await.unwrap() }
+        };
+
+        // Naming neither, or both, is a tool error rather than a guess.
+        assert_eq!(write(None, None, "x").await.is_error, Some(true));
+        assert_eq!(
+            write(Some("channel/agents"), Some("1"), "x").await.is_error,
+            Some(true)
+        );
+
+        // A write acknowledges where it landed and its seq, not the body back.
+        let first = write(Some("channel/agents"), None, "first note").await;
+        assert_ne!(first.is_error, Some(true));
+        let ack = json_value(&first);
+        assert_eq!(ack["topic"], "channel/agents");
+        assert!(ack["seq"].as_i64().unwrap() > 0);
+        assert!(ack.get("body").is_none());
+        for i in 0..3 {
+            write(Some("channel/agents"), None, &format!("later {i}")).await;
+        }
+
+        let read = |after: Option<i64>, tail: Option<usize>| {
+            let server = &server;
+            let params = ListCommentsParams {
+                item_id: None,
+                topic: Some("channel/agents".to_string()),
+                after,
+                since: None,
+                tail,
+                max_chars: None,
+            };
+            async move { json_value(&server.list_comments(Parameters(params)).await.unwrap()) }
+        };
+        let all = read(None, None).await;
+        assert_eq!(all["topic"], "channel/agents");
+        assert_eq!(all["total"], 4);
+        assert!(all.get("item_id").is_none());
+        assert_eq!(all["comments"][0]["body"], "first note");
+
+        // `after` resumes from the last seq seen; `tail` keeps the newest.
+        let cursor = ack["seq"].as_i64().unwrap();
+        let resumed = read(Some(cursor), None).await;
+        assert_eq!(resumed["comments"].as_array().unwrap().len(), 3);
+        let newest = read(None, Some(1)).await;
+        assert_eq!(newest["comments"][0]["body"], "later 2");
+        assert_eq!(newest["older"], 3);
+
+        // A worker registered for the topic follows it through list_events.
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("acme/reader".to_string()),
+                topics: vec!["channel".to_string()],
+            }))
+            .await
+            .unwrap();
+        let events = server
+            .list_events(Parameters(ListEventsParams {
+                for_worker: Some("acme/reader".to_string()),
+                since: Some(0),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let body = json_value(&events);
+        let first_event = &body["events"][0];
+        assert_eq!(first_event["topic"], "channel/agents");
+        assert!(first_event.get("item_id").is_none());
+        assert_eq!(body["events"].as_array().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn item_comments_carry_a_seq_and_resume_after_one() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-seq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(19121, &dir.join("seq.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        let created = server
+            .create_item(Parameters(new_item("iyulab/docket", "thread", None)))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+        let mut seqs = Vec::new();
+        for i in 0..3 {
+            let ack = server
+                .add_comment(Parameters(AddCommentParams {
+                    item_id: Some(item_id.clone()),
+                    topic: None,
+                    author: Some("w".to_string()),
+                    body: format!("n{i}"),
+                }))
+                .await
+                .unwrap();
+            seqs.push(json_value(&ack)["seq"].as_i64().unwrap());
+        }
+        let resumed = server
+            .list_comments(Parameters(ListCommentsParams {
+                item_id: Some(item_id),
+                topic: None,
+                after: Some(seqs[0]),
+                since: None,
+                tail: None,
+                max_chars: None,
+            }))
+            .await
+            .unwrap();
+        let v = json_value(&resumed);
+        let bodies: Vec<&str> = v["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["body"].as_str().unwrap())
+            .collect();
+        assert_eq!(bodies, ["n1", "n2"]);
+        assert_eq!(v["comments"][0]["seq"], seqs[1]);
     }
 }
