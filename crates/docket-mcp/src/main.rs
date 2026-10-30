@@ -851,7 +851,15 @@ async fn respond<T: Serialize + for<'de> Deserialize<'de>>(
 
 #[derive(Serialize)]
 struct PaginatedItems {
-    items: Vec<ItemDto>,
+    /// Rows exactly as the server sent them: with `fields` they are not whole items, and the server's own
+    /// compact form is the point.
+    items: Vec<serde_json::Value>,
+    /// Matching rows not in this answer (the server's `X-Omitted`), present only when there are some.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted: Option<usize>,
+    /// Where to continue (`X-Next-Offset`), present with `omitted`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<usize>,
     /// Rows matching the filters before `limit`/`offset` were applied — an
     /// MCP tool result has no header channel (unlike the HTTP response this
     /// is read from), so this is how a caller learns whether to page with
@@ -859,34 +867,63 @@ struct PaginatedItems {
     total: usize,
 }
 
+/// What the server said about how it shaped a list (ADR-0029). `shaped` is false for a docket-core that
+/// predates the read contract and ignored the parameters, in which case the adapter shapes the page itself.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct ReadMeta {
+    shaped: bool,
+    total: Option<usize>,
+    omitted: Option<usize>,
+    next_offset: Option<usize>,
+}
+
+fn meta_from_headers(h: &reqwest::header::HeaderMap) -> ReadMeta {
+    let num = |name: &str| {
+        h.get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+    };
+    ReadMeta {
+        shaped: h.contains_key("X-Shaped"),
+        total: num("X-Total-Count"),
+        omitted: num("X-Omitted"),
+        next_offset: num("X-Next-Offset"),
+    }
+}
+
 /// Same shape as `respond`, but for `list_items`/`search_items`: reads the
 /// `X-Total-Count` header docket-core's HTTP layer sets (ADR-0014) before
 /// consuming the body, and re-wraps the bare `ItemDto[]` as `{items,
 /// total}` — the one output shape an MCP caller can actually see.
-async fn respond_paginated(resp: reqwest::Response) -> Result<CallToolResult, McpError> {
+async fn respond_paginated(resp: reqwest::Response) -> Result<(CallToolResult, bool), McpError> {
     let status = resp.status();
-    let total = resp
-        .headers()
-        .get("X-Total-Count")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok());
+    let meta = meta_from_headers(resp.headers());
+    let total = meta.total;
     let content_type = content_type(&resp);
     let bytes = resp.bytes().await.map_err(unreachable_error)?;
     if status.is_success() {
-        let items: Vec<ItemDto> = serde_json::from_slice(&bytes).map_err(|e| {
+        let items: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|e| {
             McpError::internal_error(unparseable_body(status, &content_type, &e), None)
         })?;
         // Falls back to the page length rather than failing the whole call
         // if the header is ever missing/malformed — a caller still gets a
         // correct, if unconfirmed-total, result instead of an opaque error.
         let total = total.unwrap_or(items.len());
-        let block = ContentBlock::json(&PaginatedItems { items, total })?;
-        Ok(CallToolResult::success(vec![block]))
+        let block = ContentBlock::json(&PaginatedItems {
+            items,
+            omitted: meta.omitted,
+            next_offset: meta.next_offset,
+            total,
+        })?;
+        Ok((CallToolResult::success(vec![block]), meta.shaped))
     } else {
         let message = serde_json::from_slice::<ErrorBody>(&bytes)
             .map(|b| b.error)
             .unwrap_or_else(|_| format!("docket-core returned {status}"));
-        Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
+        Ok((
+            CallToolResult::error(vec![ContentBlock::text(message)]),
+            meta.shaped,
+        ))
     }
 }
 
@@ -1016,7 +1053,8 @@ fn check_fields(fields: Option<&[String]>) -> Result<(), CallToolResult> {
     }
 }
 
-/// Narrows a `{items, total}` page to what the caller asked for: only the
+/// The adapter's own copy of the server's `fields` / `max_chars` shaping, used only when the server did not
+/// shape the page (an older docket-core ignores the parameters). Narrows a `{items, total}` page to the
 /// requested `fields` per row, then as many rows as fit in `max_chars`.
 fn shape_page(
     result: CallToolResult,
@@ -1068,13 +1106,17 @@ fn shape_page(
             kept += 1;
         }
     }
-    let omitted = rows.len() - kept;
+    // Same meaning as the server's X-Omitted: every matching row not in this answer.
+    let total = page
+        .get("total")
+        .and_then(|v| v.as_u64())
+        .map(|t| t as usize);
+    let omitted = total.map_or(rows.len() - kept, |t| t.saturating_sub(offset + kept));
     page.insert(
         "items".to_string(),
         serde_json::Value::Array(rows.into_iter().take(kept).collect()),
     );
     if omitted > 0 {
-        page.insert("truncated".to_string(), serde_json::Value::Bool(true));
         page.insert("omitted".to_string(), serde_json::json!(omitted));
         page.insert("next_offset".to_string(), serde_json::json!(offset + kept));
     }
@@ -1104,11 +1146,7 @@ fn shape_comments(
         let drop = kept.len().saturating_sub(n);
         kept.drain(..drop);
     }
-    let slim = |c: &CommentDto| {
-        serde_json::json!({
-            "id": c.id, "author": c.author, "body": c.body, "created_at": c.created_at,
-        })
-    };
+    let slim = slim_comment;
     if let Some(budget) = max_chars {
         // Newest first: the latest comments are the ones a reader needs, so the
         // budget is spent from the end and the newest is always kept.
@@ -1124,16 +1162,32 @@ fn shape_comments(
         }
         kept.drain(..from);
     }
+    comments_value(item_id, &kept, total, total - kept.len())
+}
+
+/// The comments result: the item id once, the whole thread's size, the comments, and how many earlier ones
+/// were left out (present only when there are some).
+fn comments_value(
+    item_id: &str,
+    kept: &[CommentDto],
+    total: usize,
+    older: usize,
+) -> serde_json::Value {
     let mut out = serde_json::json!({
         "item_id": item_id,
         "total": total,
-        "comments": kept.iter().map(slim).collect::<Vec<_>>(),
+        "comments": kept.iter().map(slim_comment).collect::<Vec<_>>(),
     });
-    let older = total - kept.len();
     if older > 0 {
         out["older"] = serde_json::json!(older);
     }
     out
+}
+
+fn slim_comment(c: &CommentDto) -> serde_json::Value {
+    serde_json::json!({
+        "id": c.id, "author": c.author, "body": c.body, "created_at": c.created_at,
+    })
 }
 
 /// Rows of a whole-table listing narrowed by `q` and `limit`.
@@ -1175,10 +1229,12 @@ fn narrow_table(
 const TABLE_DEFAULT_LIMIT: usize = 50;
 
 /// Re-wraps a successful bare-array listing as `{total, <name>, omitted?}`
-/// after trimming each row with `trim` and narrowing with `q` / `limit`.
+/// after trimming each row with `trim`. The server narrows and caps it (`meta.shaped`); for an older
+/// server this narrows with `q` / `limit` itself.
 /// A result it does not recognise comes back untouched.
 fn table_result(
     result: CallToolResult,
+    meta: &ReadMeta,
     name: &str,
     trim: impl Fn(serde_json::Value) -> serde_json::Value,
     q: Option<&str>,
@@ -1199,7 +1255,13 @@ fn table_result(
         .map(trim)
         .filter(|r| !r.is_null())
         .collect();
-    let (kept, total, omitted) = narrow_table(rows, q, limit);
+    // The server already narrowed and capped the table; an older one returned all of it.
+    let (kept, total, omitted) = if meta.shaped {
+        let n = rows.len();
+        (rows, meta.total.unwrap_or(n), meta.omitted.unwrap_or(0))
+    } else {
+        narrow_table(rows, q, limit)
+    };
     let mut out = serde_json::json!({ "total": total, name: kept });
     if omitted > 0 {
         out["omitted"] = serde_json::json!(omitted);
@@ -1474,6 +1536,56 @@ impl DocketMcp {
         Ok(self
             .with_unscoped_advisory(result, requester, "requester", "requester_advisory")
             .await)
+    }
+
+    /// Reads an item's thread. The server applies `since` / `tail` / `max_chars` and reports the rest in
+    /// headers; an older docket-core returns the whole thread and this shapes it. `Err` is a tool error to
+    /// hand back as is.
+    async fn read_thread(
+        &self,
+        item_id: &str,
+        since: Option<i64>,
+        tail: Option<usize>,
+        max_chars: Option<usize>,
+    ) -> Result<Result<serde_json::Value, CallToolResult>, McpError> {
+        let (since_q, tail_q, max_q) = (
+            since.map(|v| v.to_string()),
+            tail.map(|v| v.to_string()),
+            max_chars.map(|v| v.to_string()),
+        );
+        let resp = self
+            .http
+            .get(items_url(&self.base_url, item_id, &["comments"]))
+            .query(&[
+                ("since", since_q.as_deref()),
+                ("tail", tail_q.as_deref()),
+                ("max_chars", max_q.as_deref()),
+            ])
+            .send()
+            .await
+            .map_err(unreachable_error)?;
+        let meta = meta_from_headers(resp.headers());
+        let result = respond::<Vec<CommentDto>>(resp).await?;
+        if result.is_error == Some(true) {
+            return Ok(Err(result));
+        }
+        let Some(ContentBlock::Text(text)) = result.content.first() else {
+            return Ok(Err(result));
+        };
+        let Ok(comments) = serde_json::from_str::<Vec<CommentDto>>(&text.text) else {
+            return Ok(Err(result));
+        };
+        Ok(Ok(if meta.shaped {
+            let n = comments.len();
+            comments_value(
+                item_id,
+                &comments,
+                meta.total.unwrap_or(n),
+                meta.omitted.unwrap_or(0),
+            )
+        } else {
+            shape_comments(item_id, comments, since, tail, max_chars)
+        }))
     }
 
     /// Attaches [`Self::fetch_unscoped_advisory`]'s sentence under `field`
@@ -1842,6 +1954,8 @@ impl DocketMcp {
             return Ok(error);
         }
         let updated_after = p.updated_after.map(|v| v.to_string());
+        let fields_param = p.fields.as_ref().map(|f| f.join(","));
+        let max_chars_param = p.max_chars.map(|m| m.to_string());
         let archived = p.archived.map(|a| a.to_string());
         let limit = p.limit.map(|l| l.to_string());
         let offset = p.offset.map(|o| o.to_string());
@@ -1864,21 +1978,27 @@ impl DocketMcp {
                 ("order", p.order.as_deref()),
                 ("expand_related", expand_related.as_deref()),
                 ("updated_after", updated_after.as_deref()),
+                ("fields", fields_param.as_deref()),
+                ("max_chars", max_chars_param.as_deref()),
             ])
             .send()
             .await
             .map_err(unreachable_error)?;
-        let result = respond_paginated(resp).await?;
+        let (result, shaped) = respond_paginated(resp).await?;
         if result.is_error == Some(true) {
             return Ok(result);
         }
-        let result = enforce_updated_after(result, p.updated_after);
-        let result = shape_page(
-            result,
-            p.fields.as_deref(),
-            p.max_chars,
-            p.offset.unwrap_or(0),
-        );
+        // The server shaped the page, or (an older docket-core) this does.
+        let result = if shaped {
+            result
+        } else {
+            shape_page(
+                enforce_updated_after(result, p.updated_after),
+                p.fields.as_deref(),
+                p.max_chars,
+                p.offset.unwrap_or(0),
+            )
+        };
         let result = match (p.mine.as_deref(), p.state.as_deref(), result_total(&result)) {
             (Some(mine), Some(state), Some(total)) => {
                 match self
@@ -1931,6 +2051,14 @@ impl DocketMcp {
         let updated_after = p.updated_after.map(|v| v.to_string());
         if let Some(u) = updated_after.as_deref() {
             query_pairs.push(("updated_after", u));
+        }
+        let fields_param = p.fields.as_ref().map(|f| f.join(","));
+        if let Some(f) = fields_param.as_deref() {
+            query_pairs.push(("fields", f));
+        }
+        let max_chars_param = p.max_chars.map(|m| m.to_string());
+        if let Some(m) = max_chars_param.as_deref() {
+            query_pairs.push(("max_chars", m));
         }
         if let Some(q) = p.query.as_deref() {
             query_pairs.push(("q", q));
@@ -1989,17 +2117,20 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        let result = respond_paginated(resp).await?;
+        let (result, shaped) = respond_paginated(resp).await?;
         if result.is_error == Some(true) {
             return Ok(result);
         }
-        let result = enforce_updated_after(result, p.updated_after);
-        let result = shape_page(
-            result,
-            p.fields.as_deref(),
-            p.max_chars,
-            p.offset.unwrap_or(0),
-        );
+        let result = if shaped {
+            result
+        } else {
+            shape_page(
+                enforce_updated_after(result, p.updated_after),
+                p.fields.as_deref(),
+                p.max_chars,
+                p.offset.unwrap_or(0),
+            )
+        };
         let result = if p.report_gaps == Some(true) && p.mine.is_some() {
             match self.fetch_gap_hint().await {
                 Ok(hints) => with_gap_hint(result, hints),
@@ -2223,18 +2354,9 @@ impl DocketMcp {
         }
         // Advisory-grade: the item was read fine, so a failed thread read must
         // not turn it into an error -- the caller just does not get comments.
-        let Ok(resp) = self
-            .http
-            .get(items_url(&self.base_url, &p.item_id, &["comments"]))
-            .send()
-            .await
-        else {
+        let Ok(Ok(shaped)) = self.read_thread(&p.item_id, None, Some(n), None).await else {
             return Ok(result);
         };
-        let Ok(comments) = resp.json::<Vec<CommentDto>>().await else {
-            return Ok(result);
-        };
-        let shaped = shape_comments(&p.item_id, comments, None, Some(n), None);
         let result = with_extra_field(result, "comment_total", shaped["total"].clone());
         Ok(with_extra_field(
             result,
@@ -2418,15 +2540,19 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ListTableParams>,
     ) -> Result<CallToolResult, McpError> {
+        let limit = p.limit.unwrap_or(TABLE_DEFAULT_LIMIT).max(1).to_string();
         let resp = self
             .http
             .get(api_url(&self.base_url, &["identities"]))
+            .query(&[("q", p.q.as_deref()), ("limit", Some(limit.as_str()))])
             .send()
             .await
             .map_err(unreachable_error)?;
+        let meta = meta_from_headers(resp.headers());
         let result = respond::<Vec<IdentityCountDto>>(resp).await?;
         Ok(table_result(
             result,
+            &meta,
             "identities",
             |row: serde_json::Value| {
                 let mut row = row;
@@ -2447,15 +2573,19 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ListTableParams>,
     ) -> Result<CallToolResult, McpError> {
+        let limit = p.limit.unwrap_or(TABLE_DEFAULT_LIMIT).max(1).to_string();
         let resp = self
             .http
             .get(api_url(&self.base_url, &["topics"]))
+            .query(&[("q", p.q.as_deref()), ("limit", Some(limit.as_str()))])
             .send()
             .await
             .map_err(unreachable_error)?;
+        let meta = meta_from_headers(resp.headers());
         let result = respond::<Vec<TopicCountDto>>(resp).await?;
         Ok(table_result(
             result,
+            &meta,
             "topics",
             |row: serde_json::Value| {
                 let Ok(t) = serde_json::from_value::<TopicCountDto>(row) else {
@@ -2507,24 +2637,13 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ListCommentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self
-            .http
-            .get(items_url(&self.base_url, &p.item_id, &["comments"]))
-            .send()
-            .await
-            .map_err(unreachable_error)?;
-        let result = respond::<Vec<CommentDto>>(resp).await?;
-        if result.is_error == Some(true) {
-            return Ok(result);
+        match self
+            .read_thread(&p.item_id, p.since, p.tail, p.max_chars)
+            .await?
+        {
+            Ok(shaped) => Ok(CallToolResult::success(vec![ContentBlock::json(shaped)?])),
+            Err(error) => Ok(error),
         }
-        let Some(ContentBlock::Text(text)) = result.content.first() else {
-            return Ok(result);
-        };
-        let Ok(comments) = serde_json::from_str::<Vec<CommentDto>>(&text.text) else {
-            return Ok(result);
-        };
-        let shaped = shape_comments(&p.item_id, comments, p.since, p.tail, p.max_chars);
-        Ok(CallToolResult::success(vec![ContentBlock::json(shaped)?]))
     }
 }
 
@@ -3713,13 +3832,21 @@ mod tests {
         let rows = sample_rows(6);
         let one = serde_json::to_string(&rows[0]).unwrap().chars().count();
         // Room for two rows (plus the comma between them), not three.
-        let shaped = shape_page(page_of(&rows, 6), None, Some(2 * one + 3), 10);
+        let shaped = shape_page(page_of(&rows, 6), None, Some(2 * one + 3), 0);
         let v: serde_json::Value = serde_json::from_str(text_of(&shaped)).unwrap();
         assert_eq!(v["items"].as_array().unwrap().len(), 2);
-        assert_eq!(v["truncated"], true);
-        assert_eq!(v["omitted"], 4);
-        assert_eq!(v["next_offset"], 12, "offset 10 + 2 rows kept");
+        assert_eq!(v["omitted"], 4, "every matching row not in this answer");
+        assert_eq!(v["next_offset"], 2);
         assert_eq!(v["total"], 6, "total still counts the unpaged set");
+        assert!(v.get("truncated").is_none(), "omitted already says it");
+        // A later page: offset counts into next_offset, and rows before it are not "omitted".
+        let later = shape_page(page_of(&rows[..4], 6), None, Some(2 * one + 3), 2);
+        let v: serde_json::Value = serde_json::from_str(text_of(&later)).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            (v["omitted"].clone(), v["next_offset"].clone()),
+            (serde_json::json!(2), serde_json::json!(4))
+        );
     }
 
     #[test]
@@ -3872,8 +3999,8 @@ mod tests {
                 seen.push(row["id"].as_str().unwrap().to_string());
             }
             match v["next_offset"].as_u64() {
-                Some(n) if v["truncated"] == true => offset = n as usize,
-                _ => break,
+                Some(n) => offset = n as usize,
+                None => break,
             }
         }
         assert_eq!(seen.len(), 5);
@@ -4185,6 +4312,130 @@ mod tests {
         assert_eq!(v["identities"].as_array().unwrap().len(), 1);
         assert_eq!(v["identities"][0]["identity"], "acme/filer");
         assert!(v["identities"][0].get("aliases").is_none());
+    }
+
+    #[test]
+    fn meta_from_headers_tells_a_shaping_server_from_an_older_one() {
+        let mut h = reqwest::header::HeaderMap::new();
+        assert_eq!(
+            meta_from_headers(&h),
+            ReadMeta::default(),
+            "no marker: not shaped"
+        );
+        h.insert("X-Shaped", "1".parse().unwrap());
+        h.insert("X-Total-Count", "9".parse().unwrap());
+        h.insert("X-Omitted", "7".parse().unwrap());
+        h.insert("X-Next-Offset", "2".parse().unwrap());
+        assert_eq!(
+            meta_from_headers(&h),
+            ReadMeta {
+                shaped: true,
+                total: Some(9),
+                omitted: Some(7),
+                next_offset: Some(2)
+            }
+        );
+    }
+
+    #[test]
+    fn table_result_trusts_a_shaping_server_and_narrows_for_an_older_one_itself() {
+        let rows: Vec<serde_json::Value> = (0..3)
+            .map(|i| serde_json::json!({ "topic": format!("iyulab/repo-{i}"), "count": i, "aliases": [] }))
+            .collect();
+        let raw = || CallToolResult::success(vec![ContentBlock::json(&rows).unwrap()]);
+        let keep = |r: serde_json::Value| r;
+
+        // The server already narrowed to 3 of 10: pass its rows and counts through.
+        let served = ReadMeta {
+            shaped: true,
+            total: Some(10),
+            omitted: Some(7),
+            next_offset: None,
+        };
+        let v: serde_json::Value = serde_json::from_str(text_of(&table_result(
+            raw(),
+            &served,
+            "topics",
+            keep,
+            Some("zzz"),
+            Some(1),
+        )))
+        .unwrap();
+        assert_eq!(
+            (
+                v["topics"].as_array().unwrap().len(),
+                v["total"].clone(),
+                v["omitted"].clone()
+            ),
+            (3, serde_json::json!(10), serde_json::json!(7))
+        );
+
+        // An older server returned everything: narrow here.
+        let older = ReadMeta::default();
+        let v: serde_json::Value = serde_json::from_str(text_of(&table_result(
+            raw(),
+            &older,
+            "topics",
+            keep,
+            Some("repo-1"),
+            None,
+        )))
+        .unwrap();
+        assert_eq!(
+            (v["topics"].as_array().unwrap().len(), v["total"].clone()),
+            (1, serde_json::json!(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn list_items_reports_the_rows_a_limit_held_back_and_where_to_continue() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-omitted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(18996, &dir.join("omitted.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        for i in 0..5 {
+            server
+                .create_item(Parameters(new_item(
+                    "iyulab/docket",
+                    &format!("row {i}"),
+                    None,
+                )))
+                .await
+                .unwrap();
+        }
+        let base = || ListItemsParams {
+            mine: None,
+            ..list_params("")
+        };
+        let page = server
+            .list_items(Parameters(ListItemsParams {
+                limit: Some(2),
+                ..base()
+            }))
+            .await
+            .unwrap();
+        let v = json_value(&page);
+        assert_eq!(v["total"], 5);
+        assert_eq!(
+            (v["omitted"].clone(), v["next_offset"].clone()),
+            (serde_json::json!(3), serde_json::json!(2))
+        );
+        let last = server
+            .list_items(Parameters(ListItemsParams {
+                limit: Some(2),
+                offset: Some(4),
+                ..base()
+            }))
+            .await
+            .unwrap();
+        assert!(
+            json_value(&last).get("omitted").is_none(),
+            "nothing left to continue to"
+        );
     }
 
     #[tokio::test]
