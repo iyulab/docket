@@ -607,6 +607,21 @@ struct TagCountDto {
     count: i64,
 }
 
+/// Input of `list_topics` / `list_identities`: both are whole-table listings
+/// that grow with the server, so both can be narrowed.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListTableParams {
+    /// Case-insensitive substring; keeps only rows whose name (or a declared
+    /// alias of it) contains it, e.g. `ironhive`.
+    #[serde(default)]
+    q: Option<String>,
+    /// Max rows returned (default 50). `total` counts every match and
+    /// `omitted` says how many the limit held back.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 /// One row of `list_identities`. Mirrors `docket-core`'s `IdentityCount`
 /// (ADR-0025) — every count field is defaulted so an older `docket-core`
 /// that predates one of them still deserializes rather than failing the
@@ -641,6 +656,10 @@ struct TopicCountDto {
     /// Same defaulting reason as `aliases`.
     #[serde(default)]
     owned_by: Vec<String>,
+    /// The part of `owned_by` registered for the topic itself rather than
+    /// through a shorter prefix. Defaulted for the same reason as `aliases`.
+    #[serde(default)]
+    owned_by_exact: Vec<String>,
     /// Open, unclaimed items in this topic — distinct from `count`, which
     /// is every non-archived item regardless of state. Same defaulting
     /// reason as `aliases`.
@@ -960,6 +979,80 @@ fn shape_comments(
         out["older"] = serde_json::json!(older);
     }
     out
+}
+
+/// Rows of a whole-table listing narrowed by `q` and `limit`.
+/// Returns the kept rows, how many rows matched, and how many `limit` held back.
+fn narrow_table(
+    rows: Vec<serde_json::Value>,
+    q: Option<&str>,
+    limit: Option<usize>,
+) -> (Vec<serde_json::Value>, usize, usize) {
+    let needle = q
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(str::to_lowercase);
+    let matches = |row: &serde_json::Value| -> bool {
+        let Some(needle) = needle.as_deref() else {
+            return true;
+        };
+        // An identity row carries a numeric `topic` count, so only a string
+        // counts as the name.
+        let name = ["topic", "identity"]
+            .iter()
+            .find_map(|k| row.get(*k).and_then(|v| v.as_str()))
+            .unwrap_or_default();
+        let aliases = row.get("aliases").and_then(|v| v.as_array());
+        std::iter::once(name)
+            .chain(aliases.into_iter().flatten().filter_map(|a| a.as_str()))
+            .any(|s| s.to_lowercase().contains(needle))
+    };
+    let matched: Vec<serde_json::Value> = rows.into_iter().filter(|r| matches(r)).collect();
+    let total = matched.len();
+    // A limit of 0 would hand back nothing and no way forward; one row is the floor.
+    let cap = limit.unwrap_or(TABLE_DEFAULT_LIMIT).max(1);
+    let kept: Vec<serde_json::Value> = matched.into_iter().take(cap).collect();
+    let omitted = total - kept.len();
+    (kept, total, omitted)
+}
+
+/// Default row cap of `list_topics` / `list_identities`.
+const TABLE_DEFAULT_LIMIT: usize = 50;
+
+/// Re-wraps a successful bare-array listing as `{total, <name>, omitted?}`
+/// after trimming each row with `trim` and narrowing with `q` / `limit`.
+/// A result it does not recognise comes back untouched.
+fn table_result(
+    result: CallToolResult,
+    name: &str,
+    trim: impl Fn(serde_json::Value) -> serde_json::Value,
+    q: Option<&str>,
+    limit: Option<usize>,
+) -> CallToolResult {
+    if result.is_error == Some(true) {
+        return result;
+    }
+    let Some(ContentBlock::Text(text)) = result.content.first() else {
+        return result;
+    };
+    let Ok(serde_json::Value::Array(rows)) = serde_json::from_str::<serde_json::Value>(&text.text)
+    else {
+        return result;
+    };
+    let rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(trim)
+        .filter(|r| !r.is_null())
+        .collect();
+    let (kept, total, omitted) = narrow_table(rows, q, limit);
+    let mut out = serde_json::json!({ "total": total, name: kept });
+    if omitted > 0 {
+        out["omitted"] = serde_json::json!(omitted);
+    }
+    match ContentBlock::json(out) {
+        Ok(block) => CallToolResult::success(vec![block]),
+        Err(_) => result,
+    }
 }
 
 /// What a write's result keeps of the item it changed: where the item stands
@@ -2207,27 +2300,68 @@ impl DocketMcp {
     #[tool(
         description = "List every identity in use across the whole identity class — requester, assignee, topic, and registered worker id, which docket treats as one namespace (two spellings that differ only in case, or that a declared alias links, are one row). Each row carries how many non-archived items use it in each role, plus whether a worker is registered under it. This is the counterpart of list_topics for parties: reading it is how you spot one party split across two spellings (`filer` alongside `acme/filer`), which no per-field query reports — a drifted spelling silently returns fewer items and nothing says so. Fix a single item with set_item_requester/set_item_assignee/set_item_topic; a recurring spelling needs a declared alias, which is an owner decision made outside MCP. See also list_items/search_items' report_drift flag, which asks the same question about one identity from inside the query that came up short"
     )]
-    async fn list_identities(&self) -> Result<CallToolResult, McpError> {
+    async fn list_identities(
+        &self,
+        Parameters(p): Parameters<ListTableParams>,
+    ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
             .get(api_url(&self.base_url, &["identities"]))
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<Vec<IdentityCountDto>>(resp).await
+        let result = respond::<Vec<IdentityCountDto>>(resp).await?;
+        Ok(table_result(
+            result,
+            "identities",
+            |row: serde_json::Value| {
+                let mut row = row;
+                if row["aliases"].as_array().is_some_and(|a| a.is_empty()) {
+                    row.as_object_mut().map(|o| o.remove("aliases"));
+                }
+                row
+            },
+            p.q.as_deref(),
+            p.limit,
+        ))
     }
 
     #[tool(
         description = "List existing topics and how many non-archived items sit under each, most-populated first — call this before list_items/search_items to discover topic names instead of guessing"
     )]
-    async fn list_topics(&self) -> Result<CallToolResult, McpError> {
+    async fn list_topics(
+        &self,
+        Parameters(p): Parameters<ListTableParams>,
+    ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
             .get(api_url(&self.base_url, &["topics"]))
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<Vec<TopicCountDto>>(resp).await
+        let result = respond::<Vec<TopicCountDto>>(resp).await?;
+        Ok(table_result(
+            result,
+            "topics",
+            |row: serde_json::Value| {
+                let Ok(t) = serde_json::from_value::<TopicCountDto>(row) else {
+                    return serde_json::Value::Null;
+                };
+                let mut out = serde_json::json!({
+                    "topic": t.topic, "count": t.count,
+                    "open_unclaimed": t.open_unclaimed, "owned_by": t.owned_by,
+                });
+                if !t.aliases.is_empty() {
+                    out["aliases"] = serde_json::json!(t.aliases);
+                }
+                if !t.owned_by.is_empty() && t.owned_by_exact.is_empty() {
+                    out["prefix_only"] = serde_json::json!(true);
+                }
+                out
+            },
+            p.q.as_deref(),
+            p.limit,
+        ))
     }
 
     #[tool(
@@ -3777,6 +3911,120 @@ mod tests {
         assert!(v.get("comments").is_none() && v.get("comment_total").is_none());
     }
 
+    fn table_rows(n: usize) -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| serde_json::json!({ "topic": format!("iyulab/repo-{i}"), "aliases": [format!("short-{i}")] }))
+            .collect()
+    }
+
+    #[test]
+    fn narrow_table_matches_a_substring_of_the_name_or_an_alias_ignoring_case() {
+        let mut rows = table_rows(3);
+        rows.push(serde_json::json!({ "topic": "acme/IronHive", "aliases": [] }));
+        let (kept, total, omitted) = narrow_table(rows.clone(), Some("ironhive"), None);
+        assert_eq!((kept.len(), total, omitted), (1, 1, 0));
+        let (kept, total, _) = narrow_table(rows, Some("SHORT-2"), None);
+        assert_eq!((kept.len(), total), (1, 1), "an alias is searchable too");
+    }
+
+    #[test]
+    fn narrow_table_caps_at_the_limit_by_default_and_counts_what_it_held_back() {
+        let (kept, total, omitted) = narrow_table(table_rows(120), None, None);
+        assert_eq!(kept.len(), TABLE_DEFAULT_LIMIT);
+        assert_eq!((total, omitted), (120, 70));
+        let (kept, total, omitted) = narrow_table(table_rows(120), None, Some(7));
+        assert_eq!((kept.len(), total, omitted), (7, 120, 113));
+        let (kept, _, omitted) = narrow_table(table_rows(5), None, Some(0));
+        assert_eq!(
+            (kept.len(), omitted),
+            (1, 4),
+            "limit 0 still returns a row rather than stalling"
+        );
+    }
+
+    #[test]
+    fn narrow_table_keeps_the_original_order() {
+        let (kept, _, _) = narrow_table(table_rows(10), Some("repo"), Some(3));
+        let names: Vec<&str> = kept.iter().map(|r| r["topic"].as_str().unwrap()).collect();
+        assert_eq!(names, ["iyulab/repo-0", "iyulab/repo-1", "iyulab/repo-2"]);
+    }
+
+    #[tokio::test]
+    async fn list_topics_and_list_identities_narrow_and_report_prefix_only_coverage() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-tables-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(18995, &dir.join("tables.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        // `bot` is registered for the broad prefix `iyulab` only, so it reaches
+        // iyulab/docket without anyone being set up for that topic itself.
+        server
+            .register_worker(Parameters(RegisterWorkerParams {
+                id: Some("bot".to_string()),
+                topics: vec!["iyulab".to_string()],
+            }))
+            .await
+            .unwrap();
+        for topic in ["iyulab/docket", "acme/widget"] {
+            server
+                .create_item(Parameters(new_item(topic, "t", Some("acme/filer"))))
+                .await
+                .unwrap();
+        }
+        let all = server
+            .list_topics(Parameters(ListTableParams::default()))
+            .await
+            .unwrap();
+        let v = json_value(&all);
+        assert_eq!(v["total"], 2);
+        let docket = v["topics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["topic"] == "iyulab/docket")
+            .unwrap();
+        assert_eq!(
+            docket["prefix_only"], true,
+            "covered only through a broader prefix"
+        );
+        assert!(
+            docket.get("aliases").is_none(),
+            "an empty alias list is not worth the characters"
+        );
+        let widget = v["topics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["topic"] == "acme/widget")
+            .unwrap();
+        assert!(widget.get("prefix_only").is_none());
+        assert_eq!(widget["owned_by"], serde_json::json!([]));
+
+        let one = server
+            .list_topics(Parameters(ListTableParams {
+                q: Some("WIDGET".to_string()),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(json_value(&one)["topics"].as_array().unwrap().len(), 1);
+
+        let ids = server
+            .list_identities(Parameters(ListTableParams {
+                q: Some("filer".to_string()),
+                limit: Some(1),
+            }))
+            .await
+            .unwrap();
+        let v = json_value(&ids);
+        assert_eq!(v["identities"].as_array().unwrap().len(), 1);
+        assert_eq!(v["identities"][0]["identity"], "acme/filer");
+        assert!(v["identities"][0].get("aliases").is_none());
+    }
+
     #[tokio::test]
     async fn archive_item_hides_from_default_list_items_tool() {
         let dir =
@@ -3894,10 +4142,13 @@ mod tests {
                 .unwrap();
         }
 
-        let topics = server.list_topics().await.unwrap();
+        let topics = server
+            .list_topics(Parameters(ListTableParams::default()))
+            .await
+            .unwrap();
         assert_ne!(topics.is_error, Some(true));
         let topics_value = json_value(&topics);
-        let list = topics_value.as_array().unwrap();
+        let list = topics_value["topics"].as_array().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["topic"], "iyulab/docket");
         assert_eq!(list[0]["count"], 2);
@@ -4051,9 +4302,12 @@ mod tests {
             .await
             .unwrap();
 
-        let topics = server.list_topics().await.unwrap();
+        let topics = server
+            .list_topics(Parameters(ListTableParams::default()))
+            .await
+            .unwrap();
         let value = json_value(&topics);
-        let list = value.as_array().unwrap();
+        let list = value["topics"].as_array().unwrap();
         let covered = list.iter().find(|t| t["topic"] == "iyulab/docket").unwrap();
         assert_eq!(covered["owned_by"], serde_json::json!(["iyulab/bot"]));
         let orphan = list.iter().find(|t| t["topic"] == "acme/lonely").unwrap();
@@ -4365,9 +4619,12 @@ mod tests {
             .await
             .unwrap();
 
-        let result = server.list_identities().await.unwrap();
+        let result = server
+            .list_identities(Parameters(ListTableParams::default()))
+            .await
+            .unwrap();
         let value = json_value(&result);
-        let row = value
+        let row = value["identities"]
             .as_array()
             .unwrap()
             .iter()
