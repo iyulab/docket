@@ -212,7 +212,7 @@ struct ListItemsParams {
     // the tail via `offset`. See ADR-0020.
     #[serde(default)]
     order: Option<String>,
-    /// true adds each row's related:<id> items.
+    /// true adds each row's `related:<id>` items.
     // Long form, kept for maintainers (the tool schema carries only the line above):
     // When `true`, each returned item also resolves its own `related:<id>`
     // tags (both directions) into a `related` field — the same expansion
@@ -361,7 +361,7 @@ struct SearchItemsParams {
     // `list_items`'s field of the same name. See ADR-0020.
     #[serde(default)]
     order: Option<String>,
-    /// true adds each row's related:<id> items.
+    /// true adds each row's `related:<id>` items.
     // Long form, kept for maintainers (the tool schema carries only the line above):
     // Same semantics as `list_items`'s field of the same name — resolves
     // each returned item's `related:<id>` tags into a `related` field,
