@@ -926,19 +926,16 @@ impl Store {
         // The participation leg: an item the caller has commented on keeps
         // reaching it, under whatever spelling it commented as. Computed once
         // for the whole call, not per scanned event.
-        // The moment it first spoke on each item bounds it: events from before
-        // that were not something it took part in.
+        // The first comment event it wrote on each item bounds it: events from
+        // before that were not something it took part in. Bounded by event
+        // `seq`, not by time -- filing an item and the first comment on it can
+        // share a millisecond, and `seq` still orders them.
         let participated: std::collections::HashMap<String, i64> = {
             let mut sql = String::from(
-                "SELECT item_id, MIN(created_at) FROM item_comments WHERE item_id IS NOT NULL",
+                "SELECT item_id, MIN(seq) FROM item_events WHERE item_id IS NOT NULL AND kind = 'comment'",
             );
             let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            push_identity_group_filter(
-                &mut sql,
-                &mut args,
-                "author",
-                &aliases.group_of(for_worker),
-            );
+            push_identity_group_filter(&mut sql, &mut args, "actor", &aliases.group_of(for_worker));
             sql.push_str(" GROUP BY item_id");
             let mut stmt = conn.prepare(&sql)?;
             let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
@@ -991,7 +988,7 @@ impl Store {
             let is_participant = item_id
                 .as_deref()
                 .and_then(|id| participated.get(id))
-                .is_some_and(|first| created_at >= *first);
+                .is_some_and(|first| seq >= *first);
 
             if is_stakeholder || is_in_scope || is_participant {
                 matched.push(Event {
@@ -7401,5 +7398,31 @@ mod tests {
         drop(Store::open(db_path.to_str().unwrap()).unwrap());
         assert_eq!(std::fs::metadata(&backup).unwrap().len(), before);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_participation_bridge_does_not_depend_on_the_clock() {
+        // Filing an item and the first comment on it can land in one millisecond on a
+        // fast machine; the events before the comment must stay out regardless.
+        let store = open_test_store();
+        store
+            .register_worker("acme/commenter", &["somewhere/else".to_string()])
+            .unwrap();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        store
+            .add_comment(&item.id, "acme/commenter", "mine")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE item_events SET created_at = 1000", [])
+                .unwrap();
+            conn.execute("UPDATE item_comments SET created_at = 1000", [])
+                .unwrap();
+        }
+        let (events, _) = store.list_events("acme/commenter", 0, 50).unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["comment"], "only what the commenter took part in");
     }
 }
