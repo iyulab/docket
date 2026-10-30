@@ -153,7 +153,8 @@ struct ListItemsParams {
     #[serde(default)]
     topic_scope: Option<String>,
     /// A worker id — the one-shot "what should I be looking at" filter:
-    /// matches items this worker is the `assignee` of, OR items this worker
+    /// matches items this worker is the `assignee` of (not yet closed -- pass `state=closed` to include
+    /// closed ones), OR items this worker
     /// filed (`requester`) that are now `resolved` and waiting on *its*
     /// decision — approve it, or answer what the assignee asked and hand it
     /// back with `reject_item` (ADR-0010's 2026-09-08 update) — OR `open`

@@ -576,10 +576,15 @@ async fn list_items(
                 Err(StoreError::NotFound) => Vec::new(),
                 Err(e) => return Err(e.into()),
             };
+            // `mine` is the inbox, not the history: a closed item needs nothing
+            // from the worker, and keeping it here made every poll re-read all the
+            // work ever finished. Asking for `state=closed` by name still gets it.
+            let closed_asked = state == Some(ItemState::Closed);
             items
                 .into_iter()
                 .filter(|item| {
-                    identity_eq_opt_with(&aliases, item.assignee.as_deref(), &worker_id)
+                    (identity_eq_opt_with(&aliases, item.assignee.as_deref(), &worker_id)
+                        && (item.state != ItemState::Closed || closed_asked))
                         || (identity_eq_opt_with(&aliases, item.requester.as_deref(), &worker_id)
                             && item.state == ItemState::Resolved)
                         || (item.state == ItemState::Open
@@ -1891,6 +1896,82 @@ mod tests {
 
         let items = get_items(&store, "/items?topic_scope=acme/scout").await;
         assert_eq!(items.len(), 1);
+    }
+
+    /// `mine` answers "what should I be looking at". A closed item the worker once
+    /// held is finished business, and it used to stay in `mine` forever -- most
+    /// of what an agent re-read on every poll. It is still one explicit
+    /// `state=closed` away for the caller who wants the history.
+    #[tokio::test]
+    async fn mine_leaves_out_closed_items_unless_closed_is_asked_for() {
+        let app = test_app();
+        let post = |uri: String, body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                let resp = app.oneshot(json_request("POST", &uri, body)).await.unwrap();
+                json_body(resp).await
+            }
+        };
+        let mut ids = std::collections::HashMap::new();
+        for (name, finish) in [("done-work", true), ("live-work", false)] {
+            let item = post(
+                "/items".to_string(),
+                serde_json::json!({"topic": "iyulab/docket", "title": name, "requester": "r1"}),
+            )
+            .await;
+            let id = item["id"].as_str().unwrap().to_string();
+            post(
+                format!("/items/{id}/claim"),
+                serde_json::json!({"worker_id": "w1"}),
+            )
+            .await;
+            if finish {
+                post(
+                    format!("/items/{id}/submit"),
+                    serde_json::json!({"worker_id": "w1"}),
+                )
+                .await;
+                post(
+                    format!("/items/{id}/approve"),
+                    serde_json::json!({"author": "r1"}),
+                )
+                .await;
+            }
+            ids.insert(name, id);
+        }
+
+        let titles = |uri: String| {
+            let app = app.clone();
+            async move {
+                let resp = app
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                json_body(resp)
+                    .await
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i["title"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(titles("/items?mine=w1".to_string()).await, ["live-work"]);
+        // Asking for closed by name still shows it (the filters AND, as before).
+        assert_eq!(
+            titles("/items?mine=w1&state=closed".to_string()).await,
+            ["done-work"]
+        );
+        // The plain assignee filter is a lookup, not an inbox: closed stays visible.
+        assert_eq!(titles("/items?assignee=w1".to_string()).await.len(), 2);
+        // Reopening puts it back in front of the worker.
+        post(
+            format!("/items/{}/reopen", ids["done-work"]),
+            serde_json::json!({"author": "r1", "reason": "again"}),
+        )
+        .await;
+        assert_eq!(titles("/items?mine=w1".to_string()).await.len(), 2);
     }
 
     #[tokio::test]
