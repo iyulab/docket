@@ -107,6 +107,14 @@ struct CreateItemParams {
     /// caller identity for this item.
     #[serde(default)]
     requester: Option<String>,
+    /// A channel topic to tell: one line naming this item is also written there as a topic comment.
+    /// Nothing is sent unless this is given.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The adapter's half of ADR-0028's item-to-channel link. The core never links an item to a
+    // channel by itself; this writes one ordinary topic comment after the item exists. Not sent to
+    // the core -- it is not an item field.
+    #[serde(default, skip_serializing)]
+    cc: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1242,6 +1250,12 @@ fn slim_topic_comment(c: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
+/// Who a `cc` line is written as: the item's requester, else this session's worker. `None` when
+/// neither exists -- a comment needs an author, and the line is not worth inventing one for.
+fn cc_author(requester: Option<&str>, worker_id: Option<String>) -> Option<String> {
+    requester.map(str::to_string).or(worker_id)
+}
+
 /// Why a comment call named the wrong number of owners.
 const ONE_OWNER: &str = "give exactly one of item_id or topic";
 
@@ -1575,7 +1589,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias). The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
+        description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias). Pass `cc` (a channel topic) to also tell that channel with one line; off otherwise. The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
     )]
     async fn create_item(
         &self,
@@ -1607,12 +1621,62 @@ impl DocketMcp {
         let result = self
             .with_unscoped_advisory(result, &p.topic, "topic", "topic_spelling_advisory")
             .await;
+        let result = self.tell_channel(result, &p).await;
         let Some(requester) = p.requester.as_deref() else {
             return Ok(result);
         };
         Ok(self
             .with_unscoped_advisory(result, requester, "requester", "requester_advisory")
             .await)
+    }
+
+    /// The `cc` of `create_item` (ADR-0028): writes one topic comment naming the new item in the
+    /// channel the caller asked to tell. Off unless `cc` is given. The item already exists, so a
+    /// failure here is an advisory (`cc_advisory`), never a failed create.
+    async fn tell_channel(&self, result: CallToolResult, p: &CreateItemParams) -> CallToolResult {
+        let Some(channel) = p.cc.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
+            return result;
+        };
+        let Some(ContentBlock::Text(text)) = result.content.first() else {
+            return result;
+        };
+        let seq = serde_json::from_str::<serde_json::Value>(&text.text)
+            .ok()
+            .and_then(|v| v["seq"].as_i64());
+        let Some(author) = cc_author(p.requester.as_deref(), docket_worker_id()) else {
+            return with_extra_field(
+                result,
+                "cc_advisory",
+                "cc was not sent: no requester and no DOCKET_WORKER_ID to write it as".into(),
+            );
+        };
+        let line = match seq {
+            Some(seq) => format!("new item #{seq} in {}: {}", p.topic, p.title),
+            None => format!("new item in {}: {}", p.topic, p.title),
+        };
+        let body = serde_json::json!({ "topic": channel, "author": author, "body": line });
+        let sent = match self
+            .http
+            .post(api_url(&self.base_url, &["topic-comments"]))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await.ok(),
+            _ => None,
+        };
+        match sent {
+            Some(comment) => with_extra_field(
+                result,
+                "cc",
+                serde_json::json!({ "topic": channel, "seq": comment["seq"] }),
+            ),
+            None => with_extra_field(
+                result,
+                "cc_advisory",
+                format!("cc was not sent to {channel}; the item itself was created").into(),
+            ),
+        }
     }
 
     /// Reads an item's thread. The server applies `since` / `tail` / `max_chars` and reports the rest in
@@ -3076,6 +3140,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/req".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3153,6 +3218,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3255,6 +3321,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("requester-1".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3344,6 +3411,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3379,6 +3447,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3417,6 +3486,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3458,6 +3528,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap_err();
@@ -3564,6 +3635,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3654,6 +3726,7 @@ mod tests {
                 body: None,
                 tags: vec!["severity:medium".to_string()],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3705,6 +3778,7 @@ mod tests {
                 body: None,
                 tags: vec!["severity:medium".to_string()],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3715,6 +3789,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3768,6 +3843,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3828,6 +3904,7 @@ mod tests {
                 body: Some(long_body.clone()),
                 tags: vec!["kind:feature-request".to_string()],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -3950,6 +4027,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4641,6 +4719,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4734,6 +4813,7 @@ mod tests {
                     body: None,
                     tags: vec![],
                     requester: None,
+                    cc: None,
                 }))
                 .await
                 .unwrap();
@@ -4779,6 +4859,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4790,6 +4871,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4841,6 +4923,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4885,6 +4968,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4895,6 +4979,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4955,6 +5040,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -4967,6 +5053,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5063,6 +5150,7 @@ mod tests {
             body: None,
             tags: vec![],
             requester: requester.map(str::to_string),
+            cc: None,
         }
     }
 
@@ -5212,6 +5300,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/filer".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5258,6 +5347,7 @@ mod tests {
                     body: None,
                     tags: vec![],
                     requester: Some(requester.to_string()),
+                    cc: None,
                 }))
                 .await
                 .unwrap();
@@ -5356,6 +5446,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5493,6 +5584,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/filer".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5504,6 +5596,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("filer".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5544,6 +5637,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/filer".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5554,6 +5648,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5601,6 +5696,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("filer".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5642,6 +5738,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/bot".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5652,6 +5749,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/bot".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5711,6 +5809,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5730,6 +5829,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5768,6 +5868,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5781,6 +5882,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5816,6 +5918,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5826,6 +5929,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5858,6 +5962,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/booster".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5868,6 +5973,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("other-org/booster".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -5899,6 +6005,7 @@ mod tests {
                     body: None,
                     tags: vec![],
                     requester: Some(requester.to_string()),
+                    cc: None,
                 }))
                 .await
                 .unwrap();
@@ -5953,6 +6060,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6006,6 +6114,7 @@ mod tests {
                     body: None,
                     tags: vec![],
                     requester: None,
+                    cc: None,
                 }))
                 .await
                 .unwrap();
@@ -6057,6 +6166,7 @@ mod tests {
                 body: Some("long body text".to_string()),
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6109,6 +6219,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6223,6 +6334,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6327,6 +6439,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6432,6 +6545,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/filer".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6608,6 +6722,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6627,6 +6742,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6714,6 +6830,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: Some("acme/filer".to_string()),
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6819,6 +6936,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6831,6 +6949,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6919,6 +7038,7 @@ mod tests {
                 body: Some("full body".to_string()),
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -6989,6 +7109,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -7001,6 +7122,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -7062,6 +7184,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -7074,6 +7197,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -7175,6 +7299,7 @@ mod tests {
                 body: None,
                 tags: vec![],
                 requester: None,
+                cc: None,
             }))
             .await
             .unwrap();
@@ -7370,5 +7495,96 @@ mod tests {
             .collect();
         assert_eq!(bodies, ["n1", "n2"]);
         assert_eq!(v["comments"][0]["seq"], seqs[1]);
+    }
+
+    // ---- ADR-0028: telling a channel about a new item (`cc`) ----
+
+    #[tokio::test]
+    async fn cc_tells_a_channel_with_one_line_and_is_off_unless_given() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-cc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(19122, &dir.join("cc.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        let file = |cc: Option<&str>, title: &str| {
+            let server = &server;
+            let params = CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: title.to_string(),
+                body: None,
+                tags: vec![],
+                requester: Some("acme/alice".to_string()),
+                cc: cc.map(str::to_string),
+            };
+            async move { server.create_item(Parameters(params)).await.unwrap() }
+        };
+        let thread = || async {
+            let read = server
+                .list_comments(Parameters(ListCommentsParams {
+                    item_id: None,
+                    topic: Some("channel/agents".to_string()),
+                    after: None,
+                    since: None,
+                    tail: None,
+                    max_chars: None,
+                }))
+                .await
+                .unwrap();
+            if read.is_error == Some(true) {
+                return Vec::new();
+            }
+            json_value(&read)["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["body"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // No `cc`: the channel hears nothing.
+        let quiet = file(None, "stays quiet").await;
+        assert!(json_value(&quiet).get("cc").is_none());
+        assert!(thread().await.is_empty());
+
+        // `cc`: one line in the channel, and the result says where it went.
+        let told = file(Some("channel/agents"), "needs an opinion").await;
+        let v = json_value(&told);
+        assert_eq!(v["cc"]["topic"], "channel/agents");
+        assert!(v["cc"]["seq"].as_i64().unwrap() > 0);
+        assert!(v.get("cc_advisory").is_none());
+        let seq = v["seq"].as_i64().unwrap();
+        assert_eq!(
+            thread().await,
+            [format!(
+                "new item #{seq} in iyulab/docket: needs an opinion"
+            )]
+        );
+
+        // A blank `cc` is not a channel.
+        let blank = file(Some("   "), "blank cc").await;
+        assert!(json_value(&blank).get("cc").is_none());
+        assert_eq!(thread().await.len(), 1);
+
+        // The item is created either way, and the core was never sent `cc` as an item field.
+        let listed = server
+            .list_items(Parameters(list_params("")))
+            .await
+            .unwrap();
+        assert_eq!(json_value(&listed)["total"], 3);
+    }
+
+    #[test]
+    fn a_cc_is_written_as_the_requester_or_else_the_session_worker() {
+        assert_eq!(
+            cc_author(Some("acme/alice"), Some("acme/bot".to_string())).as_deref(),
+            Some("acme/alice")
+        );
+        assert_eq!(
+            cc_author(None, Some("acme/bot".to_string())).as_deref(),
+            Some("acme/bot")
+        );
+        assert_eq!(cc_author(None, None), None, "no one to write it as");
     }
 }
