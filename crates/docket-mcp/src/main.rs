@@ -197,6 +197,21 @@ struct ListItemsParams {
     /// item).
     #[serde(default)]
     expand_related: Option<bool>,
+    /// Epoch milliseconds. Only items touched after this instant come back --
+    /// a delta cursor: pass the newest `updated_at` you already hold and get
+    /// just what moved. Comments, transitions and tag changes count as touches.
+    #[serde(default)]
+    updated_after: Option<i64>,
+    /// Item fields to return, e.g. `["title","state","turn"]`; `id` is always
+    /// included. Omit for every field. Trims what you must read per row.
+    #[serde(default)]
+    fields: Option<Vec<String>>,
+    /// Stop adding rows once the JSON of the returned items would exceed this
+    /// many characters (at least one row is always returned). When rows were
+    /// held back the result says `truncated`, `omitted` and the `next_offset`
+    /// to continue from.
+    #[serde(default)]
+    max_chars: Option<usize>,
     /// Requires `mine` — when `true`, adds an `unregistered_open` field to
     /// the result: open, unclaimed item counts by topic, for topics whose
     /// `owned_by` (see `list_topics`) is **empty** — no worker at all is
@@ -296,6 +311,21 @@ struct SearchItemsParams {
     /// bounded by the returned page.
     #[serde(default)]
     expand_related: Option<bool>,
+    /// Epoch milliseconds. Only items touched after this instant come back --
+    /// a delta cursor: pass the newest `updated_at` you already hold and get
+    /// just what moved. Comments, transitions and tag changes count as touches.
+    #[serde(default)]
+    updated_after: Option<i64>,
+    /// Item fields to return, e.g. `["title","state","turn"]`; `id` is always
+    /// included. Omit for every field. Trims what you must read per row.
+    #[serde(default)]
+    fields: Option<Vec<String>>,
+    /// Stop adding rows once the JSON of the returned items would exceed this
+    /// many characters (at least one row is always returned). When rows were
+    /// held back the result says `truncated`, `omitted` and the `next_offset`
+    /// to continue from.
+    #[serde(default)]
+    max_chars: Option<usize>,
     /// Same semantics as `list_items`'s field of the same name — requires
     /// `mine`, adds the `unregistered_open` and `prefix_only_open`
     /// registration-gap hints.
@@ -751,6 +781,110 @@ fn docket_worker_id() -> Option<String> {
 fn with_author(mut body: serde_json::Value, author: String) -> serde_json::Value {
     body["author"] = serde_json::Value::String(author);
     body
+}
+
+/// Item keys a caller may name in `fields`.
+const ITEM_FIELDS: &[&str] = &[
+    "id",
+    "seq",
+    "topic",
+    "title",
+    "body",
+    "state",
+    "resolution",
+    "requester",
+    "assignee",
+    "turn",
+    "open",
+    "archived_at",
+    "tags",
+    "created_at",
+    "updated_at",
+    "state_since",
+    "related",
+];
+
+/// Rejects a `fields` entry that is not an item key, naming the valid ones --
+/// a typo would otherwise silently return rows with the column missing.
+fn check_fields(fields: Option<&[String]>) -> Result<(), CallToolResult> {
+    let Some(fields) = fields else {
+        return Ok(());
+    };
+    match fields.iter().find(|f| !ITEM_FIELDS.contains(&f.as_str())) {
+        None => Ok(()),
+        Some(bad) => Err(CallToolResult::error(vec![ContentBlock::text(format!(
+            "unknown field `{bad}`; valid fields: {}",
+            ITEM_FIELDS.join(", ")
+        ))])),
+    }
+}
+
+/// Narrows a `{items, total}` page to what the caller asked for: only the
+/// requested `fields` per row, then as many rows as fit in `max_chars`.
+fn shape_page(
+    result: CallToolResult,
+    fields: Option<&[String]>,
+    max_chars: Option<usize>,
+    offset: usize,
+) -> CallToolResult {
+    if result.is_error == Some(true) || (fields.is_none() && max_chars.is_none()) {
+        return result;
+    }
+    let Some(ContentBlock::Text(text)) = result.content.first() else {
+        return result;
+    };
+    let Ok(serde_json::Value::Object(mut page)) =
+        serde_json::from_str::<serde_json::Value>(&text.text)
+    else {
+        return result;
+    };
+    let Some(serde_json::Value::Array(rows)) = page.remove("items") else {
+        return result;
+    };
+    let rows: Vec<serde_json::Value> = match fields {
+        None => rows,
+        Some(keep) => rows
+            .into_iter()
+            .map(|row| match row {
+                serde_json::Value::Object(map) => serde_json::Value::Object(
+                    map.into_iter()
+                        .filter(|(k, _)| k == "id" || keep.iter().any(|f| f == k))
+                        .collect(),
+                ),
+                other => other,
+            })
+            .collect(),
+    };
+    // A row is added while the running JSON length stays within the budget;
+    // the first row always goes in, so a budget smaller than one row cannot
+    // leave the caller with an empty page and no way forward.
+    let mut kept = rows.len();
+    if let Some(budget) = max_chars {
+        let mut used = 0usize;
+        kept = 0;
+        for row in &rows {
+            let cost = row.to_string().chars().count() + usize::from(kept > 0);
+            if kept > 0 && used + cost > budget {
+                break;
+            }
+            used += cost;
+            kept += 1;
+        }
+    }
+    let omitted = rows.len() - kept;
+    page.insert(
+        "items".to_string(),
+        serde_json::Value::Array(rows.into_iter().take(kept).collect()),
+    );
+    if omitted > 0 {
+        page.insert("truncated".to_string(), serde_json::Value::Bool(true));
+        page.insert("omitted".to_string(), serde_json::json!(omitted));
+        page.insert("next_offset".to_string(), serde_json::json!(offset + kept));
+    }
+    match ContentBlock::json(serde_json::Value::Object(page)) {
+        Ok(block) => CallToolResult::success(vec![block]),
+        Err(_) => result,
+    }
 }
 
 /// What a write's result keeps of the item it changed: where the item stands
@@ -1381,6 +1515,10 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<ListItemsParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Err(error) = check_fields(p.fields.as_deref()) {
+            return Ok(error);
+        }
+        let updated_after = p.updated_after.map(|v| v.to_string());
         let archived = p.archived.map(|a| a.to_string());
         let limit = p.limit.map(|l| l.to_string());
         let offset = p.offset.map(|o| o.to_string());
@@ -1402,6 +1540,7 @@ impl DocketMcp {
                 ("summary", summary.as_deref()),
                 ("order", p.order.as_deref()),
                 ("expand_related", expand_related.as_deref()),
+                ("updated_after", updated_after.as_deref()),
             ])
             .send()
             .await
@@ -1410,6 +1549,12 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
+        let result = shape_page(
+            result,
+            p.fields.as_deref(),
+            p.max_chars,
+            p.offset.unwrap_or(0),
+        );
         let result = match (p.mine.as_deref(), p.state.as_deref(), result_total(&result)) {
             (Some(mine), Some(state), Some(total)) => {
                 match self
@@ -1455,7 +1600,14 @@ impl DocketMcp {
         &self,
         Parameters(p): Parameters<SearchItemsParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Err(error) = check_fields(p.fields.as_deref()) {
+            return Ok(error);
+        }
         let mut query_pairs: Vec<(&str, &str)> = Vec::new();
+        let updated_after = p.updated_after.map(|v| v.to_string());
+        if let Some(u) = updated_after.as_deref() {
+            query_pairs.push(("updated_after", u));
+        }
         if let Some(q) = p.query.as_deref() {
             query_pairs.push(("q", q));
         }
@@ -1517,6 +1669,12 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
+        let result = shape_page(
+            result,
+            p.fields.as_deref(),
+            p.max_chars,
+            p.offset.unwrap_or(0),
+        );
         let result = if p.report_gaps == Some(true) && p.mine.is_some() {
             match self.fetch_gap_hint().await {
                 Ok(hints) => with_gap_hint(result, hints),
@@ -2376,6 +2534,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -2925,6 +3086,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -3131,6 +3295,203 @@ mod tests {
         assert!(v.get("title").is_none());
     }
 
+    fn page_of(rows: &[serde_json::Value], total: usize) -> CallToolResult {
+        CallToolResult::success(vec![
+            ContentBlock::json(serde_json::json!({ "items": rows, "total": total })).unwrap(),
+        ])
+    }
+
+    fn sample_rows(n: usize) -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("id-{i}"), "seq": i, "topic": "iyulab/docket",
+                    "title": format!("title {i}"), "state": "open", "tags": ["a"],
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shape_page_keeps_only_the_requested_fields_and_always_the_id() {
+        let fields = vec!["title".to_string(), "state".to_string()];
+        let shaped = shape_page(page_of(&sample_rows(2), 2), Some(&fields), None, 0);
+        let v: serde_json::Value = serde_json::from_str(text_of(&shaped)).unwrap();
+        for row in v["items"].as_array().unwrap() {
+            let mut keys: Vec<&str> = row
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|k| k.as_str())
+                .collect();
+            keys.sort();
+            assert_eq!(keys, ["id", "state", "title"]);
+        }
+        assert_eq!(v["total"], 2);
+        assert!(v.get("truncated").is_none());
+    }
+
+    #[test]
+    fn check_fields_names_the_valid_choices_when_one_is_wrong() {
+        assert!(check_fields(Some(&["title".to_string(), "tags".to_string()])).is_ok());
+        assert!(check_fields(None).is_ok());
+        let err = check_fields(Some(&["titel".to_string()])).unwrap_err();
+        assert_eq!(err.is_error, Some(true));
+        let msg = text_of(&err);
+        assert!(
+            msg.contains("titel") && msg.contains("title") && msg.contains("state_since"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn shape_page_holds_rows_back_at_max_chars_and_says_where_to_continue() {
+        let rows = sample_rows(6);
+        let one = serde_json::to_string(&rows[0]).unwrap().chars().count();
+        // Room for two rows (plus the comma between them), not three.
+        let shaped = shape_page(page_of(&rows, 6), None, Some(2 * one + 3), 10);
+        let v: serde_json::Value = serde_json::from_str(text_of(&shaped)).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["omitted"], 4);
+        assert_eq!(v["next_offset"], 12, "offset 10 + 2 rows kept");
+        assert_eq!(v["total"], 6, "total still counts the unpaged set");
+    }
+
+    #[test]
+    fn shape_page_always_returns_at_least_one_row_and_stays_quiet_when_everything_fits() {
+        let rows = sample_rows(3);
+        let tiny = shape_page(page_of(&rows, 3), None, Some(1), 0);
+        let v: serde_json::Value = serde_json::from_str(text_of(&tiny)).unwrap();
+        assert_eq!(
+            v["items"].as_array().unwrap().len(),
+            1,
+            "a budget no row fits must not stall the caller"
+        );
+        assert_eq!(v["omitted"], 2);
+        let roomy = shape_page(page_of(&rows, 3), None, Some(1_000_000), 0);
+        let v: serde_json::Value = serde_json::from_str(text_of(&roomy)).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 3);
+        assert!(v.get("truncated").is_none() && v.get("omitted").is_none());
+    }
+
+    #[test]
+    fn shape_page_leaves_an_error_result_alone() {
+        let err = CallToolResult::error(vec![ContentBlock::text("boom".to_string())]);
+        let shaped = shape_page(err, Some(&["title".to_string()]), Some(10), 0);
+        assert_eq!(shaped.is_error, Some(true));
+        assert_eq!(text_of(&shaped), "boom");
+    }
+
+    #[tokio::test]
+    async fn list_items_fields_max_chars_and_updated_after_work_through_the_real_request() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-shape-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(18993, &dir.join("shape.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        let mut last_updated = 0;
+        for i in 0..5 {
+            let created = server
+                .create_item(Parameters(new_item(
+                    "iyulab/docket",
+                    &format!("row {i}"),
+                    None,
+                )))
+                .await
+                .unwrap();
+            let got = server
+                .get_item(Parameters(GetItemParams {
+                    item_id: field(&created, "id"),
+                    expand_related: None,
+                }))
+                .await
+                .unwrap();
+            last_updated =
+                serde_json::from_str::<serde_json::Value>(text_of(&got)).unwrap()["updated_at"]
+                    .as_i64()
+                    .unwrap();
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+        let base = || ListItemsParams {
+            mine: None,
+            ..list_params("")
+        };
+
+        let fields = server
+            .list_items(Parameters(ListItemsParams {
+                fields: Some(vec!["title".to_string()]),
+                ..base()
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text_of(&fields)).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 5);
+        assert!(v["items"][0].get("body").is_none() && v["items"][0].get("tags").is_none());
+
+        let bad = server
+            .list_items(Parameters(ListItemsParams {
+                fields: Some(vec!["nope".to_string()]),
+                ..base()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
+
+        // Page through with a small budget: nothing lost, nothing repeated.
+        let mut seen = Vec::new();
+        let mut offset = 0usize;
+        for _ in 0..10 {
+            let page = server
+                .list_items(Parameters(ListItemsParams {
+                    fields: Some(vec!["title".to_string()]),
+                    max_chars: Some(60),
+                    offset: Some(offset),
+                    ..base()
+                }))
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(text_of(&page)).unwrap();
+            for row in v["items"].as_array().unwrap() {
+                seen.push(row["id"].as_str().unwrap().to_string());
+            }
+            match v["next_offset"].as_u64() {
+                Some(n) if v["truncated"] == true => offset = n as usize,
+                _ => break,
+            }
+        }
+        assert_eq!(seen.len(), 5);
+        let mut dedup = seen.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup.len(), 5, "a continued page must not repeat a row");
+
+        // updated_after: strictly later than the newest touch -> nothing.
+        let none = server
+            .list_items(Parameters(ListItemsParams {
+                updated_after: Some(last_updated),
+                ..base()
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text_of(&none)).unwrap();
+        assert_eq!(v["total"], 0);
+        let all = server
+            .list_items(Parameters(ListItemsParams {
+                updated_after: Some(0),
+                ..base()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text_of(&all)).unwrap()["total"],
+            5
+        );
+    }
+
     #[tokio::test]
     async fn archive_item_hides_from_default_list_items_tool() {
         let dir =
@@ -3178,6 +3539,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -3205,6 +3569,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -3484,6 +3851,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -3514,6 +3884,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: Some(true),
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -3541,6 +3914,9 @@ mod tests {
             expand_related: None,
             report_gaps: None,
             report_drift: None,
+            updated_after: None,
+            fields: None,
+            max_chars: None,
         }
     }
 
@@ -3764,6 +4140,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -3794,6 +4173,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: Some(true),
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -3856,6 +4238,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: Some(true),
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -4396,6 +4781,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: Some(true),
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -4446,6 +4834,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: Some(true),
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -4497,6 +4888,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -4544,6 +4938,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -4605,6 +5002,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -4729,6 +5129,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -4907,6 +5310,9 @@ mod tests {
                         expand_related: None,
                         report_gaps: None,
                         report_drift: None,
+                        updated_after: None,
+                        fields: None,
+                        max_chars: None,
                     }))
                     .await
                     .unwrap()
@@ -5081,6 +5487,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5107,6 +5516,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5209,6 +5621,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5275,6 +5690,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5301,6 +5719,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5515,6 +5936,9 @@ mod tests {
                 expand_related: None,
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5539,6 +5963,9 @@ mod tests {
                 expand_related: Some(true),
                 report_gaps: None,
                 report_drift: None,
+                updated_after: None,
+                fields: None,
+                max_chars: None,
             }))
             .await
             .unwrap();

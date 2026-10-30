@@ -407,6 +407,13 @@ struct ListItemsQuery {
     /// returns only archived items. See ADR-0013.
     #[serde(default)]
     archived: Option<bool>,
+    /// Epoch milliseconds. Keeps only items whose `updated_at` is strictly
+    /// later -- a poller's delta cursor: pass the newest `updated_at` already
+    /// seen and get back just what moved since. A comment, a transition and a
+    /// tag change all bump `updated_at`, so a thread that got a reply comes
+    /// back; one that did not does not.
+    #[serde(default)]
+    updated_after: Option<i64>,
     /// Full-text match against title+body. Presence of `q` and/or `tag`
     /// routes this request through `Store::search_items` instead of
     /// `Store::list_items` — see the branch below.
@@ -508,6 +515,13 @@ async fn list_items(
         )?
     } else {
         store.list_items(q.topic.as_deref(), state, q.archived, order)?
+    };
+    let items: Vec<Item> = match q.updated_after {
+        Some(after) => items
+            .into_iter()
+            .filter(|item| item.updated_at > after)
+            .collect(),
+        None => items,
     };
     // Loaded once, before the filter chain, so declaring an alias applies
     // retroactively to every comparison below without rewriting any row —
@@ -3227,6 +3241,91 @@ mod tests {
         assert_eq!(total_header, Some(DEFAULT_LIST_LIMIT + 5));
         let items = json_body(resp).await;
         assert_eq!(items.as_array().unwrap().len(), DEFAULT_LIST_LIMIT);
+    }
+
+    /// `updated_after` is a delta cursor for pollers: only items touched after
+    /// the instant come back, and a new comment counts as a touch, so a thread
+    /// that moved reappears without the caller re-reading the ones that did not.
+    #[tokio::test]
+    async fn list_items_updated_after_returns_only_items_touched_since() {
+        let app = test_app();
+        let mut ids = Vec::new();
+        for title in ["old", "fresh"] {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": "iyulab/docket", "title": title}),
+                ))
+                .await
+                .unwrap();
+            ids.push(json_body(resp).await["id"].as_str().unwrap().to_string());
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let list = |uri: String| {
+            let app = app.clone();
+            async move {
+                let resp = app
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let total = resp
+                    .headers()
+                    .get("X-Total-Count")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<usize>().ok());
+                let titles: Vec<String> = json_body(resp)
+                    .await
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i["title"].as_str().unwrap().to_string())
+                    .collect();
+                (titles, total)
+            }
+        };
+
+        let all = list("/items".to_string()).await;
+        assert_eq!(all.0.len(), 2);
+        let old_updated = {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/items/{}", ids[0]))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            json_body(resp).await["updated_at"].as_i64().unwrap()
+        };
+
+        // Strictly after the older item's last touch: only the newer one remains,
+        // and `total` counts the filtered set, not the table.
+        let (titles, total) = list(format!("/items?updated_after={old_updated}")).await;
+        assert_eq!(titles, ["fresh"]);
+        assert_eq!(total, Some(1));
+
+        // A comment on the old item touches it, so it comes back.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/items/{}/comments", ids[0]),
+                serde_json::json!({"author": "w", "body": "moved"}),
+            ))
+            .await
+            .unwrap();
+        let (titles, _) = list(format!("/items?updated_after={old_updated}")).await;
+        assert_eq!(titles.len(), 2);
+
+        // In the future: nothing.
+        let (titles, total) = list("/items?updated_after=99999999999999".to_string()).await;
+        assert!(titles.is_empty());
+        assert_eq!(total, Some(0));
     }
 
     /// `limit`/`offset` apply after every other filter (topic/state/tag/
