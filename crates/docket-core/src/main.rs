@@ -100,6 +100,16 @@ fn api_routes() -> Router<Arc<Store>> {
             "/items/{id}/comments/{comment_id}/redact",
             post(redact_comment),
         )
+        // A comment that belongs to a topic, not an item (ADR-0028). The topic
+        // goes in the body or the query because it contains `/`.
+        .route(
+            "/topic-comments",
+            post(add_topic_comment).get(list_topic_comments),
+        )
+        .route(
+            "/topic-comments/{comment_id}/redact",
+            post(redact_topic_comment),
+        )
         .route("/tags", get(list_tags))
         .route("/events", get(list_events))
         .route("/topics", get(list_topics))
@@ -1217,13 +1227,18 @@ async fn add_comment(
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
-/// Where to start and how much to read of an item's comments (ADR-0029).
+/// Where to start and how much to read of a comment thread (ADR-0029).
 #[derive(Deserialize)]
 struct ListCommentsQuery {
     /// Epoch milliseconds: only comments written strictly after it.
     #[serde(default)]
     since: Option<i64>,
-    /// Only the newest N (after `since`, if both are given).
+    /// A comment `seq`: only comments numbered after it. The exact cursor -- a
+    /// reader resumes from the last `seq` it saw, which a millisecond time
+    /// cannot promise when two comments share one (ADR-0028).
+    #[serde(default)]
+    after: Option<i64>,
+    /// Only the newest N (after `since` and `after`, if given).
     #[serde(default)]
     tail: Option<usize>,
     /// A character budget over the returned comments' JSON, spent newest-first; the newest is always
@@ -1232,12 +1247,33 @@ struct ListCommentsQuery {
     max_chars: Option<usize>,
 }
 
-async fn list_comments(
-    State(store): State<Arc<Store>>,
-    Path(id): Path<String>,
-    Query(q): Query<ListCommentsQuery>,
-) -> Result<Response, ApiError> {
-    let all = store.list_comments(&id)?;
+/// What reading a thread needs to know about a row, whichever kind of comment it is.
+trait ThreadRow: Serialize + Clone {
+    fn written_at(&self) -> i64;
+    fn seq(&self) -> i64;
+}
+
+impl ThreadRow for docket_core::domain::Comment {
+    fn written_at(&self) -> i64 {
+        self.created_at
+    }
+    fn seq(&self) -> i64 {
+        self.seq
+    }
+}
+
+impl ThreadRow for docket_core::domain::TopicComment {
+    fn written_at(&self) -> i64 {
+        self.created_at
+    }
+    fn seq(&self) -> i64 {
+        self.seq
+    }
+}
+
+/// Shapes a thread read (ADR-0029): the same `since` / `after` / `tail` / `max_chars` and the same
+/// `X-Shaped` / `X-Total-Count` / `X-Omitted` headers for an item's comments and a topic's.
+fn shape_thread<T: ThreadRow>(all: Vec<T>, q: &ListCommentsQuery) -> Response {
     let total = all.len();
     let mut headers = HeaderMap::new();
     headers.insert("X-Shaped", HeaderValue::from_static("1"));
@@ -1245,12 +1281,13 @@ async fn list_comments(
         "X-Total-Count",
         HeaderValue::from_str(&total.to_string()).expect("a decimal count is always ASCII"),
     );
-    if q.since.is_none() && q.tail.is_none() && q.max_chars.is_none() {
-        return Ok((headers, Json(all)).into_response());
+    if q.since.is_none() && q.after.is_none() && q.tail.is_none() && q.max_chars.is_none() {
+        return (headers, Json(all)).into_response();
     }
-    let mut kept: Vec<docket_core::domain::Comment> = all
+    let mut kept: Vec<T> = all
         .into_iter()
-        .filter(|c| q.since.is_none_or(|s| c.created_at > s))
+        .filter(|c| q.since.is_none_or(|s| c.written_at() > s))
+        .filter(|c| q.after.is_none_or(|a| c.seq() > a))
         .collect();
     if let Some(n) = q.tail {
         let drop = kept.len().saturating_sub(n);
@@ -1261,12 +1298,12 @@ async fn list_comments(
         Some(budget) => {
             // Newest first: the latest comments are the ones a reader needs, so the
             // budget is spent from the end.
-            let mut rows: Vec<serde_json::Value> = kept
+            let rows: Vec<serde_json::Value> = kept
                 .iter()
                 .rev()
                 .map(|c| serde_json::to_value(c).expect("a comment serialises"))
                 .collect();
-            let (within, _) = docket_core::shape::within(std::mem::take(&mut rows), Some(budget));
+            let (within, _) = docket_core::shape::within(rows, Some(budget));
             let n = within.len();
             kept[kept.len() - n..].to_vec()
         }
@@ -1278,7 +1315,63 @@ async fn list_comments(
             HeaderValue::from_str(&omitted.to_string()).expect("a decimal count is always ASCII"),
         );
     }
-    Ok((headers, Json(kept)).into_response())
+    (headers, Json(kept)).into_response()
+}
+
+async fn list_comments(
+    State(store): State<Arc<Store>>,
+    Path(id): Path<String>,
+    Query(q): Query<ListCommentsQuery>,
+) -> Result<Response, ApiError> {
+    Ok(shape_thread(store.list_comments(&id)?, &q))
+}
+
+#[derive(Deserialize)]
+struct AddTopicCommentRequest {
+    topic: String,
+    #[serde(default = "default_comment_author")]
+    author: String,
+    body: String,
+}
+
+async fn add_topic_comment(
+    State(store): State<Arc<Store>>,
+    Json(req): Json<AddTopicCommentRequest>,
+) -> Result<(StatusCode, Json<docket_core::domain::TopicComment>), ApiError> {
+    let comment = store.add_topic_comment(&req.topic, &req.author, &req.body)?;
+    Ok((StatusCode::CREATED, Json(comment)))
+}
+
+/// `ListCommentsQuery` plus the topic. The shaping fields are repeated rather than flattened in:
+/// `serde(flatten)` reads a urlencoded number back as a string and rejects it.
+#[derive(Deserialize)]
+struct ListTopicCommentsQuery {
+    topic: Option<String>,
+    #[serde(default)]
+    since: Option<i64>,
+    #[serde(default)]
+    after: Option<i64>,
+    #[serde(default)]
+    tail: Option<usize>,
+    #[serde(default)]
+    max_chars: Option<usize>,
+}
+
+async fn list_topic_comments(
+    State(store): State<Arc<Store>>,
+    Query(q): Query<ListTopicCommentsQuery>,
+) -> Result<Response, ApiError> {
+    let topic = q
+        .topic
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| ApiError(StoreError::Validation("topic is required".to_string())))?;
+    let shape = ListCommentsQuery {
+        since: q.since,
+        after: q.after,
+        tail: q.tail,
+        max_chars: q.max_chars,
+    };
+    Ok(shape_thread(store.list_topic_comments(&topic)?, &shape))
 }
 
 #[derive(Deserialize)]
@@ -1313,6 +1406,27 @@ async fn redact_item(
 struct RedactCommentRequest {
     #[serde(default = "default_comment_author")]
     author: String,
+}
+
+#[derive(Deserialize)]
+struct RedactTopicCommentRequest {
+    topic: String,
+    #[serde(default = "default_comment_author")]
+    author: String,
+}
+
+/// HTTP/console-only, same reasoning as `redact_comment` below. The comment is
+/// named by its own topic (in the body: a topic contains `/`).
+async fn redact_topic_comment(
+    State(store): State<Arc<Store>>,
+    Path(comment_id): Path<String>,
+    Json(req): Json<RedactTopicCommentRequest>,
+) -> Result<Json<docket_core::domain::TopicComment>, ApiError> {
+    Ok(Json(store.redact_topic_comment(
+        &req.topic,
+        &comment_id,
+        &req.author,
+    )?))
 }
 
 /// HTTP/console-only, same reasoning as `redact_item` above — no MCP tool.
@@ -5103,6 +5217,245 @@ mod tests {
         assert_eq!(
             post(r#"{"alias":"widget","canonical":"acme/gadget"}"#).await,
             StatusCode::CONFLICT
+        );
+    }
+
+    // ---- ADR-0028 over HTTP: a comment that belongs to a topic ----
+
+    async fn send(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> Response {
+        let req = match body {
+            Some(b) => json_request(method, uri, b),
+            None => Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        };
+        app.clone().oneshot(req).await.unwrap()
+    }
+
+    fn header_of(r: &Response, name: &str) -> Option<String> {
+        r.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    }
+
+    #[tokio::test]
+    async fn topic_comments_are_written_and_read_over_http() {
+        let app = test_app();
+        let resp = send(
+            &app,
+            "POST",
+            "/topic-comments",
+            Some(serde_json::json!({"topic": "channel/agents", "author": "acme/alice", "body": "hello"})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let written = json_body(resp).await;
+        assert_eq!(written["topic"], "channel/agents");
+        assert!(written["seq"].as_i64().unwrap() > 0);
+        assert!(
+            written.get("item_id").is_none(),
+            "a topic comment has no item"
+        );
+
+        let resp = send(&app, "GET", "/topic-comments?topic=channel/agents", None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(header_of(&resp, "X-Shaped").as_deref(), Some("1"));
+        assert_eq!(header_of(&resp, "X-Total-Count").as_deref(), Some("1"));
+        let listed = json_body(resp).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["body"], "hello");
+    }
+
+    #[tokio::test]
+    async fn a_topic_comment_needs_a_topic() {
+        let app = test_app();
+        let resp = send(
+            &app,
+            "POST",
+            "/topic-comments",
+            Some(serde_json::json!({"topic": "  ", "body": "x"})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = send(&app, "GET", "/topic-comments", None).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "reading names a topic too"
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_comments_resume_after_a_seq_and_are_shaped_like_item_comments() {
+        let app = test_app();
+        let mut seqs = Vec::new();
+        for i in 0..5 {
+            let resp = send(
+                &app,
+                "POST",
+                "/topic-comments",
+                Some(serde_json::json!({"topic": "channel/agents", "author": "w", "body": format!("note {i} {}", "x".repeat(60))})),
+            )
+            .await;
+            seqs.push(json_body(resp).await["seq"].as_i64().unwrap());
+        }
+        let read = |q: String| {
+            let app = app.clone();
+            async move {
+                send(
+                    &app,
+                    "GET",
+                    &format!("/topic-comments?topic=channel/agents{q}"),
+                    None,
+                )
+                .await
+            }
+        };
+        let notes = |v: serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["body"].as_str().unwrap()[..6].to_string())
+                .collect()
+        };
+
+        // `after` is the exact cursor: everything written once seq N was seen.
+        let after = read(format!("&after={}", seqs[2])).await;
+        assert_eq!(header_of(&after, "X-Total-Count").as_deref(), Some("5"));
+        assert_eq!(notes(json_body(after).await), ["note 3", "note 4"]);
+
+        let tail = read("&tail=2".to_string()).await;
+        assert_eq!(header_of(&tail, "X-Omitted").as_deref(), Some("3"));
+        assert_eq!(notes(json_body(tail).await), ["note 3", "note 4"]);
+
+        let budget = read("&max_chars=1".to_string()).await;
+        assert_eq!(
+            notes(json_body(budget).await),
+            ["note 4"],
+            "the newest is always returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn item_comments_also_resume_after_a_seq() {
+        let app = test_app();
+        let resp = send(
+            &app,
+            "POST",
+            "/items",
+            Some(serde_json::json!({"topic": "acme/widget", "title": "thread"})),
+        )
+        .await;
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+        let mut seqs = Vec::new();
+        for i in 0..3 {
+            let resp = send(
+                &app,
+                "POST",
+                &format!("/items/{id}/comments"),
+                Some(serde_json::json!({"author": "w", "body": format!("n{i}")})),
+            )
+            .await;
+            seqs.push(json_body(resp).await["seq"].as_i64().unwrap());
+        }
+        let resp = send(
+            &app,
+            "GET",
+            &format!("/items/{id}/comments?after={}", seqs[0]),
+            None,
+        )
+        .await;
+        let bodies: Vec<String> = json_body(resp)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["body"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(bodies, ["n1", "n2"]);
+    }
+
+    #[tokio::test]
+    async fn a_registered_worker_reads_topic_comments_through_events_and_topics() {
+        let app = test_app();
+        send(
+            &app,
+            "POST",
+            "/workers",
+            Some(serde_json::json!({"id": "acme/reader", "topics": ["channel"]})),
+        )
+        .await;
+        send(
+            &app,
+            "POST",
+            "/topic-comments",
+            Some(serde_json::json!({"topic": "channel/agents", "author": "acme/alice", "body": "hello"})),
+        )
+        .await;
+
+        let resp = send(&app, "GET", "/events?for=acme/reader&since=0", None).await;
+        let events = json_body(resp).await;
+        let event = &events["events"][0];
+        assert_eq!(event["kind"], "comment");
+        assert_eq!(event["topic"], "channel/agents");
+        assert!(
+            event.get("item_id").is_none(),
+            "no item behind a topic comment"
+        );
+
+        let resp = send(&app, "GET", "/topics", None).await;
+        let topics = json_body(resp).await;
+        let row = topics
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["topic"] == "channel/agents")
+            .expect("a topic with only comments is listed");
+        assert_eq!(row["comments"], 1);
+        assert_eq!(row["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn redacting_a_topic_comment_over_http() {
+        let app = test_app();
+        let resp = send(
+            &app,
+            "POST",
+            "/topic-comments",
+            Some(serde_json::json!({"topic": "channel/agents", "author": "acme/alice", "body": "a secret value"})),
+        )
+        .await;
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = send(
+            &app,
+            "POST",
+            &format!("/topic-comments/{id}/redact"),
+            Some(serde_json::json!({"topic": "channel/agents", "author": "acme/admin"})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["body"], "[redacted]");
+
+        let resp = send(
+            &app,
+            "POST",
+            &format!("/topic-comments/{id}/redact"),
+            Some(serde_json::json!({"topic": "channel/elsewhere"})),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "named by its own topic"
         );
     }
 }
