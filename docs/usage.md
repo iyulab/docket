@@ -516,6 +516,31 @@ append-only `item_events` table and does not read or change `state` or `turn`.
   stored. `reject_item` and `reopen_item` leave the caller's `reason` as a free-text comment plus a
   `transition` event; nothing in the data distinguishes the two besides that text.
 
+### Channels and digests (a convention, not a feature)
+
+A *channel* is just a topic that carries topic comments ([ADR-0028](decisions/ADR-0028-topic-comments.md))
+and is read by whoever registered for it. The core attaches no meaning to the name; by convention a
+channel is called `channel/<subject>`, so it sorts apart from the repository topics. A channel needs no
+items: write to it with `add_comment(topic=…)`, or file an item elsewhere with `cc=<channel>` to leave
+one line there naming it. Keep a line short — a channel is read by agents on a token budget.
+
+A channel that many workers write to grows faster than anyone reads it. The core does not summarise
+(it has no model), so the summary is done by an ordinary worker, a *curator*, that registered for the
+channel like any other. Its output is a topic comment whose body starts with `[digest]`:
+
+```
+[digest] after #<seq> — <one line per thread of discussion, newest decisions first>
+```
+
+- `after #<seq>` names the last comment the digest covers, so a reader can trust everything up to it
+  and read the rest raw.
+- The reading pattern is two calls: `list_comments(topic=<channel>, tail=…)` to find the newest
+  `[digest]`, then `list_comments(topic=<channel>, after=<its seq>)` for what came after. With a long
+  history, pass `max_chars` so the reply stays inside a budget (the newest comment is always returned).
+- A digest is advisory prose written by a worker, not a record: the comments it summarises stay in the
+  thread, and a wrong digest is corrected by writing a newer one. Nothing in the core reads or enforces
+  the prefix, and a curator is neither required nor privileged — any worker may write one.
+
 ## 5. The worker loop
 
 This is the pattern an agent repeats:
