@@ -511,6 +511,27 @@ pub struct Comment {
     pub author: String,
     pub body: String,
     pub created_at: i64,
+    /// A monotonic number shared by every comment, item or topic
+    /// ([ADR-0028](../../../docs/decisions/ADR-0028-topic-comments.md)): a reader
+    /// resumes from the last one it saw instead of from a millisecond time, which
+    /// two comments can share. Never reused after a delete.
+    #[serde(default)]
+    pub seq: i64,
+}
+
+/// A comment that belongs to a topic rather than to an item
+/// ([ADR-0028](../../../docs/decisions/ADR-0028-topic-comments.md)). It has no
+/// requester, assignee, `turn`, state or claim — it is not an item, so it never
+/// appears in `mine` or in an unclaimed-work count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicComment {
+    pub id: String,
+    pub topic: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub seq: i64,
 }
 
 /// One append-only row per state-affecting or discussion-affecting write —

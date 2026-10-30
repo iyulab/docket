@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     Alias, AliasMap, Comment, Event, IdentityCount, Item, RelatedItemRef, RelatedRelation,
-    Resolution, SortOrder, State, TagCount, TagMatch, TopicCount, Worker,
+    Resolution, SortOrder, State, TagCount, TagMatch, TopicComment, TopicCount, Worker,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -108,12 +108,16 @@ impl Store {
             -- read back through turn/state. seq is event_seq_counter's
             -- output, not items.seq or item_comments.rowid: a cursor must
             -- never skip an event, and rowid is reused after DELETE.
+            -- An event belongs to an item or to a topic, exactly one (ADR-0028):
+            -- a topic comment records an event with no item behind it.
             CREATE TABLE IF NOT EXISTS item_events (
                 seq INTEGER PRIMARY KEY,
-                item_id TEXT NOT NULL REFERENCES items(id),
+                item_id TEXT REFERENCES items(id),
+                topic TEXT,
                 kind TEXT NOT NULL,
                 actor TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                CHECK ((item_id IS NULL) <> (topic IS NULL))
             );
             CREATE INDEX IF NOT EXISTS idx_item_events_item ON item_events(item_id);
             CREATE TABLE IF NOT EXISTS event_seq_counter (
@@ -148,14 +152,25 @@ impl Store {
                 PRIMARY KEY (item_id, tag)
             );
             CREATE INDEX IF NOT EXISTS idx_item_tags_tag ON item_tags(tag);
+            -- A comment belongs to an item or to a topic, exactly one (ADR-0028).
+            -- `seq` is comment_seq_counter's output, shared by both kinds: a
+            -- reader's cursor must not depend on a millisecond time two comments
+            -- can share, and rowid is reused after a delete.
             CREATE TABLE IF NOT EXISTS item_comments (
                 id         TEXT PRIMARY KEY,
-                item_id    TEXT NOT NULL REFERENCES items(id),
+                item_id    TEXT REFERENCES items(id),
+                topic      TEXT,
                 author     TEXT NOT NULL,
                 body       TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                seq        INTEGER NOT NULL,
+                CHECK ((item_id IS NULL) <> (topic IS NULL))
             );
             CREATE INDEX IF NOT EXISTS idx_item_comments_item ON item_comments(item_id, created_at);
+            CREATE TABLE IF NOT EXISTS comment_seq_counter (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                next INTEGER NOT NULL
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
                 title, body, content='items', content_rowid='rowid'
             );
@@ -185,6 +200,17 @@ impl Store {
         )?;
         migrate_owner_to_requester_assignee(&conn)?;
         migrate_add_archived_at(&conn)?;
+        // Swaps the comment and event tables for the ADR-0028 shape on a
+        // database that predates it. Must come before the comments_fts
+        // 'rebuild' below: the swap re-creates the table the shadow index
+        // reads from, so the index is only trustworthy after a rebuild.
+        migrate_topic_comments(&conn)?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_item_comments_topic ON item_comments(topic, seq);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_item_comments_seq ON item_comments(seq);
+             INSERT OR IGNORE INTO comment_seq_counter (id, next)
+                 VALUES (1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM item_comments));",
+        )?;
         // Must run after migrate_add_archived_at: on a database that
         // predates archived_at, the CREATE TABLE IF NOT EXISTS above is a
         // no-op (the table already exists), so the column doesn't exist
@@ -1950,9 +1976,10 @@ impl Store {
         let resolved = resolve_item_id(&conn, item_id)?;
         let item_id = resolved.as_str();
         require_item(&conn, item_id)?;
+        let seq = next_comment_seq(&conn)?;
         conn.execute(
-            "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, item_id, author, body, now],
+            "INSERT INTO item_comments (id, item_id, author, body, created_at, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, item_id, author, body, now, seq],
         )?;
         conn.execute(
             "UPDATE items SET updated_at = ?1 WHERE id = ?2",
@@ -1965,7 +1992,73 @@ impl Store {
             author: author.to_string(),
             body: body.to_string(),
             created_at: now,
+            seq,
         })
+    }
+
+    /// Writes a comment that belongs to `topic` rather than to an item
+    /// ([ADR-0028](../../../docs/decisions/ADR-0028-topic-comments.md)). The
+    /// topic is stored as written, like every other identifier (ADR-0021) --
+    /// reads fold case and declared aliases. It records an event of kind
+    /// `comment` with no item behind it, which is how a registered worker finds
+    /// it; there is no item to bump and no stakeholder to notify.
+    pub fn add_topic_comment(&self, topic: &str, author: &str, body: &str) -> Result<TopicComment> {
+        let topic = topic.trim();
+        if topic.is_empty() {
+            return Err(StoreError::Validation(
+                "topic must not be blank".to_string(),
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = now_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let seq = next_comment_seq(&conn)?;
+        conn.execute(
+            "INSERT INTO item_comments (id, item_id, topic, author, body, created_at, seq)
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+            params![id, topic, author, body, now, seq],
+        )?;
+        record_topic_event(&conn, topic, "comment", author, now)?;
+        Ok(TopicComment {
+            id,
+            topic: topic.to_string(),
+            author: author.to_string(),
+            body: body.to_string(),
+            created_at: now,
+            seq,
+        })
+    }
+
+    /// Every comment on `topic`, oldest first by `seq`, under any declared
+    /// spelling of it (ADR-0022).
+    pub fn list_topic_comments(&self, topic: &str) -> Result<Vec<TopicComment>> {
+        let aliases = self.alias_map()?;
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut sql = String::from(
+            "SELECT id, topic, author, body, created_at, seq FROM item_comments WHERE topic IS NOT NULL",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        push_identity_group_filter(
+            &mut sql,
+            &mut args,
+            "topic",
+            &aliases.group_of(topic.trim()),
+        );
+        sql.push_str(" ORDER BY seq ASC");
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(param_refs), |row| {
+            Ok(TopicComment {
+                id: row.get(0)?,
+                topic: row.get(1)?,
+                author: row.get(2)?,
+                body: row.get(3)?,
+                created_at: row.get(4)?,
+                seq: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn list_comments(&self, item_id: &str) -> Result<Vec<Comment>> {
@@ -1973,8 +2066,8 @@ impl Store {
         let resolved = resolve_item_id(&conn, item_id)?;
         let item_id = resolved.as_str();
         let mut stmt = conn.prepare(
-            "SELECT id, item_id, author, body, created_at FROM item_comments
-             WHERE item_id = ?1 ORDER BY created_at ASC",
+            "SELECT id, item_id, author, body, created_at, seq FROM item_comments
+             WHERE item_id = ?1 ORDER BY created_at ASC, seq ASC",
         )?;
         let rows = stmt.query_map(params![item_id], |row| {
             Ok(Comment {
@@ -1983,6 +2076,7 @@ impl Store {
                 author: row.get(2)?,
                 body: row.get(3)?,
                 created_at: row.get(4)?,
+                seq: row.get(5)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2005,7 +2099,7 @@ impl Store {
         let item_id = resolved.as_str();
         let current = conn
             .query_row(
-                "SELECT id, item_id, author, body, created_at FROM item_comments
+                "SELECT id, item_id, author, body, created_at, seq FROM item_comments
                  WHERE id = ?1 AND item_id = ?2",
                 params![comment_id, item_id],
                 |row| {
@@ -2015,6 +2109,7 @@ impl Store {
                         author: row.get(2)?,
                         body: row.get(3)?,
                         created_at: row.get(4)?,
+                        seq: row.get(5)?,
                     })
                 },
             )
@@ -2159,6 +2254,97 @@ fn fts5_match_query(q: &str) -> String {
         .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Whether `table` has a column named `column`.
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(names.iter().any(|n| n == column))
+}
+
+/// Runs `sql` as one transaction, rolling back if any statement fails -- a
+/// table swap that stops halfway must not leave the live table missing.
+fn run_atomically(conn: &Connection, sql: &str) -> rusqlite::Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match conn.execute_batch(sql) {
+        Ok(()) => conn.execute_batch("COMMIT"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Upgrades a database created before
+/// [ADR-0028](../../../docs/decisions/ADR-0028-topic-comments.md): `item_comments`
+/// and `item_events` are rebuilt with a nullable item reference, a `topic`
+/// column and a check that exactly one of the two is set; comments also gain
+/// `seq`.
+///
+/// SQLite cannot drop a `NOT NULL`, so each table is copied into the new shape
+/// and swapped in, in one transaction. Existing rows keep their item and their
+/// `rowid` (the comment full-text index reads comment bodies through it), and
+/// comments are numbered in the order they were written -- `created_at`, then
+/// `rowid` for ties. Idempotent: a table that already has `topic` is left alone.
+fn migrate_topic_comments(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_has_column(conn, "item_comments", "topic")? {
+        run_atomically(
+            conn,
+            "DROP TRIGGER IF EXISTS comments_fts_ai;
+             DROP TRIGGER IF EXISTS comments_fts_ad;
+             DROP TRIGGER IF EXISTS comments_fts_au;
+             CREATE TABLE item_comments_new (
+                 id         TEXT PRIMARY KEY,
+                 item_id    TEXT REFERENCES items(id),
+                 topic      TEXT,
+                 author     TEXT NOT NULL,
+                 body       TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 seq        INTEGER NOT NULL,
+                 CHECK ((item_id IS NULL) <> (topic IS NULL))
+             );
+             INSERT INTO item_comments_new (rowid, id, item_id, topic, author, body, created_at, seq)
+                 SELECT rowid, id, item_id, NULL, author, body, created_at,
+                        ROW_NUMBER() OVER (ORDER BY created_at, rowid)
+                 FROM item_comments;
+             DROP TABLE item_comments;
+             ALTER TABLE item_comments_new RENAME TO item_comments;
+             CREATE INDEX idx_item_comments_item ON item_comments(item_id, created_at);
+             CREATE TRIGGER comments_fts_ai AFTER INSERT ON item_comments BEGIN
+                 INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
+             END;
+             CREATE TRIGGER comments_fts_ad AFTER DELETE ON item_comments BEGIN
+                 INSERT INTO comments_fts(comments_fts, rowid, body) VALUES('delete', old.rowid, old.body);
+             END;
+             CREATE TRIGGER comments_fts_au AFTER UPDATE ON item_comments BEGIN
+                 INSERT INTO comments_fts(comments_fts, rowid, body) VALUES('delete', old.rowid, old.body);
+                 INSERT INTO comments_fts(rowid, body) VALUES (new.rowid, new.body);
+             END;",
+        )?;
+    }
+    if !table_has_column(conn, "item_events", "topic")? {
+        run_atomically(
+            conn,
+            "CREATE TABLE item_events_new (
+                 seq INTEGER PRIMARY KEY,
+                 item_id TEXT REFERENCES items(id),
+                 topic TEXT,
+                 kind TEXT NOT NULL,
+                 actor TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 CHECK ((item_id IS NULL) <> (topic IS NULL))
+             );
+             INSERT INTO item_events_new (seq, item_id, topic, kind, actor, created_at)
+                 SELECT seq, item_id, NULL, kind, actor, created_at FROM item_events;
+             DROP TABLE item_events;
+             ALTER TABLE item_events_new RENAME TO item_events;
+             CREATE INDEX idx_item_events_item ON item_events(item_id);",
+        )?;
+    }
+    Ok(())
 }
 
 /// Upgrades a database created before [ADR-0010](../../../docs/decisions/ADR-0010-item-from-to-turn.md):
@@ -2329,11 +2515,23 @@ fn insert_lifecycle_comment(
     now: i64,
 ) -> rusqlite::Result<()> {
     let comment_id = Uuid::new_v4().to_string();
+    let seq = next_comment_seq(conn)?;
     conn.execute(
-        "INSERT INTO item_comments (id, item_id, author, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![comment_id, item_id, author, body, now],
+        "INSERT INTO item_comments (id, item_id, author, body, created_at, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![comment_id, item_id, author, body, now, seq],
     )?;
     Ok(())
+}
+
+/// Allocates the next comment `seq` -- the comment-side twin of `record_event`'s
+/// counter, race-free under the store's connection-wide mutex. Shared by item
+/// and topic comments so one cursor reads both.
+fn next_comment_seq(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "UPDATE comment_seq_counter SET next = next + 1 WHERE id = 1 RETURNING next - 1",
+        [],
+        |row| row.get(0),
+    )
 }
 
 /// Records one `item_events` row and advances `event_seq_counter` — the
@@ -2361,6 +2559,26 @@ fn record_event(
     conn.execute(
         "INSERT INTO item_events (seq, item_id, kind, actor, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![seq, item_id, kind, actor, now],
+    )?;
+    Ok(())
+}
+
+/// `record_event`'s sibling for activity that has no item -- a topic comment.
+fn record_topic_event(
+    conn: &Connection,
+    topic: &str,
+    kind: &str,
+    actor: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let seq: i64 = conn.query_row(
+        "UPDATE event_seq_counter SET next = next + 1 WHERE id = 1 RETURNING next - 1",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO item_events (seq, item_id, topic, kind, actor, created_at) VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+        params![seq, topic, kind, actor, now],
     )?;
     Ok(())
 }
@@ -6430,5 +6648,262 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found[0].state_since, claimed.state_since);
+    }
+
+    // ---- ADR-0028: a comment belongs to an item or to a topic ------------
+
+    #[test]
+    fn topic_comments_round_trip_in_order_with_a_monotonic_seq() {
+        let store = open_test_store();
+        let a = store
+            .add_topic_comment("channel/agents", "acme/alice", "first")
+            .unwrap();
+        let b = store
+            .add_topic_comment("channel/agents", "acme/bob", "second")
+            .unwrap();
+        assert_eq!(a.topic, "channel/agents");
+        assert!(b.seq > a.seq, "seq is monotonic: {} then {}", a.seq, b.seq);
+
+        let listed = store.list_topic_comments("channel/agents").unwrap();
+        let bodies: Vec<&str> = listed.iter().map(|c| c.body.as_str()).collect();
+        assert_eq!(bodies, ["first", "second"]);
+        assert_eq!(listed[0].id, a.id);
+    }
+
+    #[test]
+    fn topic_comments_stay_in_their_own_topic() {
+        let store = open_test_store();
+        store
+            .add_topic_comment("channel/agents", "acme/alice", "here")
+            .unwrap();
+        store
+            .add_topic_comment("channel/other", "acme/alice", "there")
+            .unwrap();
+        let listed = store.list_topic_comments("channel/agents").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].body, "here");
+    }
+
+    #[test]
+    fn topic_comments_fold_declared_aliases_and_case() {
+        let store = open_test_store();
+        store.put_alias("agents", "channel/agents").unwrap();
+        store
+            .add_topic_comment("agents", "acme/alice", "via the alias")
+            .unwrap();
+        store
+            .add_topic_comment("Channel/Agents", "acme/bob", "via the case")
+            .unwrap();
+        let listed = store.list_topic_comments("channel/agents").unwrap();
+        assert_eq!(listed.len(), 2, "every spelling of one topic reads as one");
+    }
+
+    #[test]
+    fn a_blank_topic_is_rejected() {
+        let store = open_test_store();
+        let err = store
+            .add_topic_comment("  ", "acme/alice", "x")
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Validation(_)));
+    }
+
+    #[test]
+    fn item_comments_and_topic_comments_share_one_seq_sequence() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        let on_item = store
+            .add_comment(&item.id, "acme/alice", "on the item")
+            .unwrap();
+        let on_topic = store
+            .add_topic_comment("channel/agents", "acme/alice", "on the topic")
+            .unwrap();
+        let again = store.add_comment(&item.id, "acme/alice", "again").unwrap();
+        assert!(on_item.seq > 0);
+        assert!(on_topic.seq > on_item.seq);
+        assert!(again.seq > on_topic.seq);
+        assert_eq!(
+            store.list_comments(&item.id).unwrap()[0].seq,
+            on_item.seq,
+            "a listed comment carries the seq it was given"
+        );
+    }
+
+    #[test]
+    fn a_comment_belongs_to_exactly_one_of_an_item_or_a_topic() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        let both = conn.execute(
+            "INSERT INTO item_comments (id, item_id, topic, author, body, created_at, seq)
+             VALUES ('x1', ?1, 'channel/agents', 'a', 'b', 0, 900)",
+            params![item.id],
+        );
+        assert!(both.is_err(), "an item and a topic at once is rejected");
+        let neither = conn.execute(
+            "INSERT INTO item_comments (id, item_id, topic, author, body, created_at, seq)
+             VALUES ('x2', NULL, NULL, 'a', 'b', 0, 901)",
+            [],
+        );
+        assert!(neither.is_err(), "no parent at all is rejected");
+    }
+
+    #[test]
+    fn a_topic_comment_is_not_an_item() {
+        let store = open_test_store();
+        store
+            .add_topic_comment("channel/agents", "acme/alice", "hello")
+            .unwrap();
+        let items = store.list_items(None, None, None, SortOrder::Desc).unwrap();
+        assert!(items.is_empty(), "a topic comment creates no item");
+    }
+
+    #[test]
+    fn deleting_an_item_leaves_topic_comments_and_their_seq_unreused() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        let on_item = store.add_comment(&item.id, "acme/alice", "x").unwrap();
+        let on_topic = store
+            .add_topic_comment("channel/agents", "acme/alice", "stays")
+            .unwrap();
+        store.delete_item(&item.id).unwrap();
+        assert_eq!(
+            store.list_topic_comments("channel/agents").unwrap().len(),
+            1
+        );
+        let next = store
+            .add_topic_comment("channel/agents", "acme/alice", "later")
+            .unwrap();
+        assert!(next.seq > on_topic.seq && next.seq > on_item.seq);
+    }
+
+    /// The schema as it stood before ADR-0028: `item_id` is NOT NULL on both
+    /// the comment and the event table, and comments carry no `seq`.
+    fn write_pre_adr_0028_database(db_path: &std::path::Path) {
+        let legacy = Connection::open(db_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE items (
+                    id TEXT PRIMARY KEY, topic TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
+                    state TEXT NOT NULL, resolution TEXT, requester TEXT, assignee TEXT,
+                    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    archived_at INTEGER, seq INTEGER
+                );
+                CREATE TABLE item_comments (
+                    id         TEXT PRIMARY KEY,
+                    item_id    TEXT NOT NULL REFERENCES items(id),
+                    author     TEXT NOT NULL,
+                    body       TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE item_events (
+                    seq INTEGER PRIMARY KEY,
+                    item_id TEXT NOT NULL REFERENCES items(id),
+                    kind TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE event_seq_counter (
+                    id INTEGER PRIMARY KEY CHECK (id = 1), next INTEGER NOT NULL
+                );
+                INSERT INTO event_seq_counter (id, next) VALUES (1, 3);
+                INSERT INTO items (id, topic, title, body, state, requester, created_at, updated_at, seq)
+                    VALUES ('i1', 'acme/widget', 'a title', NULL, 'open', 'acme/alice', 100, 100, 1);
+                INSERT INTO item_comments (id, item_id, author, body, created_at)
+                    VALUES ('c-late', 'i1', 'acme/bob', 'the cache is stale', 300);
+                INSERT INTO item_comments (id, item_id, author, body, created_at)
+                    VALUES ('c-early', 'i1', 'acme/alice', 'the lock is held', 200);
+                INSERT INTO item_events (seq, item_id, kind, actor, created_at)
+                    VALUES (1, 'i1', 'created', 'acme/alice', 100);
+                INSERT INTO item_events (seq, item_id, kind, actor, created_at)
+                    VALUES (2, 'i1', 'comment', 'acme/alice', 200);",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn open_migrates_a_pre_adr_0028_database_keeping_every_row() {
+        let dir = temp_db_dir("adr-0028-migration-test");
+        let db_path = dir.join("legacy.db");
+        write_pre_adr_0028_database(&db_path);
+
+        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+
+        // Comments keep their item, and get a seq in the order they were written.
+        let comments = store.list_comments("i1").unwrap();
+        let ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["c-early", "c-late"], "listed oldest first");
+        assert!(comments[0].seq > 0 && comments[1].seq > comments[0].seq);
+        assert_eq!(comments[0].item_id, "i1");
+
+        // Events keep their seq and item, and still feed the event log.
+        store
+            .register_worker("acme/watcher", &["acme/widget".to_string()])
+            .unwrap();
+        let (events, _) = store.list_events("acme/watcher", 0, 50).unwrap();
+        let seqs: Vec<i64> = events.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, [1, 2]);
+
+        // The full-text index followed the rebuild, for old and new comments alike.
+        let search = |q: &str| {
+            store
+                .search_items(
+                    None,
+                    None,
+                    &[],
+                    TagMatch::Any,
+                    Some(q),
+                    None,
+                    SortOrder::Desc,
+                )
+                .unwrap()
+                .len()
+        };
+        assert_eq!(search("cache is stale"), 1);
+        store
+            .add_comment("i1", "acme/bob", "a brand new remark")
+            .unwrap();
+        assert_eq!(search("brand new remark"), 1);
+
+        // New comments continue after the backfilled ones; a topic comment works too.
+        let fresh = store
+            .add_topic_comment("channel/agents", "acme/bob", "t")
+            .unwrap();
+        assert!(fresh.seq > comments[1].seq);
+
+        drop(store);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migrating_twice_changes_nothing() {
+        let dir = temp_db_dir("adr-0028-idempotent-test");
+        let db_path = dir.join("legacy.db");
+        write_pre_adr_0028_database(&db_path);
+
+        let first = Store::open(db_path.to_str().unwrap()).unwrap();
+        let seqs: Vec<i64> = first
+            .list_comments("i1")
+            .unwrap()
+            .iter()
+            .map(|c| c.seq)
+            .collect();
+        drop(first);
+
+        let second = Store::open(db_path.to_str().unwrap()).unwrap();
+        let again: Vec<i64> = second
+            .list_comments("i1")
+            .unwrap()
+            .iter()
+            .map(|c| c.seq)
+            .collect();
+        assert_eq!(seqs, again, "a second open does not renumber");
+        drop(second);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
