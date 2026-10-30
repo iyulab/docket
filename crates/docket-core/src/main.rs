@@ -414,6 +414,14 @@ struct ListItemsQuery {
     /// back; one that did not does not.
     #[serde(default)]
     updated_after: Option<i64>,
+    /// Comma-separated item fields to return (`id` is always kept). An unknown name is a 400
+    /// that lists the valid ones. See ADR-0029.
+    #[serde(default)]
+    fields: Option<String>,
+    /// Stop adding rows once their serialised JSON would exceed this many characters (the first row
+    /// is always returned). Rows held back are reported in `X-Omitted` / `X-Next-Offset`. See ADR-0029.
+    #[serde(default)]
+    max_chars: Option<usize>,
     /// Full-text match against title+body. Presence of `q` and/or `tag`
     /// routes this request through `Store::search_items` instead of
     /// `Store::list_items` — see the branch below.
@@ -483,15 +491,43 @@ async fn list_events(
 /// Uses `axum_extra`'s `Query` rather than `axum::extract::Query`: only the
 /// former decodes repeated keys (`?tag=a&tag=b`) into a `Vec`, which the
 /// plain extractor rejects with a 400.
+/// Item keys a caller may name in `fields` (ADR-0029).
+const ITEM_FIELDS: &[&str] = &[
+    "id",
+    "seq",
+    "topic",
+    "title",
+    "body",
+    "state",
+    "resolution",
+    "requester",
+    "assignee",
+    "turn",
+    "open",
+    "archived_at",
+    "tags",
+    "created_at",
+    "updated_at",
+    "state_since",
+    "related",
+];
+
 async fn list_items(
     State(store): State<Arc<Store>>,
     ExtraQuery(q): ExtraQuery<ListItemsQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
     let limit = q
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
     let offset = q.offset.unwrap_or(0);
+    let fields = q
+        .fields
+        .as_deref()
+        .map(docket_core::shape::parse_fields)
+        .unwrap_or_default();
+    docket_core::shape::check_fields(&fields, ITEM_FIELDS)
+        .map_err(|msg| ApiError(StoreError::Validation(msg)))?;
     let state = q.state.as_deref().and_then(ItemState::parse);
     let order = q
         .order
@@ -624,7 +660,37 @@ async fn list_items(
         "X-Total-Count",
         HeaderValue::from_str(&total.to_string()).expect("a decimal count is always ASCII"),
     );
-    Ok((headers, Json(items)))
+    headers.insert("X-Shaped", HeaderValue::from_static("1"));
+    // Shaping is only paid for (and only reorders keys) when a caller asked for it.
+    if fields.is_empty() && q.max_chars.is_none() {
+        set_read_headers(&mut headers, total, offset, items.len());
+        return Ok((headers, Json(items)).into_response());
+    }
+    let rows: Vec<serde_json::Value> = items
+        .iter()
+        .map(|i| serde_json::to_value(i).expect("an item serialises"))
+        .collect();
+    let rows = docket_core::shape::project(rows, &fields, &["id"]);
+    let (rows, _) = docket_core::shape::within(rows, q.max_chars);
+    set_read_headers(&mut headers, total, offset, rows.len());
+    Ok((headers, Json(serde_json::Value::Array(rows))).into_response())
+}
+
+/// `X-Omitted` (matching rows not in this answer) and `X-Next-Offset` (where to continue), sent only
+/// when something was held back (ADR-0029).
+fn set_read_headers(headers: &mut HeaderMap, total: usize, offset: usize, kept: usize) {
+    let omitted = total.saturating_sub(offset + kept);
+    if omitted > 0 {
+        headers.insert(
+            "X-Omitted",
+            HeaderValue::from_str(&omitted.to_string()).expect("a decimal count is always ASCII"),
+        );
+        headers.insert(
+            "X-Next-Offset",
+            HeaderValue::from_str(&(offset + kept).to_string())
+                .expect("a decimal count is always ASCII"),
+        );
+    }
 }
 
 #[derive(Deserialize)]
@@ -942,10 +1008,53 @@ async fn list_tags(
     Ok(Json(store.list_tags(q.topic.as_deref())?))
 }
 
+/// ADR-0029 on the whole-table listings: narrow by name, cap the rows. No default cap here -- the console
+/// and older callers read the whole table; an adapter that serves agents passes its own `limit`.
+#[derive(Deserialize)]
+struct TableQuery {
+    /// Case-insensitive substring of the name or a declared alias.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Serialises a whole table, narrowed and capped per `query`, with the read-contract headers.
+fn table_response<T: Serialize>(rows: Vec<T>, query: &TableQuery, name_keys: &[&str]) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Shaped", HeaderValue::from_static("1"));
+    if query.q.is_none() && query.limit.is_none() {
+        headers.insert(
+            "X-Total-Count",
+            HeaderValue::from_str(&rows.len().to_string())
+                .expect("a decimal count is always ASCII"),
+        );
+        return (headers, Json(rows)).into_response();
+    }
+    let values: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| serde_json::to_value(r).expect("a row serialises"))
+        .collect();
+    let (kept, total, omitted) =
+        docket_core::shape::narrow_table(values, query.q.as_deref(), query.limit, name_keys);
+    headers.insert(
+        "X-Total-Count",
+        HeaderValue::from_str(&total.to_string()).expect("a decimal count is always ASCII"),
+    );
+    if omitted > 0 {
+        headers.insert(
+            "X-Omitted",
+            HeaderValue::from_str(&omitted.to_string()).expect("a decimal count is always ASCII"),
+        );
+    }
+    (headers, Json(kept)).into_response()
+}
+
 async fn list_topics(
     State(store): State<Arc<Store>>,
-) -> Result<Json<Vec<docket_core::domain::TopicCount>>, ApiError> {
-    Ok(Json(store.list_topics()?))
+    Query(q): Query<TableQuery>,
+) -> Result<Response, ApiError> {
+    Ok(table_response(store.list_topics()?, &q, &["topic"]))
 }
 
 #[derive(Deserialize)]
@@ -994,8 +1103,9 @@ async fn topic_candidates(
 /// ([ADR-0025](../../../docs/decisions/ADR-0025-identity-enumeration-and-drift.md)).
 async fn list_identities(
     State(store): State<Arc<Store>>,
-) -> Result<Json<Vec<docket_core::domain::IdentityCount>>, ApiError> {
-    Ok(Json(store.list_identities()?))
+    Query(q): Query<TableQuery>,
+) -> Result<Response, ApiError> {
+    Ok(table_response(store.list_identities()?, &q, &["identity"]))
 }
 
 #[derive(Deserialize)]
@@ -1107,11 +1217,68 @@ async fn add_comment(
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
+/// Where to start and how much to read of an item's comments (ADR-0029).
+#[derive(Deserialize)]
+struct ListCommentsQuery {
+    /// Epoch milliseconds: only comments written strictly after it.
+    #[serde(default)]
+    since: Option<i64>,
+    /// Only the newest N (after `since`, if both are given).
+    #[serde(default)]
+    tail: Option<usize>,
+    /// A character budget over the returned comments' JSON, spent newest-first; the newest is always
+    /// returned.
+    #[serde(default)]
+    max_chars: Option<usize>,
+}
+
 async fn list_comments(
     State(store): State<Arc<Store>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<docket_core::domain::Comment>>, ApiError> {
-    Ok(Json(store.list_comments(&id)?))
+    Query(q): Query<ListCommentsQuery>,
+) -> Result<Response, ApiError> {
+    let all = store.list_comments(&id)?;
+    let total = all.len();
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Shaped", HeaderValue::from_static("1"));
+    headers.insert(
+        "X-Total-Count",
+        HeaderValue::from_str(&total.to_string()).expect("a decimal count is always ASCII"),
+    );
+    if q.since.is_none() && q.tail.is_none() && q.max_chars.is_none() {
+        return Ok((headers, Json(all)).into_response());
+    }
+    let mut kept: Vec<docket_core::domain::Comment> = all
+        .into_iter()
+        .filter(|c| q.since.is_none_or(|s| c.created_at > s))
+        .collect();
+    if let Some(n) = q.tail {
+        let drop = kept.len().saturating_sub(n);
+        kept.drain(..drop);
+    }
+    let kept = match q.max_chars {
+        None => kept,
+        Some(budget) => {
+            // Newest first: the latest comments are the ones a reader needs, so the
+            // budget is spent from the end.
+            let mut rows: Vec<serde_json::Value> = kept
+                .iter()
+                .rev()
+                .map(|c| serde_json::to_value(c).expect("a comment serialises"))
+                .collect();
+            let (within, _) = docket_core::shape::within(std::mem::take(&mut rows), Some(budget));
+            let n = within.len();
+            kept[kept.len() - n..].to_vec()
+        }
+    };
+    let omitted = total - kept.len();
+    if omitted > 0 {
+        headers.insert(
+            "X-Omitted",
+            HeaderValue::from_str(&omitted.to_string()).expect("a decimal count is always ASCII"),
+        );
+    }
+    Ok((headers, Json(kept)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -3407,6 +3574,242 @@ mod tests {
         let (titles, total) = list("/items?updated_after=99999999999999".to_string()).await;
         assert!(titles.is_empty());
         assert_eq!(total, Some(0));
+    }
+
+    /// ADR-0029 on an item's comments: read from a time, take the newest N, stay within a character budget,
+    /// and be told how many were left out. The plain read is unchanged.
+    #[tokio::test]
+    async fn list_comments_reads_from_a_time_the_newest_n_and_within_a_budget() {
+        let app = test_app();
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/items",
+                serde_json::json!({"topic": "iyulab/docket", "title": "thread"}),
+            ))
+            .await
+            .unwrap();
+        let id = json_body(resp).await["id"].as_str().unwrap().to_string();
+        let mut stamps = Vec::new();
+        for i in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    &format!("/items/{id}/comments"),
+                    serde_json::json!({"author": "w", "body": format!("note {i} {}", "x".repeat(60))}),
+                ))
+                .await
+                .unwrap();
+            stamps.push(json_body(resp).await["created_at"].as_i64().unwrap());
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        let get = |q: &str| {
+            let app = app.clone();
+            let uri = format!("/items/{id}/comments{q}");
+            async move {
+                app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        };
+        let hdr = |r: &Response, n: &str| {
+            r.headers()
+                .get(n)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let bodies = |v: serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["body"].as_str().unwrap()[..6].to_string())
+                .collect()
+        };
+
+        let plain = get("").await;
+        assert_eq!(hdr(&plain, "X-Shaped").as_deref(), Some("1"));
+        assert_eq!(hdr(&plain, "X-Omitted"), None);
+        assert_eq!(json_body(plain).await.as_array().unwrap().len(), 5);
+
+        let tail = get("?tail=2").await;
+        assert_eq!(hdr(&tail, "X-Total-Count").as_deref(), Some("5"));
+        assert_eq!(
+            hdr(&tail, "X-Omitted").as_deref(),
+            Some("3"),
+            "the older ones left out"
+        );
+        assert_eq!(
+            bodies(json_body(tail).await),
+            ["note 3", "note 4"],
+            "newest N, in time order"
+        );
+
+        let since = get(&format!("?since={}", stamps[2])).await;
+        assert_eq!(
+            bodies(json_body(since).await),
+            ["note 3", "note 4"],
+            "strictly after the instant"
+        );
+
+        let one = {
+            let r = get("?tail=1").await;
+            serde_json::to_string(&json_body(r).await[0])
+                .unwrap()
+                .chars()
+                .count()
+        };
+        let budget = get(&format!("?max_chars={}", 2 * one + 3)).await;
+        assert_eq!(hdr(&budget, "X-Omitted").as_deref(), Some("3"));
+        assert_eq!(
+            bodies(json_body(budget).await),
+            ["note 3", "note 4"],
+            "spent newest-first"
+        );
+        let tiny = get("?max_chars=1").await;
+        assert_eq!(
+            bodies(json_body(tiny).await),
+            ["note 4"],
+            "the newest is always returned"
+        );
+    }
+
+    /// ADR-0029 on the two whole-table listings: narrow by name, cap the rows, say what was held back. With no
+    /// parameters the answer is what it always was.
+    #[tokio::test]
+    async fn topics_and_identities_narrow_by_name_and_cap_with_headers() {
+        let app = test_app();
+        for topic in ["iyulab/ironhive", "iyulab/docket", "acme/widget"] {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": topic, "title": "t", "requester": "acme/filer"}),
+                ))
+                .await
+                .unwrap();
+        }
+        let get = |uri: &str| {
+            let app = app.clone();
+            let uri = uri.to_string();
+            async move {
+                app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        };
+        let hdr = |r: &Response, n: &str| {
+            r.headers()
+                .get(n)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+
+        let all = get("/topics").await;
+        assert_eq!(hdr(&all, "X-Shaped").as_deref(), Some("1"));
+        assert_eq!(hdr(&all, "X-Omitted"), None);
+        assert_eq!(json_body(all).await.as_array().unwrap().len(), 3);
+
+        let q = get("/topics?q=IRON").await;
+        assert_eq!(hdr(&q, "X-Total-Count").as_deref(), Some("1"));
+        assert_eq!(json_body(q).await[0]["topic"], "iyulab/ironhive");
+
+        let capped = get("/topics?limit=2").await;
+        assert_eq!(hdr(&capped, "X-Total-Count").as_deref(), Some("3"));
+        assert_eq!(hdr(&capped, "X-Omitted").as_deref(), Some("1"));
+        assert_eq!(json_body(capped).await.as_array().unwrap().len(), 2);
+
+        let ids = get("/identities?q=filer&limit=1").await;
+        assert_eq!(hdr(&ids, "X-Shaped").as_deref(), Some("1"));
+        assert_eq!(json_body(ids).await[0]["identity"], "acme/filer");
+    }
+
+    /// The read contract (ADR-0029) on `GET /items`: the server narrows each row to the named fields, holds
+    /// rows back at a character budget, and says what it did in headers while the body stays a bare array.
+    #[tokio::test]
+    async fn list_items_shapes_the_page_and_reports_it_in_headers() {
+        let app = test_app();
+        for i in 0..6 {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": "iyulab/docket", "title": format!("row {i}"), "body": "b".repeat(200)}),
+                ))
+                .await
+                .unwrap();
+        }
+        let get = |uri: &str| {
+            let app = app.clone();
+            let uri = uri.to_string();
+            async move {
+                app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        };
+        let header = |resp: &Response, name: &str| -> Option<String> {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+
+        // No shaping parameters: every row, every field, and the marker saying this server can shape.
+        let plain = get("/items").await;
+        assert_eq!(header(&plain, "X-Shaped").as_deref(), Some("1"));
+        assert_eq!(header(&plain, "X-Omitted"), None, "nothing was held back");
+        assert_eq!(json_body(plain).await.as_array().unwrap().len(), 6);
+
+        // fields: only the named ones plus id.
+        let narrow = get("/items?fields=title,state").await;
+        let rows = json_body(narrow).await;
+        let mut keys: Vec<&str> = rows[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["id", "state", "title"]);
+
+        // An unknown field is an error that names the valid ones.
+        let bad = get("/items?fields=titel").await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(bad).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("titel")
+        );
+
+        // limit alone: the rest is reported as omitted, with where to continue.
+        let page = get("/items?limit=2&fields=title").await;
+        assert_eq!(header(&page, "X-Total-Count").as_deref(), Some("6"));
+        assert_eq!(header(&page, "X-Omitted").as_deref(), Some("4"));
+        assert_eq!(header(&page, "X-Next-Offset").as_deref(), Some("2"));
+        let page2 = get("/items?limit=2&offset=2&fields=title").await;
+        assert_eq!(header(&page2, "X-Omitted").as_deref(), Some("2"));
+        assert_eq!(header(&page2, "X-Next-Offset").as_deref(), Some("4"));
+        let last = get("/items?limit=2&offset=4&fields=title").await;
+        assert_eq!(header(&last, "X-Omitted"), None);
+
+        // max_chars: whole rows only, at least one, and the rest reported.
+        let one =
+            serde_json::to_string(&json_body(get("/items?limit=1&fields=title").await).await[0])
+                .unwrap()
+                .chars()
+                .count();
+        let budget = get(&format!("/items?fields=title&max_chars={}", 2 * one + 3)).await;
+        let omitted = header(&budget, "X-Omitted").expect("rows were held back");
+        let next = header(&budget, "X-Next-Offset").expect("and a place to continue");
+        let kept = json_body(budget).await.as_array().unwrap().len();
+        assert!((1..6).contains(&kept), "kept {kept}");
+        assert_eq!(omitted.parse::<usize>().unwrap(), 6 - kept);
+        assert_eq!(next.parse::<usize>().unwrap(), kept);
+        let tiny = get("/items?fields=title&max_chars=1").await;
+        assert_eq!(json_body(tiny).await.as_array().unwrap().len(), 1);
     }
 
     /// `limit`/`offset` apply after every other filter (topic/state/tag/

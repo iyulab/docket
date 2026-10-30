@@ -2,6 +2,7 @@
 //! these four enters this crate — see docs/glossary.md.
 
 pub mod domain;
+pub mod shape;
 pub mod storage;
 
 pub use domain::{Item, Resolution, State, Worker};
