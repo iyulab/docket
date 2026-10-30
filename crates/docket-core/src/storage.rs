@@ -916,8 +916,8 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT e.seq, e.item_id, e.kind, e.actor, e.created_at,
-                    i.topic, i.requester, i.assignee
-             FROM item_events e JOIN items i ON i.id = e.item_id
+                    COALESCE(i.topic, e.topic), i.requester, i.assignee, e.topic
+             FROM item_events e LEFT JOIN items i ON i.id = e.item_id
              WHERE e.seq > ?1 ORDER BY e.seq ASC",
         )?;
         let mut rows = stmt.query(params![since])?;
@@ -931,13 +931,14 @@ impl Store {
         let mut scanned = 0usize;
         while let Some(row) = rows.next()? {
             let seq: i64 = row.get(0)?;
-            let item_id: String = row.get(1)?;
+            let item_id: Option<String> = row.get(1)?;
             let kind: String = row.get(2)?;
             let actor: String = row.get(3)?;
             let created_at: i64 = row.get(4)?;
             let topic: String = row.get(5)?;
             let requester: Option<String> = row.get(6)?;
             let assignee: Option<String> = row.get(7)?;
+            let event_topic: Option<String> = row.get(8)?;
 
             cursor = seq;
             scanned += 1;
@@ -958,6 +959,7 @@ impl Store {
                 matched.push(Event {
                     seq,
                     item_id,
+                    topic: event_topic,
                     kind,
                     actor,
                     created_at,
@@ -1531,7 +1533,27 @@ impl Store {
             .query_map([], topic_count_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
+        // Topic comments (ADR-0028): a topic that has only comments is a topic
+        // too, so it is listed with no items rather than left undiscoverable.
+        let mut stmt = conn.prepare(
+            "SELECT topic, COUNT(*) FROM item_comments WHERE topic IS NOT NULL GROUP BY topic",
+        )?;
+        let commented: Vec<(String, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
         drop(conn);
+        for (topic, comments) in commented {
+            raw.push(TopicCount {
+                topic,
+                count: 0,
+                aliases: Vec::new(),
+                owned_by: Vec::new(),
+                owned_by_exact: Vec::new(),
+                open_unclaimed: 0,
+                comments,
+            });
+        }
         raw.sort_by(|a, b| a.topic.cmp(&b.topic));
 
         let mut folded: Vec<TopicCount> = Vec::new();
@@ -1544,6 +1566,7 @@ impl Store {
                 Some(existing) => {
                     existing.count += row.count;
                     existing.open_unclaimed += row.open_unclaimed;
+                    existing.comments += row.comments;
                 }
                 None => folded.push(TopicCount {
                     topic: canonical,
@@ -1552,6 +1575,7 @@ impl Store {
                     owned_by: Vec::new(),
                     owned_by_exact: Vec::new(),
                     open_unclaimed: row.open_unclaimed,
+                    comments: row.comments,
                 }),
             }
         }
@@ -2132,6 +2156,71 @@ impl Store {
             now,
         )?;
         Ok(Comment {
+            body: REDACTED.to_string(),
+            ..current
+        })
+    }
+
+    /// [`Store::redact_comment`] for a comment that belongs to a topic: overwrites
+    /// the body in place and leaves a topic comment naming the redacted comment's
+    /// id (never its content) as the audit trail. The comment is named by the
+    /// topic it was written to, under any spelling of it; an item's comment is
+    /// never reachable from here. Idempotent.
+    pub fn redact_topic_comment(
+        &self,
+        topic: &str,
+        comment_id: &str,
+        author: &str,
+    ) -> Result<TopicComment> {
+        let aliases = self.alias_map()?;
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut sql = String::from(
+            "SELECT id, topic, author, body, created_at, seq FROM item_comments
+             WHERE topic IS NOT NULL AND id = ?",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(comment_id.to_string())];
+        push_identity_group_filter(
+            &mut sql,
+            &mut args,
+            "topic",
+            &aliases.group_of(topic.trim()),
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+        let current = conn
+            .query_row(&sql, rusqlite::params_from_iter(param_refs), |row| {
+                Ok(TopicComment {
+                    id: row.get(0)?,
+                    topic: row.get(1)?,
+                    author: row.get(2)?,
+                    body: row.get(3)?,
+                    created_at: row.get(4)?,
+                    seq: row.get(5)?,
+                })
+            })
+            .optional()?
+            .ok_or(StoreError::NotFound)?;
+        if current.body == REDACTED {
+            return Ok(current);
+        }
+        let now = now_millis();
+        conn.execute(
+            "UPDATE item_comments SET body = ?1 WHERE id = ?2",
+            params![REDACTED, comment_id],
+        )?;
+        let audit_seq = next_comment_seq(&conn)?;
+        conn.execute(
+            "INSERT INTO item_comments (id, item_id, topic, author, body, created_at, seq)
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                current.topic,
+                author,
+                format!("redacted comment {comment_id}"),
+                now,
+                audit_seq
+            ],
+        )?;
+        Ok(TopicComment {
             body: REDACTED.to_string(),
             ..current
         })
@@ -2741,6 +2830,7 @@ fn topic_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<TopicCount> {
         owned_by: Vec::new(),
         owned_by_exact: Vec::new(),
         open_unclaimed: row.get(2)?,
+        comments: 0,
     })
 }
 
@@ -2996,7 +3086,7 @@ mod tests {
 
         let (events, _cursor) = store.list_events("acme/bot", 0, 50).unwrap();
         let seen_items: std::collections::HashSet<String> =
-            events.iter().map(|e| e.item_id.clone()).collect();
+            events.iter().filter_map(|e| e.item_id.clone()).collect();
         assert!(seen_items.contains(&by_assignee.id));
         assert!(
             seen_items.contains(&by_topic.id),
@@ -3021,7 +3111,11 @@ mod tests {
         // proves list_events' NotFound gate also resolves through it rather
         // than requiring the registration's exact spelling.
         let (events, _) = store.list_events("bot-old-name", 0, 50).unwrap();
-        assert!(events.iter().any(|e| e.item_id == item.id));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.item_id.as_deref() == Some(item.id.as_str()))
+        );
     }
 
     #[test]
@@ -3040,7 +3134,11 @@ mod tests {
             store.claim_item(&noise.id, "acme/someone-else").unwrap();
         }
         let (events, cursor) = store.list_events("acme/bot", 0, 50).unwrap();
-        assert!(events.iter().any(|e| e.item_id == relevant.id));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.item_id.as_deref() == Some(relevant.id.as_str()))
+        );
         let max_seq: i64 = store
             .conn
             .lock()
@@ -3103,7 +3201,9 @@ mod tests {
 
         let (first, cursor1) = store.list_events("acme/bot", 0, 50).unwrap();
         assert!(
-            !first.iter().any(|e| e.item_id == relevant.id),
+            !first
+                .iter()
+                .any(|e| e.item_id.as_deref() == Some(relevant.id.as_str())),
             "the scan cap must stop before reaching the relevant event on the first call"
         );
         assert!(
@@ -3113,7 +3213,9 @@ mod tests {
 
         let (second, _cursor2) = store.list_events("acme/bot", cursor1, 50).unwrap();
         assert!(
-            second.iter().any(|e| e.item_id == relevant.id),
+            second
+                .iter()
+                .any(|e| e.item_id.as_deref() == Some(relevant.id.as_str())),
             "a second poll from the advanced cursor must find the event the cap deferred"
         );
     }
@@ -6905,5 +7007,206 @@ mod tests {
         assert_eq!(seqs, again, "a second open does not renumber");
         drop(second);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- ADR-0028 §3-5: following, discovering and redacting topic comments ----
+
+    #[test]
+    fn a_worker_registered_for_a_topic_reads_its_comments_in_list_events() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/reader", &["channel/agents".to_string()])
+            .unwrap();
+        store
+            .register_worker("acme/elsewhere", &["channel/other".to_string()])
+            .unwrap();
+        let written = store
+            .add_topic_comment("channel/agents", "acme/alice", "hello")
+            .unwrap();
+
+        let (events, _) = store.list_events("acme/reader", 0, 50).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "comment");
+        assert_eq!(events[0].topic.as_deref(), Some("channel/agents"));
+        assert_eq!(events[0].item_id, None, "a topic comment has no item");
+        assert_eq!(events[0].actor, "acme/alice");
+        let _ = written;
+
+        let (none, cursor) = store.list_events("acme/elsewhere", 0, 50).unwrap();
+        assert!(none.is_empty(), "a worker on another topic is not told");
+        assert!(cursor > 0, "but its cursor still advances past the event");
+    }
+
+    #[test]
+    fn a_prefix_registration_follows_the_topics_beneath_it() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/reader", &["channel".to_string()])
+            .unwrap();
+        store
+            .add_topic_comment("channel/agents", "acme/alice", "hello")
+            .unwrap();
+        let (events, _) = store.list_events("acme/reader", 0, 50).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn topic_events_fold_declared_aliases() {
+        let store = open_test_store();
+        store.put_alias("agents", "channel/agents").unwrap();
+        store
+            .register_worker("acme/reader", &["channel/agents".to_string()])
+            .unwrap();
+        store
+            .add_topic_comment("agents", "acme/alice", "via the alias")
+            .unwrap();
+        let (events, _) = store.list_events("acme/reader", 0, 50).unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "a comment under any spelling reaches the owner"
+        );
+    }
+
+    #[test]
+    fn a_workers_own_topic_comment_is_returned_to_it_like_any_other() {
+        // No stakeholder leg exists for a topic comment (ADR-0028 §4): the author
+        // reads it only if registered for the topic, exactly like everyone else.
+        let store = open_test_store();
+        store
+            .register_worker("acme/alice", &["unrelated".to_string()])
+            .unwrap();
+        store
+            .add_topic_comment("channel/agents", "acme/alice", "mine")
+            .unwrap();
+        let (events, _) = store.list_events("acme/alice", 0, 50).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn item_events_and_topic_events_share_one_cursor_order() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/reader", &["channel".to_string(), "acme".to_string()])
+            .unwrap();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        store
+            .add_topic_comment("channel/agents", "acme/alice", "between")
+            .unwrap();
+        store.add_comment(&item.id, "acme/bob", "after").unwrap();
+        let (events, _) = store.list_events("acme/reader", 0, 50).unwrap();
+        let shape: Vec<(&str, bool)> = events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.item_id.is_some()))
+            .collect();
+        assert_eq!(
+            shape,
+            [("created", true), ("comment", false), ("comment", true)]
+        );
+        assert!(events.windows(2).all(|w| w[0].seq < w[1].seq));
+    }
+
+    #[test]
+    fn list_topics_finds_a_topic_that_has_only_comments() {
+        let store = open_test_store();
+        store
+            .add_topic_comment("channel/agents", "acme/alice", "one")
+            .unwrap();
+        store
+            .add_topic_comment("channel/agents", "acme/bob", "two")
+            .unwrap();
+        let topics = store.list_topics().unwrap();
+        let row = topics.iter().find(|t| t.topic == "channel/agents").unwrap();
+        assert_eq!(row.comments, 2);
+        assert_eq!(row.count, 0, "it holds no items");
+        assert_eq!(row.open_unclaimed, 0, "and no unclaimed work");
+    }
+
+    #[test]
+    fn list_topics_counts_comments_beside_items_and_folds_aliases() {
+        let store = open_test_store();
+        store.put_alias("agents", "channel/agents").unwrap();
+        store
+            .create_item("channel/agents", "an item", None, &[], None)
+            .unwrap();
+        store
+            .add_topic_comment("agents", "acme/alice", "via alias")
+            .unwrap();
+        store
+            .add_topic_comment("channel/agents", "acme/bob", "canonical")
+            .unwrap();
+        let topics = store.list_topics().unwrap();
+        assert_eq!(topics.len(), 1, "one folded row");
+        assert_eq!(topics[0].count, 1);
+        assert_eq!(topics[0].comments, 2);
+    }
+
+    #[test]
+    fn a_topic_comment_never_counts_as_unclaimed_work() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/reader", &["channel".to_string()])
+            .unwrap();
+        store
+            .add_topic_comment("channel/agents", "acme/alice", "hello")
+            .unwrap();
+        let mine = store
+            .list_items(None, Some(State::Open), None, SortOrder::Desc)
+            .unwrap();
+        assert!(mine.is_empty());
+    }
+
+    #[test]
+    fn redacting_a_topic_comment_overwrites_the_body_and_leaves_an_audit_trail() {
+        let store = open_test_store();
+        let c = store
+            .add_topic_comment("channel/agents", "acme/alice", "a secret value")
+            .unwrap();
+        let redacted = store
+            .redact_topic_comment("channel/agents", &c.id, "acme/admin")
+            .unwrap();
+        assert_eq!(redacted.body, "[redacted]");
+        let listed = store.list_topic_comments("channel/agents").unwrap();
+        let bodies: Vec<&str> = listed.iter().map(|c| c.body.as_str()).collect();
+        assert!(!bodies.iter().any(|b| b.contains("secret")));
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.contains(&c.id) && b.starts_with("redacted comment")),
+            "the audit comment names the id, never the body: {bodies:?}"
+        );
+        // Idempotent.
+        let again = store
+            .redact_topic_comment("channel/agents", &c.id, "acme/admin")
+            .unwrap();
+        assert_eq!(again.body, "[redacted]");
+        assert_eq!(
+            store.list_topic_comments("channel/agents").unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn redacting_names_a_comment_by_its_own_topic_and_never_an_item_comment() {
+        let store = open_test_store();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        let on_item = store
+            .add_comment(&item.id, "acme/alice", "on item")
+            .unwrap();
+        let on_topic = store
+            .add_topic_comment("channel/agents", "acme/alice", "on topic")
+            .unwrap();
+        assert!(matches!(
+            store.redact_topic_comment("channel/agents", &on_item.id, "acme/admin"),
+            Err(StoreError::NotFound)
+        ));
+        assert!(matches!(
+            store.redact_topic_comment("channel/other", &on_topic.id, "acme/admin"),
+            Err(StoreError::NotFound)
+        ));
     }
 }

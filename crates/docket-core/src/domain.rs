@@ -441,6 +441,11 @@ pub struct TopicCount {
     /// instead of once per interested worker.
     #[serde(default)]
     pub open_unclaimed: i64,
+    /// Topic comments written to this topic ([ADR-0028](../../../docs/decisions/ADR-0028-topic-comments.md)).
+    /// A topic with comments and no items is listed too, with `count` 0, so a
+    /// worker can find a channel it does not know about yet.
+    #[serde(default)]
+    pub comments: i64,
 }
 
 /// One row of `list_identities` — a single identity and how it is currently
@@ -546,7 +551,14 @@ pub struct TopicComment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Event {
     pub seq: i64,
-    pub item_id: String,
+    /// The item the event is about. Absent for an event on a topic, which has
+    /// no item behind it ([ADR-0028](../../../docs/decisions/ADR-0028-topic-comments.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// The topic a topic comment was written to. Absent for an item event --
+    /// the item already says where it sits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
     /// One of `"created"` / `"transition"` / `"comment"` — not a Rust enum
     /// at this layer, same treatment `tag`/`comment` bodies get (ADR-0009):
     /// core doesn't need to branch on it, only store and return it.
