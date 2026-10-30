@@ -171,8 +171,8 @@ Not every `docket-core` HTTP operation becomes a `docket-mcp` tool. An operation
 MCP when a worker can safely call it on its own judgment — reversible, or destructive only to
 something disposable (a claim, a tag). An operation stays off MCP when it is irreversible against
 durable history, or represents an admin/human value judgment about an item's disposition:
-`remove`, `merge`, `force-close`, `force-approve`, `delete`, and `redact` (both `redact_item` and
-`redact_comment`) all stay HTTP-only under this rule, each with a console button for the human
+`remove`, `merge`, `force-close`, `force-approve`, `delete`, and `redact` (`redact_item`,
+`redact_comment` and `redact_topic_comment`) all stay HTTP-only under this rule, each with a console button for the human
 operator MCP exclusion is routing around. `redact` in particular is the most irreversible operation
 in the whole surface — even `delete` at least removes a value along with everything referencing
 it, where `redact` deliberately leaves the item or comment in place with one field gone, which is

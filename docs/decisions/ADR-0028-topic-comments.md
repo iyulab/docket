@@ -1,4 +1,4 @@
-Status: v0 implementation | 2026-10-30 | decided, not yet implemented
+Status: v0 implementation | 2026-10-30 | implemented
 
 # ADR-0028: A comment can belong to a topic
 
