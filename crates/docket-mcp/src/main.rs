@@ -753,6 +753,68 @@ fn with_author(mut body: serde_json::Value, author: String) -> serde_json::Value
     body
 }
 
+/// What a write's result keeps of the item it changed: where the item stands
+/// now, not a copy of what the caller just sent. Echoing the whole item made
+/// every acknowledgement cost as much as reading it again (about 2.2K chars
+/// each, measured over real agent sessions). `get_item` returns the full
+/// item for the rare caller that wants it; `claim_item` is the one write
+/// that still returns it, because claiming is how an agent picks the work up.
+const ITEM_ACK: &[&str] = &[
+    "id",
+    "seq",
+    "topic",
+    "state",
+    "resolution",
+    "assignee",
+    "turn",
+    "state_since",
+];
+
+/// `ITEM_ACK` plus the one field `archive_item` exists to change.
+const ARCHIVE_ACK: &[&str] = &[
+    "id",
+    "seq",
+    "topic",
+    "state",
+    "resolution",
+    "assignee",
+    "turn",
+    "state_since",
+    "archived_at",
+];
+
+/// A comment's acknowledgement: that it landed, where, and under whose name
+/// (the one thing a caller relying on the `DOCKET_WORKER_ID` fallback cannot
+/// know in advance) -- not its body back.
+const COMMENT_ACK: &[&str] = &["id", "item_id", "author", "created_at"];
+
+/// Narrows a successful write result to `keep`. Advisories (any key ending in
+/// `_advisory`) always pass: they are the part of a result the caller could
+/// not have known, and dropping one would turn "worth attaching" into silence.
+/// `null` fields are omitted -- absent and `null` mean the same to a caller
+/// reading JSON, and an open item has several. Anything unrecognised (an error,
+/// a non-object) comes back untouched.
+fn ack(result: CallToolResult, keep: &[&str]) -> CallToolResult {
+    if result.is_error == Some(true) {
+        return result;
+    }
+    let Some(ContentBlock::Text(text)) = result.content.first() else {
+        return result;
+    };
+    let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(&text.text)
+    else {
+        return result;
+    };
+    let slim: serde_json::Map<String, serde_json::Value> = obj
+        .into_iter()
+        .filter(|(k, v)| !v.is_null() && (keep.contains(&k.as_str()) || k.ends_with("_advisory")))
+        .collect();
+    match ContentBlock::json(serde_json::Value::Object(slim)) {
+        Ok(block) => CallToolResult::success(vec![block]),
+        Err(_) => result,
+    }
+}
+
 /// Inserts a `topic_advisory` key into a successful tool result's JSON
 /// object — never appended as trailing prose, which would break every
 /// caller (including this crate's own `field()`/`json_value()` test
@@ -930,7 +992,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        let result = respond::<ItemDto>(resp).await?;
+        let result = ack(respond::<ItemDto>(resp).await?, ITEM_ACK);
         if result.is_error == Some(true) {
             return Ok(result);
         }
@@ -1525,7 +1587,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        respond::<ItemDto>(resp).await.map(|r| ack(r, ITEM_ACK))
     }
 
     #[tool(
@@ -1550,7 +1612,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        respond::<ItemDto>(resp).await.map(|r| ack(r, ITEM_ACK))
     }
 
     #[tool(
@@ -1578,7 +1640,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        respond::<ItemDto>(resp).await.map(|r| ack(r, ITEM_ACK))
     }
 
     #[tool(
@@ -1604,7 +1666,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        respond::<ItemDto>(resp).await.map(|r| ack(r, ITEM_ACK))
     }
 
     #[tool(
@@ -1633,7 +1695,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        respond::<ItemDto>(resp).await.map(|r| ack(r, ITEM_ACK))
     }
 
     #[tool(
@@ -1660,7 +1722,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        respond::<ItemDto>(resp).await.map(|r| ack(r, ITEM_ACK))
     }
 
     #[tool(
@@ -1704,7 +1766,7 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        respond::<ItemDto>(resp).await.map(|r| ack(r, ARCHIVE_ACK))
     }
 
     #[tool(
@@ -1928,7 +1990,9 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<CommentDto>(resp).await
+        respond::<CommentDto>(resp)
+            .await
+            .map(|r| ack(r, COMMENT_ACK))
     }
 
     #[tool(description = "List an item's comment thread in chronological order")]
@@ -2079,7 +2143,8 @@ mod tests {
         command
             .env("DOCKET_PORT", port.to_string())
             .env("DOCKET_DB_PATH", db_path)
-            .env_remove("DOCKET_TOKEN");
+            .env_remove("DOCKET_TOKEN")
+            .env_remove("DOCKET_PASSWORD");
         if let Some(token) = token {
             command.env("DOCKET_TOKEN", token);
         }
@@ -2409,7 +2474,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(field(&rejected, "state"), "claimed");
-        assert_eq!(json_value(&rejected)["open"], serde_json::json!(true));
+        // reject hands the turn back to the assignee: that, not `open`, is what the ack says.
+        assert_eq!(field(&rejected, "turn"), "assignee");
 
         server
             .submit_item(Parameters(SubmitParams {
@@ -2428,7 +2494,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(field(&approved, "state"), "closed");
-        assert_eq!(json_value(&approved)["open"], serde_json::json!(false));
+        assert_eq!(field(&approved, "resolution"), "done");
 
         let reopened = server
             .reopen_item(Parameters(ReasonedParams {
@@ -2912,6 +2978,159 @@ mod tests {
         assert_eq!(listed_value[0]["author"], "maintainer");
     }
 
+    /// A write's result answers "did it land, and where does the item stand
+    /// now" -- not "here is everything you just sent". Echoing the item back
+    /// made every acknowledgement cost as much as reading it again.
+    #[tokio::test]
+    async fn write_tools_return_a_minimal_ack_but_claim_still_returns_the_item() {
+        let dir = std::env::temp_dir().join(format!("docket-mcp-test-ack-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ack.db");
+        let core = spawn_core(18991, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        let keys = |r: &CallToolResult| -> Vec<String> {
+            let v: serde_json::Value = serde_json::from_str(text_of(r)).unwrap();
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let long_body = "a long request body ".repeat(40);
+
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "iyulab/docket".to_string(),
+                title: "a title the caller already knows".to_string(),
+                body: Some(long_body.clone()),
+                tags: vec!["kind:feature-request".to_string()],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(
+            created.is_error,
+            Some(true),
+            "create failed: {}",
+            text_of(&created)
+        );
+        let created_keys = keys(&created);
+        for must in ["id", "seq", "state", "topic"] {
+            assert!(
+                created_keys.iter().any(|k| k == must),
+                "create ack lacks {must}: {created_keys:?}"
+            );
+        }
+        for must_not in ["body", "title", "tags", "created_at", "updated_at"] {
+            assert!(
+                !created_keys.iter().any(|k| k == must_not),
+                "create ack must not echo {must_not}: {created_keys:?}"
+            );
+        }
+        let item_id = field(&created, "id");
+
+        // claim is the moment an agent picks the work up: it still gets the item.
+        let claimed = server
+            .claim_item(Parameters(ClaimOrSubmitParams {
+                item_id: item_id.clone(),
+                worker_id: Some("worker-a".to_string()),
+            }))
+            .await
+            .unwrap();
+        let claimed_value: serde_json::Value = serde_json::from_str(text_of(&claimed)).unwrap();
+        assert_eq!(claimed_value["body"], long_body.as_str());
+
+        let commented = server
+            .add_comment(Parameters(AddCommentParams {
+                item_id: item_id.clone(),
+                author: Some("worker-a".to_string()),
+                body: "progress note the caller just wrote".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(keys(&commented), ["author", "created_at", "id", "item_id"]);
+
+        let submitted = server
+            .submit_item(Parameters(SubmitParams {
+                item_id: item_id.clone(),
+                worker_id: Some("worker-a".to_string()),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+        let submitted_value: serde_json::Value = serde_json::from_str(text_of(&submitted)).unwrap();
+        assert_eq!(submitted_value["state"], "resolved");
+        assert_eq!(submitted_value["turn"], "requester");
+        assert_eq!(submitted_value["assignee"], "worker-a");
+        assert!(
+            submitted_value["state_since"].is_number() || submitted_value["state_since"].is_null()
+        );
+        for must_not in [
+            "body",
+            "title",
+            "tags",
+            "requester",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                submitted_value.get(must_not).is_none(),
+                "submit ack must not echo {must_not}: {submitted_value}"
+            );
+        }
+
+        let approved = server
+            .approve_item(Parameters(ApproveParams {
+                item_id: item_id.clone(),
+                author: Some("worker-b".to_string()),
+            }))
+            .await
+            .unwrap();
+        let approved_value: serde_json::Value = serde_json::from_str(text_of(&approved)).unwrap();
+        assert_eq!(approved_value["state"], "closed");
+        assert_eq!(approved_value["resolution"], "done");
+        assert!(approved_value.get("body").is_none());
+
+        // The full item is still one get_item away.
+        let fetched = server
+            .get_item(Parameters(GetItemParams {
+                item_id,
+                expand_related: None,
+            }))
+            .await
+            .unwrap();
+        let fetched_value: serde_json::Value = serde_json::from_str(text_of(&fetched)).unwrap();
+        assert_eq!(fetched_value["body"], long_body.as_str());
+    }
+
+    #[tokio::test]
+    async fn create_item_ack_keeps_the_advisories() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-ack-adv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ack-adv.db");
+        let core = spawn_core(18992, &db_path).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        // No worker serves this topic, so topic_advisory must survive the slimmer ack.
+        let created = server
+            .create_item(Parameters(CreateItemParams {
+                topic: "nobody/serves-this".to_string(),
+                title: "t".to_string(),
+                body: None,
+                tags: vec![],
+                requester: None,
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text_of(&created)).unwrap();
+        assert!(v.get("topic_advisory").is_some(), "advisory dropped: {v}");
+        assert!(v.get("title").is_none());
+    }
+
     #[tokio::test]
     async fn archive_item_hides_from_default_list_items_tool() {
         let dir =
@@ -3077,8 +3296,8 @@ mod tests {
 
         let text = text_of(&mistargeted);
         assert!(
-            text.contains("mistargeted") || text.contains("\"title\""),
-            "the item is still created"
+            text.contains("\"id\"") && text.contains("\"state\":\"open\""),
+            "the item is still created (acknowledged by id and state): {text}"
         );
         assert!(
             text.contains("iyulab/docket"),

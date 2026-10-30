@@ -163,6 +163,17 @@ either spelling in view by registering both as topics — items it *filed* under
 still will not come back through its `mine`. For a one-off misspelling on a single item, correct
 the item instead (`set_item_requester` / `set_item_assignee` / `set_item_topic`).
 
+**Write results are acknowledgements, not copies.** An agent's context is the scarce resource, so a
+write tool answers "did it land, and where does the item stand now" rather than echoing what the
+caller just sent. `submit_item`, `approve_item`, `reject_item`, `reopen_item`, `block_item`,
+`defer_item` and `create_item` return `id`, `seq`, `topic`, `state`, `resolution`, `assignee`,
+`turn` and `state_since` (`archive_item` adds `archived_at`); `add_comment` returns `id`, `item_id`,
+`author` and `created_at`. Fields that are `null` are omitted. Advisories on `create_item` (any key
+ending in `_advisory`) are always kept. `claim_item` still returns the whole item, because claiming
+is how an agent picks the work up. Call `get_item` for the full item. The HTTP API is unchanged:
+this shaping lives in `docket-mcp`, so the console and direct HTTP callers see the same bodies as
+before.
+
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id?`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5. `id` **resolvable-required** at this tool layer (cycle-58, same pattern as `claim_item` above) — omit it to use this session's `DOCKET_WORKER_ID`; a tool-level error only if neither is present. Two drift cases behave differently and the difference matters: an `id` differing only in **case** lands on the existing row and the response returns its canonical spelling (adopt it — [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md) chose that over a `409`), but a **bare `id` with no org scope** (`widget` where the server knows `acme/widget`) is a *different* identity, so the upsert cannot fold it and a second worker row appears. That one can't be resolved automatically, so the tool result carries an `id_advisory` naming the scoped spellings it collides with — the same bare-leaf gate `create_item`'s `requester_advisory` uses. Registration succeeds either way; the advisory never blocks it. A worker whose spelling split this way has a *different jurisdiction* than the one holding the work, so its `mine`/`topic_scope` silently go quiet |
