@@ -43,7 +43,10 @@ cargo run -p docket-core
 ```
 
 Binds `127.0.0.1:8420` by default (override with `DOCKET_BIND`/`DOCKET_PORT`), opens/creates a SQLite
-file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). Authentication is
+file at `docket.db` in the working directory (override with `DOCKET_DB_PATH`). When a start has to
+rebuild the comment tables for topic comments ([ADR-0028](decisions/ADR-0028-topic-comments.md)), it first
+writes a point-in-time copy next to the database, `<db>.pre-topic-comments.bak`; rolling the server
+back to an older release means putting that copy back. Authentication is
 opt-in: set `DOCKET_TOKEN` (16+ characters, e.g. `openssl rand -hex 32`) and every API call must send
 `Authorization: Bearer <token>`; without it the API is open — keep it off any network you don't trust
 (§9, [ADR-0026](decisions/ADR-0026-shared-token-auth.md)). People using the console can have their own, shorter secret: set `DOCKET_PASSWORD` (8+ characters,
