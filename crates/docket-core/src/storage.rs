@@ -71,6 +71,9 @@ impl Store {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
+        // Before anything is created or rebuilt: a database whose comment table
+        // is about to change shape is snapshotted first (see the function).
+        snapshot_before_topic_comments(&conn, path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS workers (
                 id TEXT PRIMARY KEY,
@@ -2378,6 +2381,43 @@ fn fts5_match_query(q: &str) -> String {
         .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The file a database is snapshotted to before the ADR-0028 migration.
+fn topic_comments_backup_path(db_path: &str) -> String {
+    format!("{db_path}.pre-topic-comments.bak")
+}
+
+/// Writes a consistent snapshot of the database next to it before the ADR-0028
+/// migration rebuilds its comment and event tables.
+///
+/// The migration is one transaction, so a failure leaves the database as it
+/// was; the snapshot is for the other failure -- a database that migrates fine
+/// and then turns out to need the old shape back (rolling the server binary
+/// back). `VACUUM INTO` is a point-in-time copy even while the database is in
+/// WAL mode, unlike copying the file. Written once: a snapshot already there is
+/// kept, since it is the older one. An in-memory database has nothing to keep.
+fn snapshot_before_topic_comments(conn: &Connection, db_path: &str) -> Result<()> {
+    if db_path.is_empty() || db_path == ":memory:" {
+        return Ok(());
+    }
+    let has_comments: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'item_comments'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !has_comments || table_has_column(conn, "item_comments", "topic")? {
+        return Ok(());
+    }
+    let backup = topic_comments_backup_path(db_path);
+    if std::path::Path::new(&backup).exists() {
+        return Ok(());
+    }
+    conn.execute("VACUUM INTO ?1", params![backup])?;
+    Ok(())
 }
 
 /// Whether `table` has a column named `column`.
@@ -7299,5 +7339,67 @@ mod tests {
             .unwrap();
         let (events, _) = store.list_events("acme/commenter", 0, 50).unwrap();
         assert_eq!(events.len(), 1);
+    }
+
+    // ---- a database about to change shape is backed up first ----
+
+    #[test]
+    fn migrating_a_legacy_database_leaves_a_snapshot_of_it_as_it_was() {
+        let dir = temp_db_dir("adr-0028-backup-test");
+        let db_path = dir.join("legacy.db");
+        write_pre_adr_0028_database(&db_path);
+
+        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+        drop(store);
+
+        let backup = dir.join("legacy.db.pre-topic-comments.bak");
+        assert!(
+            backup.exists(),
+            "a snapshot is written before the tables are rebuilt"
+        );
+        let snapshot = Connection::open(&backup).unwrap();
+        let comments: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM item_comments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(comments, 2, "it holds every row");
+        let has_topic: bool = snapshot
+            .prepare("PRAGMA table_info(item_comments)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .any(|c| c.unwrap() == "topic");
+        assert!(!has_topic, "and the shape it had before the migration");
+        drop(snapshot);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_database_that_needs_no_migration_is_not_backed_up() {
+        let dir = temp_db_dir("adr-0028-nobackup-test");
+        let db_path = dir.join("fresh.db");
+        let first = Store::open(db_path.to_str().unwrap()).unwrap();
+        drop(first);
+        let second = Store::open(db_path.to_str().unwrap()).unwrap();
+        drop(second);
+        assert!(!dir.join("fresh.db.pre-topic-comments.bak").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_second_open_of_a_migrated_database_does_not_replace_the_snapshot() {
+        let dir = temp_db_dir("adr-0028-keepbackup-test");
+        let db_path = dir.join("legacy.db");
+        write_pre_adr_0028_database(&db_path);
+        drop(Store::open(db_path.to_str().unwrap()).unwrap());
+        let backup = dir.join("legacy.db.pre-topic-comments.bak");
+        let before = std::fs::metadata(&backup).unwrap().len();
+        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+        store
+            .add_topic_comment("channel/agents", "acme/a", "after")
+            .unwrap();
+        drop(store);
+        drop(Store::open(db_path.to_str().unwrap()).unwrap());
+        assert_eq!(std::fs::metadata(&backup).unwrap().len(), before);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
