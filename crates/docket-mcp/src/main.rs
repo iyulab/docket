@@ -719,7 +719,7 @@ struct TagCountDto {
 #[serde(deny_unknown_fields)]
 struct ListTableParams {
     /// Case-insensitive substring; keeps only rows whose name (or a declared
-    /// alias of it) contains it, e.g. `ironhive`.
+    /// alias of it) contains it, e.g. `gateway`.
     #[serde(default)]
     q: Option<String>,
     /// Max rows returned (default 50). `total` counts every match and
@@ -2435,7 +2435,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Correct an item's topic (filed under the wrong one, e.g. after create_item's topic_advisory). A one-off fix for one item; a spelling used across many items needs an alias, which is the owner's job outside MCP. Any state, idempotent, recorded as a comment."
+        description = "Correct an item's topic (filed under the wrong one, e.g. after create_item's topic_advisory). A one-off fix for one item; a spelling used across many items needs an alias, which is the administrator's job outside MCP. Any state, idempotent, recorded as a comment."
     )]
     async fn set_item_topic(
         &self,
@@ -2534,7 +2534,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Every identity in use (requester, assignee, topic, registered worker -- one namespace; case variants and declared aliases fold into one row) with its item counts per role. Reading it is how you spot one party split across two spellings (`filer` beside `acme/filer`), which no per-field query reports. Narrow with q. Fix one item with set_item_requester/assignee/topic; a recurring spelling needs an alias (an owner decision, outside MCP)."
+        description = "Every identity in use (requester, assignee, topic, registered worker -- one namespace; case variants and declared aliases fold into one row) with its item counts per role. Reading it is how you spot one party split across two spellings (`filer` beside `acme/filer`), which no per-field query reports. Narrow with q. Fix one item with set_item_requester/assignee/topic; a recurring spelling needs an alias (an administrator's decision, outside MCP)."
     )]
     async fn list_identities(
         &self,
@@ -4209,8 +4209,8 @@ mod tests {
     #[test]
     fn narrow_table_matches_a_substring_of_the_name_or_an_alias_ignoring_case() {
         let mut rows = table_rows(3);
-        rows.push(serde_json::json!({ "topic": "acme/IronHive", "aliases": [] }));
-        let (kept, total, omitted) = narrow_table(rows.clone(), Some("ironhive"), None);
+        rows.push(serde_json::json!({ "topic": "acme/Gateway", "aliases": [] }));
+        let (kept, total, omitted) = narrow_table(rows.clone(), Some("gateway"), None);
         assert_eq!((kept.len(), total, omitted), (1, 1, 0));
         let (kept, total, _) = narrow_table(rows, Some("SHORT-2"), None);
         assert_eq!((kept.len(), total), (1, 1), "an alias is searchable too");

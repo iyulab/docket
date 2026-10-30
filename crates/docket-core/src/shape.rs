@@ -178,8 +178,8 @@ mod tests {
     #[test]
     fn narrow_table_matches_the_name_or_an_alias_ignoring_case() {
         let mut rows = table(3);
-        rows.push(json!({ "topic": "acme/IronHive", "count": 9, "aliases": [] }));
-        let (kept, total, omitted) = narrow_table(rows.clone(), Some("ironhive"), None, &["topic"]);
+        rows.push(json!({ "topic": "acme/Gateway", "count": 9, "aliases": [] }));
+        let (kept, total, omitted) = narrow_table(rows.clone(), Some("gateway"), None, &["topic"]);
         assert_eq!((kept.len(), total, omitted), (1, 1, 0));
         let (kept, total, _) = narrow_table(rows, Some("SHORT-2"), None, &["topic"]);
         assert_eq!((kept.len(), total), (1, 1), "an alias is searchable too");

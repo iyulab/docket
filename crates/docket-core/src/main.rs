@@ -3680,7 +3680,7 @@ mod tests {
     #[tokio::test]
     async fn topics_and_identities_narrow_by_name_and_cap_with_headers() {
         let app = test_app();
-        for topic in ["iyulab/ironhive", "iyulab/docket", "acme/widget"] {
+        for topic in ["iyulab/gateway", "iyulab/docket", "acme/widget"] {
             app.clone()
                 .oneshot(json_request(
                     "POST",
@@ -3711,9 +3711,9 @@ mod tests {
         assert_eq!(hdr(&all, "X-Omitted"), None);
         assert_eq!(json_body(all).await.as_array().unwrap().len(), 3);
 
-        let q = get("/topics?q=IRON").await;
+        let q = get("/topics?q=GATE").await;
         assert_eq!(hdr(&q, "X-Total-Count").as_deref(), Some("1"));
-        assert_eq!(json_body(q).await[0]["topic"], "iyulab/ironhive");
+        assert_eq!(json_body(q).await[0]["topic"], "iyulab/gateway");
 
         let capped = get("/topics?limit=2").await;
         assert_eq!(hdr(&capped, "X-Total-Count").as_deref(), Some("3"));
