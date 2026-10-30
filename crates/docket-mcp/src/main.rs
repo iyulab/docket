@@ -130,123 +130,157 @@ struct ListEventsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListItemsParams {
-    /// Topic filter — matches one topic, case-insensitively like every
-    /// identifier comparison (ADR-0021).
+    /// Exact topic (case-insensitive).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Topic filter — matches one topic, case-insensitively like every
+    // identifier comparison (ADR-0021).
     #[serde(default)]
     topic: Option<String>,
-    /// One of open/claimed/resolved/closed.
+    /// open, claimed, resolved or closed. Not together with `mine`.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // One of open/claimed/resolved/closed.
     #[serde(default)]
     state: Option<String>,
-    /// A worker id — narrows the list to items whose `assignee` (current
-    /// holder) is this worker. Compared case-insensitively, like every
-    /// identifier (ADR-0021).
+    /// Items held by this worker id.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // A worker id — narrows the list to items whose `assignee` (current
+    // holder) is this worker. Compared case-insensitively, like every
+    // identifier (ADR-0021).
     #[serde(default)]
     assignee: Option<String>,
-    /// Matches the item's `requester` — symmetric to `assignee` above, and
-    /// case-insensitive like it (ADR-0021).
+    /// Items filed by this identity.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Matches the item's `requester` — symmetric to `assignee` above, and
+    // case-insensitive like it (ADR-0021).
     #[serde(default)]
     requester: Option<String>,
-    /// A registered worker id — narrows the list to items under any topic
-    /// that worker is registered for (prefix match). Unlike `assignee`,
-    /// this doesn't check who actually holds any given item — it's a
-    /// topic-jurisdiction filter, not an ownership filter.
+    /// Items under the topics this worker id is registered for (prefix match).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // A registered worker id — narrows the list to items under any topic
+    // that worker is registered for (prefix match). Unlike `assignee`,
+    // this doesn't check who actually holds any given item — it's a
+    // topic-jurisdiction filter, not an ownership filter.
     #[serde(default)]
     topic_scope: Option<String>,
-    /// A worker id — the one-shot "what should I be looking at" filter:
-    /// matches items this worker is the `assignee` of (not yet closed -- pass `state=closed` to include
-    /// closed ones), OR items this worker
-    /// filed (`requester`) that are now `resolved` and waiting on *its*
-    /// decision — approve it, or answer what the assignee asked and hand it
-    /// back with `reject_item` (ADR-0010's 2026-09-08 update) — OR `open`
-    /// (unclaimed) items under a topic this worker is registered for (the
-    /// topic-jurisdiction test is the same one
-    /// `topic_scope` uses). ANDs with every other filter here,
-    /// same as `assignee`/`requester` individually. Prefer this over
-    /// manually combining `assignee`, `requester`+`state=resolved`, and
-    /// `topic_scope`+`state=open` yourself.
+    /// Worker id: your inbox -- items you hold (not closed; add state=closed to include them), resolved items you filed that await your decision, unclaimed open items in your topics. Use it alone.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // A worker id — the one-shot "what should I be looking at" filter:
+    // matches items this worker is the `assignee` of (not yet closed -- pass `state=closed` to include
+    // closed ones), OR items this worker
+    // filed (`requester`) that are now `resolved` and waiting on *its*
+    // decision — approve it, or answer what the assignee asked and hand it
+    // back with `reject_item` (ADR-0010's 2026-09-08 update) — OR `open`
+    // (unclaimed) items under a topic this worker is registered for (the
+    // topic-jurisdiction test is the same one
+    // `topic_scope` uses). ANDs with every other filter here,
+    // same as `assignee`/`requester` individually. Prefer this over
+    // manually combining `assignee`, `requester`+`state=resolved`, and
+    // `topic_scope`+`state=open` yourself.
     #[serde(default)]
     mine: Option<String>,
-    /// Excludes archived items by default; `true` returns only archived
-    /// items (explicit archive browse). See ADR-0013.
+    /// true = only archived items; default excludes them.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Excludes archived items by default; `true` returns only archived
+    // items (explicit archive browse). See ADR-0013.
     #[serde(default)]
     archived: Option<bool>,
-    /// Max rows returned, applied after every other filter. Server default
-    /// 50, hard-capped at 200 — see ADR-0014. The tool result's `total`
-    /// field reports how many rows matched before this cap, so you know
-    /// whether to page with `offset`.
+    /// Max rows (default 50, cap 200); `total` counts every match.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Max rows returned, applied after every other filter. Server default
+    // 50, hard-capped at 200 — see ADR-0014. The tool result's `total`
+    // field reports how many rows matched before this cap, so you know
+    // whether to page with `offset`.
     #[serde(default)]
     limit: Option<usize>,
-    /// Rows to skip before applying `limit`. Defaults to 0.
+    /// Rows to skip.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Rows to skip before applying `limit`. Defaults to 0.
     #[serde(default)]
     offset: Option<usize>,
-    /// When `true`, every returned item's `body` is omitted — set this once
-    /// you only need enough of each row to decide which item (if any) to
-    /// fetch in full next. See ADR-0014.
+    /// true omits each row's body.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // When `true`, every returned item's `body` is omitted — set this once
+    // you only need enough of each row to decide which item (if any) to
+    // fetch in full next. See ADR-0014.
     #[serde(default)]
     summary: Option<bool>,
-    /// "asc" or "desc", sorting by `updated_at`. Defaults to "desc"
-    /// (most-recently-touched first, today's fixed behavior); pass "asc"
-    /// to find the longest-untouched items directly instead of paging to
-    /// the tail via `offset`. See ADR-0020.
+    /// "asc" = oldest-touched first (default: newest-touched first).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // "asc" or "desc", sorting by `updated_at`. Defaults to "desc"
+    // (most-recently-touched first, today's fixed behavior); pass "asc"
+    // to find the longest-untouched items directly instead of paging to
+    // the tail via `offset`. See ADR-0020.
     #[serde(default)]
     order: Option<String>,
-    /// When `true`, each returned item also resolves its own `related:<id>`
-    /// tags (both directions) into a `related` field — the same expansion
-    /// `get_item` offers for a single item, applied per row here after
-    /// `limit`/`offset`, so the cost is bounded by the returned page, not
-    /// the unpaged total. Defaults to `false` (no `related` field on any
-    /// item).
+    /// true adds each row's related:<id> items.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // When `true`, each returned item also resolves its own `related:<id>`
+    // tags (both directions) into a `related` field — the same expansion
+    // `get_item` offers for a single item, applied per row here after
+    // `limit`/`offset`, so the cost is bounded by the returned page, not
+    // the unpaged total. Defaults to `false` (no `related` field on any
+    // item).
     #[serde(default)]
     expand_related: Option<bool>,
-    /// Epoch milliseconds. Only items touched after this instant come back --
-    /// a delta cursor: pass the newest `updated_at` you already hold and get
-    /// just what moved. Comments, transitions and tag changes count as touches.
+    /// Epoch ms; only items touched after it (a comment, transition or tag change counts).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Epoch milliseconds. Only items touched after this instant come back --
+    // a delta cursor: pass the newest `updated_at` you already hold and get
+    // just what moved. Comments, transitions and tag changes count as touches.
     #[serde(default)]
     updated_after: Option<i64>,
-    /// Item fields to return, e.g. `["title","state","turn"]`; `id` is always
-    /// included. Omit for every field. Trims what you must read per row.
+    /// Item fields to return, e.g. ["title","state"]; `id` is always kept.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Item fields to return, e.g. `["title","state","turn"]`; `id` is always
+    // included. Omit for every field. Trims what you must read per row.
     #[serde(default)]
     fields: Option<Vec<String>>,
-    /// Stop adding rows once the JSON of the returned items would exceed this
-    /// many characters (at least one row is always returned). When rows were
-    /// held back the result says `truncated`, `omitted` and the `next_offset`
-    /// to continue from.
+    /// Character budget for the returned items (the first row is always kept). Rows held back are reported as truncated / omitted / next_offset.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Stop adding rows once the JSON of the returned items would exceed this
+    // many characters (at least one row is always returned). When rows were
+    // held back the result says `truncated`, `omitted` and the `next_offset`
+    // to continue from.
     #[serde(default)]
     max_chars: Option<usize>,
-    /// Requires `mine` — when `true`, adds an `unregistered_open` field to
-    /// the result: open, unclaimed item counts by topic, for topics whose
-    /// `owned_by` (see `list_topics`) is **empty** — no worker at all is
-    /// registered for them. Surfaces the exact blind spot `mine` alone
-    /// cannot: a topic everyone forgot to register for still returns 0
-    /// rows here, silently indistinguishable from "nothing to do". Not "a
-    /// topic some other worker owns" — that's normal and not this caller's
-    /// business, and would swamp the real signal on a server with many
-    /// topics. Also adds `prefix_only_open`: the same counts for topics that
-    /// are covered, but only through a broader prefix (`owned_by_exact`
-    /// empty) — an organization-wide registration otherwise makes them read
-    /// as owned. Costs one extra request against `docket-core` — opt-in so a
-    /// plain `mine` query pays nothing for it. No effect without `mine`
-    /// (the flag is only meaningful alongside a query about your own
-    /// registration).
+    /// With `mine`: adds unregistered_open / prefix_only_open -- open work in topics nobody (or only a broad prefix) is registered for.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Requires `mine` — when `true`, adds an `unregistered_open` field to
+    // the result: open, unclaimed item counts by topic, for topics whose
+    // `owned_by` (see `list_topics`) is **empty** — no worker at all is
+    // registered for them. Surfaces the exact blind spot `mine` alone
+    // cannot: a topic everyone forgot to register for still returns 0
+    // rows here, silently indistinguishable from "nothing to do". Not "a
+    // topic some other worker owns" — that's normal and not this caller's
+    // business, and would swamp the real signal on a server with many
+    // topics. Also adds `prefix_only_open`: the same counts for topics that
+    // are covered, but only through a broader prefix (`owned_by_exact`
+    // empty) — an organization-wide registration otherwise makes them read
+    // as owned. Costs one extra request against `docket-core` — opt-in so a
+    // plain `mine` query pays nothing for it. No effect without `mine`
+    // (the flag is only meaningful alongside a query about your own
+    // registration).
     #[serde(default)]
     report_gaps: Option<bool>,
-    /// Requires one of `mine`/`requester`/`assignee`/`topic_scope` — when
-    /// `true`, adds an
-    /// `other_spellings` field to the result: for each identity you filtered
-    /// on, any *other* identity on this server whose last `/` segment is the
-    /// same, with what sits under it — `requester`/`assignee`/`topic` are
-    /// per-role totals over every non-archived item *including closed
-    /// ones*, while `not_closed` counts the distinct items under that
-    /// spelling still in flight, which is the number that answers "am I
-    /// actually missing live work". Surfaces the blind spot a spelling
-    /// drift creates — `requester=acme/filer` returning fewer rows than the
-    /// party actually has, with nothing anywhere saying the rest are filed
-    /// under `filer`. Advisory: two parties can legitimately share a last
-    /// segment, so this asserts nothing and corrects nothing (fix a real
-    /// drift with `set_item_requester` for one item, or a declared alias for
-    /// the identity — see ADR-0022). Costs two extra requests against
-    /// `docket-core`, so it is opt-in. No effect without one of those three
-    /// filters — there would be no identity to compare against.
+    /// With mine/requester/assignee/topic_scope: adds other_spellings -- other spellings of that identity and what sits under them.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Requires one of `mine`/`requester`/`assignee`/`topic_scope` — when
+    // `true`, adds an
+    // `other_spellings` field to the result: for each identity you filtered
+    // on, any *other* identity on this server whose last `/` segment is the
+    // same, with what sits under it — `requester`/`assignee`/`topic` are
+    // per-role totals over every non-archived item *including closed
+    // ones*, while `not_closed` counts the distinct items under that
+    // spelling still in flight, which is the number that answers "am I
+    // actually missing live work". Surfaces the blind spot a spelling
+    // drift creates — `requester=acme/filer` returning fewer rows than the
+    // party actually has, with nothing anywhere saying the rest are filed
+    // under `filer`. Advisory: two parties can legitimately share a last
+    // segment, so this asserts nothing and corrects nothing (fix a real
+    // drift with `set_item_requester` for one item, or a declared alias for
+    // the identity — see ADR-0022). Costs two extra requests against
+    // `docket-core`, so it is opt-in. No effect without one of those three
+    // filters — there would be no identity to compare against.
     #[serde(default)]
     report_drift: Option<bool>,
 }
@@ -263,78 +297,110 @@ struct SearchItemsParams {
     /// "any" (default) or "all". Ignored if `tags` is empty.
     #[serde(default)]
     tag_match: Option<String>,
+    /// Exact topic (case-insensitive).
     #[serde(default)]
     topic: Option<String>,
+    /// open, claimed, resolved or closed. Not together with `mine`.
     #[serde(default)]
     state: Option<String>,
-    /// A worker id — narrows results to items whose `assignee` (current
-    /// holder) is exactly this worker. Same semantics as `list_items`'s
-    /// field of the same name.
+    /// Items held by this worker id.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // A worker id — narrows results to items whose `assignee` (current
+    // holder) is exactly this worker. Same semantics as `list_items`'s
+    // field of the same name.
     #[serde(default)]
     assignee: Option<String>,
-    /// Matches the item's `requester` — symmetric to `assignee` above, and
-    /// case-insensitive like it (ADR-0021).
+    /// Items filed by this identity.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Matches the item's `requester` — symmetric to `assignee` above, and
+    // case-insensitive like it (ADR-0021).
     #[serde(default)]
     requester: Option<String>,
-    /// A registered worker id — narrows results to items under any topic
-    /// that worker is registered for (prefix match). Same semantics as
-    /// `list_items`'s field of the same name.
+    /// Items under the topics this worker id is registered for (prefix match).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // A registered worker id — narrows results to items under any topic
+    // that worker is registered for (prefix match). Same semantics as
+    // `list_items`'s field of the same name.
     #[serde(default)]
     topic_scope: Option<String>,
-    /// A worker id — the one-shot "what do I currently hold" filter. Same
-    /// semantics as `list_items`'s field of the same name.
+    /// Worker id: your inbox -- items you hold (not closed; add state=closed to include them), resolved items you filed that await your decision, unclaimed open items in your topics. Use it alone.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // A worker id — the one-shot "what do I currently hold" filter. Same
+    // semantics as `list_items`'s field of the same name.
     #[serde(default)]
     mine: Option<String>,
-    /// Excludes archived items by default; `true` returns only archived
-    /// items (explicit archive browse). See ADR-0013.
+    /// true = only archived items; default excludes them.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Excludes archived items by default; `true` returns only archived
+    // items (explicit archive browse). See ADR-0013.
     #[serde(default)]
     archived: Option<bool>,
-    /// Max rows returned, applied after every other filter. Server default
-    /// 50, hard-capped at 200 — see ADR-0014. The tool result's `total`
-    /// field reports how many rows matched before this cap, so you know
-    /// whether to page with `offset`.
+    /// Max rows (default 50, cap 200); `total` counts every match.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Max rows returned, applied after every other filter. Server default
+    // 50, hard-capped at 200 — see ADR-0014. The tool result's `total`
+    // field reports how many rows matched before this cap, so you know
+    // whether to page with `offset`.
     #[serde(default)]
     limit: Option<usize>,
-    /// Rows to skip before applying `limit`. Defaults to 0.
+    /// Rows to skip.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Rows to skip before applying `limit`. Defaults to 0.
     #[serde(default)]
     offset: Option<usize>,
-    /// When `true`, every returned item's `body` is omitted — set this once
-    /// you only need enough of each row to decide which item (if any) to
-    /// fetch in full next. See ADR-0014.
+    /// true omits each row's body.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // When `true`, every returned item's `body` is omitted — set this once
+    // you only need enough of each row to decide which item (if any) to
+    // fetch in full next. See ADR-0014.
     #[serde(default)]
     summary: Option<bool>,
-    /// "asc" or "desc", sorting by `updated_at`. Same semantics as
-    /// `list_items`'s field of the same name. See ADR-0020.
+    /// "asc" = oldest-touched first (default: newest-touched first).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // "asc" or "desc", sorting by `updated_at`. Same semantics as
+    // `list_items`'s field of the same name. See ADR-0020.
     #[serde(default)]
     order: Option<String>,
-    /// Same semantics as `list_items`'s field of the same name — resolves
-    /// each returned item's `related:<id>` tags into a `related` field,
-    /// bounded by the returned page.
+    /// true adds each row's related:<id> items.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Same semantics as `list_items`'s field of the same name — resolves
+    // each returned item's `related:<id>` tags into a `related` field,
+    // bounded by the returned page.
     #[serde(default)]
     expand_related: Option<bool>,
-    /// Epoch milliseconds. Only items touched after this instant come back --
-    /// a delta cursor: pass the newest `updated_at` you already hold and get
-    /// just what moved. Comments, transitions and tag changes count as touches.
+    /// Epoch ms; only items touched after it (a comment, transition or tag change counts).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Epoch milliseconds. Only items touched after this instant come back --
+    // a delta cursor: pass the newest `updated_at` you already hold and get
+    // just what moved. Comments, transitions and tag changes count as touches.
     #[serde(default)]
     updated_after: Option<i64>,
-    /// Item fields to return, e.g. `["title","state","turn"]`; `id` is always
-    /// included. Omit for every field. Trims what you must read per row.
+    /// Item fields to return, e.g. ["title","state"]; `id` is always kept.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Item fields to return, e.g. `["title","state","turn"]`; `id` is always
+    // included. Omit for every field. Trims what you must read per row.
     #[serde(default)]
     fields: Option<Vec<String>>,
-    /// Stop adding rows once the JSON of the returned items would exceed this
-    /// many characters (at least one row is always returned). When rows were
-    /// held back the result says `truncated`, `omitted` and the `next_offset`
-    /// to continue from.
+    /// Character budget for the returned items (the first row is always kept). Rows held back are reported as truncated / omitted / next_offset.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Stop adding rows once the JSON of the returned items would exceed this
+    // many characters (at least one row is always returned). When rows were
+    // held back the result says `truncated`, `omitted` and the `next_offset`
+    // to continue from.
     #[serde(default)]
     max_chars: Option<usize>,
-    /// Same semantics as `list_items`'s field of the same name — requires
-    /// `mine`, adds the `unregistered_open` and `prefix_only_open`
-    /// registration-gap hints.
+    /// With `mine`: adds unregistered_open / prefix_only_open -- open work in topics nobody (or only a broad prefix) is registered for.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Same semantics as `list_items`'s field of the same name — requires
+    // `mine`, adds the `unregistered_open` and `prefix_only_open`
+    // registration-gap hints.
     #[serde(default)]
     report_gaps: Option<bool>,
-    /// Same semantics as `list_items`'s field of the same name — requires
-    /// one of `mine`/`requester`/`assignee`/`topic_scope`, adds an
-    /// `other_spellings` identity-drift hint.
+    /// With mine/requester/assignee/topic_scope: adds other_spellings -- other spellings of that identity and what sits under them.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Same semantics as `list_items`'s field of the same name — requires
+    // one of `mine`/`requester`/`assignee`/`topic_scope`, adds an
+    // `other_spellings` identity-drift hint.
     #[serde(default)]
     report_drift: Option<bool>,
 }
@@ -342,12 +408,16 @@ struct SearchItemsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ClaimOrSubmitParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    /// Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
-    /// — required, explicitly or via that fallback, so a claim can always be
-    /// traced to a worker.
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
+    // — required, explicitly or via that fallback, so a claim can always be
+    // traced to a worker.
     #[serde(default)]
     worker_id: Option<String>,
 }
@@ -355,11 +425,15 @@ struct ClaimOrSubmitParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ApproveParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    /// Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
-    /// — required, explicitly or via that fallback (HD-16/HD-17, cycle-57).
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
+    // — required, explicitly or via that fallback (HD-16/HD-17, cycle-57).
     #[serde(default)]
     author: Option<String>,
 }
@@ -367,11 +441,15 @@ struct ApproveParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReasonedParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    /// Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
-    /// — required, explicitly or via that fallback (HD-16/HD-17, cycle-57).
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Omit to use this session's `DOCKET_WORKER_ID` (see `resolve_identity`)
+    // — required, explicitly or via that fallback (HD-16/HD-17, cycle-57).
     #[serde(default)]
     author: Option<String>,
     reason: String,
@@ -380,8 +458,10 @@ struct ReasonedParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TagsParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     tags: Vec<String>,
 }
@@ -389,11 +469,15 @@ struct TagsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SubmitParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    /// The submitting worker. Omit to use this session's `DOCKET_WORKER_ID`
-    /// (see `resolve_identity`).
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The submitting worker. Omit to use this session's `DOCKET_WORKER_ID`
+    // (see `resolve_identity`).
     #[serde(default)]
     worker_id: Option<String>,
     /// What is being handed back, when it isn't simply "done" — most usefully
@@ -408,14 +492,18 @@ struct SubmitParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetRequesterParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     /// The corrected requester identity. Must not be blank.
     requester: String,
-    /// Who is making the correction — recorded on the lifecycle comment the
-    /// change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
-    /// `resolve_identity`), same treatment as every other authored operation.
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Who is making the correction — recorded on the lifecycle comment the
+    // change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
+    // `resolve_identity`), same treatment as every other authored operation.
     #[serde(default)]
     author: Option<String>,
 }
@@ -423,15 +511,19 @@ struct SetRequesterParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetAssigneeParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     /// The corrected assignee identity. Must not be blank — this tool only
     /// reassigns, it never clears assignee (see `reopen_item` for that).
     assignee: String,
-    /// Who is making the correction — recorded on the lifecycle comment the
-    /// change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
-    /// `resolve_identity`), same treatment as every other authored operation.
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Who is making the correction — recorded on the lifecycle comment the
+    // change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
+    // `resolve_identity`), same treatment as every other authored operation.
     #[serde(default)]
     author: Option<String>,
 }
@@ -439,16 +531,20 @@ struct SetAssigneeParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetTopicParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
     /// The corrected topic. Must not be blank. For a spelling people
     /// actually use across many items, declare an alias instead
     /// (`docs/usage.md`) — this is the one-off, single-item fix.
     topic: String,
-    /// Who is making the correction — recorded on the lifecycle comment the
-    /// change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
-    /// `resolve_identity`), same treatment as every other authored operation.
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Who is making the correction — recorded on the lifecycle comment the
+    // change writes. Omit to use this session's `DOCKET_WORKER_ID` (see
+    // `resolve_identity`), same treatment as every other authored operation.
     #[serde(default)]
     author: Option<String>,
 }
@@ -464,15 +560,19 @@ struct ListTagsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddCommentParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
-    /// Who's writing this comment. Omit to use this session's
-    /// `DOCKET_WORKER_ID` (see `resolve_identity`) — required, explicitly or
-    /// via that fallback, so the thread never lands docket-core's
-    /// `"unknown"` default (Issue #30). Schema-optional (unlike the original
-    /// cycle-55 shape) precisely so an omission can still resolve through
-    /// the env var instead of failing at deserialization.
+    /// Your worker id; omit to use this session's DOCKET_WORKER_ID.
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // Who's writing this comment. Omit to use this session's
+    // `DOCKET_WORKER_ID` (see `resolve_identity`) — required, explicitly or
+    // via that fallback, so the thread never lands docket-core's
+    // `"unknown"` default (Issue #30). Schema-optional (unlike the original
+    // cycle-55 shape) precisely so an omission can still resolve through
+    // the env var instead of failing at deserialization.
     #[serde(default)]
     author: Option<String>,
     body: String,
@@ -483,16 +583,20 @@ struct AddCommentParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ItemIdParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item. See `get_item`.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item. See `get_item`.
     item_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GetItemParams {
-    /// The item's canonical id, or its short numeric alias (`seq`) — e.g.
-    /// `142` or `#142` — both resolve to the same item.
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`) — e.g.
+    // `142` or `#142` — both resolve to the same item.
     item_id: String,
     /// When `true`, also resolves the item's `related:<id>` tags (both
     /// directions) into the response's `related` field. Defaults to
@@ -510,7 +614,9 @@ struct GetItemParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListCommentsParams {
-    /// The item's canonical id, or its short numeric alias (`seq`).
+    /// Item id, or its numeric `seq` (`142`, `#142`).
+    // Long form, kept for maintainers (the tool schema carries only the line above):
+    // The item's canonical id, or its short numeric alias (`seq`).
     item_id: String,
     /// Epoch milliseconds. Only comments written after this instant.
     #[serde(default)]
@@ -1234,7 +1340,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "What's new since I last looked -- an activity feed independent of turn/state. Unlike mine (a snapshot of what you hold right now), this surfaces comments and transitions on items you're a stakeholder on (assignee/requester, folding declared aliases) or that fall under a topic you're registered for, even while turn stays with the other party -- e.g. an assignee answering your question in a comment without submitting (see ADR-0010's 2026-09-09 update). Always advance since to the returned cursor on your next call, even when events came back empty -- that still means \"caught up to here\", not \"nothing happened yet\". for_worker may be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "What's new since your cursor: comments and transitions on items you are requester/assignee of, or that sit under your registered topics -- even while turn stays with the other side (an assignee answering in a comment without submitting). Always advance `since` to the returned cursor, even after an empty result. for_worker defaults to this session's DOCKET_WORKER_ID."
     )]
     async fn list_events(
         &self,
@@ -1281,7 +1387,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "File a new item in front of a topic. Never blocked by an advisory, but the result may carry up to three, each answering a different question: topic_advisory (no registered worker serves this topic -- it may be mistargeted, or genuinely new -- or only workers registered for a broader prefix reach it, so nobody is set up to receive it specifically), topic_spelling_advisory and requester_advisory (the topic/requester you passed is a bare name with no org scope and this server already knows scoped identities with the same name -- the two spellings are separate identities whose queries never see each other, so either declare an alias or correct the field). A topic can draw both topic advisories at once; they are separate fields because they fail for different reasons"
+        description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias). The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
     )]
     async fn create_item(
         &self,
@@ -1677,7 +1783,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List items, optionally filtered by topic, state, the worker currently assigned (assignee), the requester, a worker's topic jurisdiction (topic_scope), what a worker should currently be paying attention to (mine — assignee OR resolved-and-waiting-on-my-decision OR open-and-unclaimed within a topic this worker is registered for), and/or archived status. `mine` alone covers the full \"what do I need to look at\" set — prefer it over combining assignee/requester/topic_scope yourself, since an unclaimed item in your own topic is otherwise easy to miss. Paginated via limit/offset — check the result's total field. Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Ordered by updated_at descending (most-recently-touched first) by default — pass order=\"asc\" to find the longest-untouched items directly instead of paging to the tail via offset. Pass expand_related=true to also resolve each returned item's related:<id> tags (both directions) into a related field, applied only to the returned page — same expansion get_item offers for a single item. Pass report_gaps=true (with mine) to add an unregistered_open hint: open/unclaimed item counts by topic for topics no worker at all is registered for (not topics someone else owns) — the signal that a mine=... 0-result may be an orphaned topic, not really nothing to do — and a prefix_only_open hint: the same counts for topics reached only through a broader prefix registration, which nobody registered to receive. Do not add state to a mine query: mine already spans held, resolved-awaiting-your-decision and open-unclaimed rows, and a state filter hides whole kinds of them — when it does, the result carries a state_filter_advisory saying how many. Pass report_drift=true (with any of mine/requester/assignee/topic_scope) to add an other_spellings hint: for each identity you filtered on, any *other* identity sharing its last / segment, with per-role counts plus not_closed (still in flight) — the signal that your query returned fewer rows than the party actually has because the rest are filed under a second spelling. Advisory: two parties can legitimately share a last segment. Every row carries state_since (epoch ms): when the item entered its current state, so now - state_since is how long it has stood there — the axis updated_at cannot give you, since a comment moves updated_at without the item moving. turn is a function of state, so this is the age of the current turn too, except a claim resets it while turn stays assignee. null means the event log doesn't cover this item's last transition (it predates the log) — read that as \"standing at least since the log began\", not as \"just now\""
+        description = "List items, newest-touched first (order=\"asc\" for oldest first). Filters: topic, state, assignee, requester, topic_scope, archived. `mine` is the inbox: items you hold (not closed), resolved items you filed that wait on your decision, and unclaimed open items in your topics -- use it alone; adding `state` hides whole kinds of rows (the result then carries state_filter_advisory). Paged by limit/offset; `total` counts every match. Shaping: summary drops bodies, fields trims rows, max_chars bounds the size (truncated/omitted/next_offset say what was held back), updated_after returns only what changed, expand_related adds related items. Every row has state_since (when it entered its current state; null = predates the event log). report_gaps (with mine) and report_drift add hints for the cases where an empty or short result is misleading: work in topics nobody is registered for, and a second spelling of an identity."
     )]
     async fn list_items(
         &self,
@@ -1762,7 +1868,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Search items by full-text query and/or tags — call this before create_item to check whether a matching issue already exists. Combinable with the same ownership filters list_items offers (assignee/requester/topic_scope/mine). Pass summary=true to omit each item's body when you only need enough to pick which one to fetch in full next. Same order semantics as list_items (default updated_at descending, order=\"asc\" to reverse). Same expand_related semantics as list_items too — resolves each returned item's related:<id> tags into a related field, bounded by the returned page. Same report_gaps semantics as list_items too — with mine, adds the unregistered_open and prefix_only_open registration-gap hints. Same report_drift semantics too — with any of mine/requester/assignee/topic_scope, adds an other_spellings identity-drift hint. Rows carry state_since exactly as list_items' do"
+        description = "Full-text and/or tag search; call it before create_item to check whether the item already exists. Takes list_items' filters and shaping (mine, assignee, requester, topic_scope, summary, order, expand_related, fields, max_chars, updated_after, report_gaps, report_drift) with the same meaning, and returns the same rows."
     )]
     async fn search_items(
         &self,
@@ -1887,16 +1993,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Hand a claimed item back to the requester — claimed -> resolved. This is \
-            the ONLY transition that moves turn to the requester, and it means \"the assignee \
-            can't take this further, the requester decides what happens next\" — which covers \
-            finished work AND work waiting on an answer only the requester has. Submit in both \
-            cases: an item you leave in claimed while you wait for an answer is invisible to \
-            every query the requester runs (mine surfaces items assigned to them, resolved items \
-            they filed, and unclaimed items in their topics — never one you are holding), so the \
-            question sits unread in the thread. Put the question in reason; the requester answers \
-            with reject_item, which hands the turn back to you with their answer attached. \
-            worker_id may be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Hand a claimed item back to the requester (claimed -> resolved): the only transition that moves turn to the requester. Use it for finished work AND to ask a question only the requester can answer -- put the question in `reason`. An item left in claimed while you wait is invisible to every query the requester runs. The requester answers with reject_item, which returns the turn to you."
     )]
     async fn submit_item(
         &self,
@@ -2052,15 +2149,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Fetch a single item by id — the way to resolve an id from a shared link \
-            or a comment into its current state/resolution/requester/assignee/turn/tags/body. \
-            item_id accepts either the canonical id or the item's short numeric alias (seq, e.g. \
-            142 or #142) — both returned on every item. Unaffected by list_items/search_items' \
-            summary mode (body always included) and returns archived items too (get_item is a \
-            direct id lookup, not a list query). Pass expand_related=true to also resolve any \
-            related:<id> tags (both directions — this item referencing another, or another \
-            item referencing this one back) into a related field, instead of having to \
-            dereference each related:<id> tag yourself with a separate get_item call. \n            Carries state_since (epoch ms) like list_items' rows do — when the item \n            entered its current state, which updated_at does not answer because a \n            comment moves it."
+        description = "Fetch one item by canonical id or numeric seq (`142`, `#142`); works on archived items and always includes the body. expand_related=true adds related:<id> items (both directions); comments=N adds the newest N comments inline (comment_total says how many exist). state_since (epoch ms) is when it entered its current state -- a comment moves updated_at, not this."
     )]
     async fn get_item(
         &self,
@@ -2122,17 +2211,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Correct an item's requester — whether it has one already or not. Covers \
-            both an item filed before a requester identity was available (or left blank by a \
-            migration) and an identity that drifted afterwards: a typo, a renamed repo, or two \
-            consumers spelling the same identity differently. That second case is what \
-            approve_item/reject_item point here for when their requester match fails — correct \
-            the item, do not impersonate the wrong spelling. State-independent (works on a \
-            closed item too — this corrects metadata, it isn't a workflow transition) and \
-            idempotent (setting the value it already has changes nothing). A real change is \
-            recorded as a comment naming the old and new value. Does not cover turn/title/body — \
-            use set_item_assignee to correct assignee, set_item_topic to correct topic. author may \
-            be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Correct an item's requester (a typo, a drifted spelling, or one filed without it). approve_item/reject_item point here when their requester check fails: correct the item, never act under the wrong spelling. Any state, idempotent, recorded as a comment naming the old and new value. Other fields: set_item_assignee, set_item_topic."
     )]
     async fn set_item_requester(
         &self,
@@ -2159,15 +2238,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Correct an item's assignee — the mirror of set_item_requester on the \
-            other side of the handshake. Covers both an item nobody has claimed yet and one \
-            whose assignee identity drifted or vanished (a claimed workspace renamed or torn \
-            down, with nothing else able to move it off). Reassignment only: this never clears \
-            assignee — unassigning is reopen_item's job, not this one's. State-independent \
-            (works on a closed item too — this corrects metadata, it isn't a workflow \
-            transition) and idempotent (setting the value it already has changes nothing). A \
-            real change is recorded as a comment naming the old and new value. author may be \
-            omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Correct an item's assignee: for an unclaimed item, or when the holder's identity drifted or vanished. Reassigns only -- it never clears the assignee (reopen_item does that). Any state, idempotent, recorded as a comment."
     )]
     async fn set_item_assignee(
         &self,
@@ -2191,15 +2262,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "Correct an item's topic — the third correction in the same family as \
-            set_item_requester/set_item_assignee. For an item filed under the wrong topic: a \
-            typo, or a mismatch caught by create_item's topic_advisory / GET /topics/candidates \
-            after the fact. For a spelling people actually use across many items, declare an \
-            alias instead (put_alias) — this is the one-off, single-item fix, not a standing \
-            declaration. State-independent (works on a closed item too — this corrects metadata, \
-            it isn't a workflow transition) and idempotent (setting the value it already has \
-            changes nothing). A real change is recorded as a comment naming the old and new \
-            value. author may be omitted if this session's DOCKET_WORKER_ID is set"
+        description = "Correct an item's topic (filed under the wrong one, e.g. after create_item's topic_advisory). A one-off fix for one item; a spelling used across many items needs an alias, which is the owner's job outside MCP. Any state, idempotent, recorded as a comment."
     )]
     async fn set_item_topic(
         &self,
@@ -2298,7 +2361,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "List every identity in use across the whole identity class — requester, assignee, topic, and registered worker id, which docket treats as one namespace (two spellings that differ only in case, or that a declared alias links, are one row). Each row carries how many non-archived items use it in each role, plus whether a worker is registered under it. This is the counterpart of list_topics for parties: reading it is how you spot one party split across two spellings (`filer` alongside `acme/filer`), which no per-field query reports — a drifted spelling silently returns fewer items and nothing says so. Fix a single item with set_item_requester/set_item_assignee/set_item_topic; a recurring spelling needs a declared alias, which is an owner decision made outside MCP. See also list_items/search_items' report_drift flag, which asks the same question about one identity from inside the query that came up short"
+        description = "Every identity in use (requester, assignee, topic, registered worker -- one namespace; case variants and declared aliases fold into one row) with its item counts per role. Reading it is how you spot one party split across two spellings (`filer` beside `acme/filer`), which no per-field query reports. Narrow with q. Fix one item with set_item_requester/assignee/topic; a recurring spelling needs an alias (an owner decision, outside MCP)."
     )]
     async fn list_identities(
         &self,
