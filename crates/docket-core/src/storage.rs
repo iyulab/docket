@@ -895,6 +895,12 @@ impl Store {
     /// on items the caller doesn't currently hold, so it isn't narrowed
     /// to "state = resolved" the way `mine`'s snapshot view is.
     ///
+    /// A third leg reaches the caller with activity on an item it has
+    /// **commented on** (ADR-0028's participation bridge): someone who gave an
+    /// opinion on an item in a channel keeps hearing how it went, without being
+    /// its requester, its assignee, or registered for its topic. A topic comment
+    /// has no such leg -- it has no stakeholder.
+    ///
     /// `since`/the returned cursor is `event_seq_counter` output, always
     /// the seq **scanned up to**, not the seq of the last *matching* row
     /// — an unrelated event between two relevant ones must not stall the
@@ -914,6 +920,30 @@ impl Store {
         let aliases = self.alias_map()?;
         let worker = self.get_worker(for_worker)?;
         let conn = self.conn.lock().expect("store mutex poisoned");
+        // The participation leg: an item the caller has commented on keeps
+        // reaching it, under whatever spelling it commented as. Computed once
+        // for the whole call, not per scanned event.
+        // The moment it first spoke on each item bounds it: events from before
+        // that were not something it took part in.
+        let participated: std::collections::HashMap<String, i64> = {
+            let mut sql = String::from(
+                "SELECT item_id, MIN(created_at) FROM item_comments WHERE item_id IS NOT NULL",
+            );
+            let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            push_identity_group_filter(
+                &mut sql,
+                &mut args,
+                "author",
+                &aliases.group_of(for_worker),
+            );
+            sql.push_str(" GROUP BY item_id");
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+            stmt.query_map(rusqlite::params_from_iter(param_refs), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
         let mut stmt = conn.prepare(
             "SELECT e.seq, e.item_id, e.kind, e.actor, e.created_at,
                     COALESCE(i.topic, e.topic), i.requester, i.assignee, e.topic
@@ -955,7 +985,12 @@ impl Store {
                 .iter()
                 .any(|owned| crate::domain::topic_matches_with(&aliases, owned, &topic));
 
-            if is_stakeholder || is_in_scope {
+            let is_participant = item_id
+                .as_deref()
+                .and_then(|id| participated.get(id))
+                .is_some_and(|first| created_at >= *first);
+
+            if is_stakeholder || is_in_scope || is_participant {
                 matched.push(Event {
                     seq,
                     item_id,
@@ -7208,5 +7243,61 @@ mod tests {
             store.redact_topic_comment("channel/other", &on_topic.id, "acme/admin"),
             Err(StoreError::NotFound)
         ));
+    }
+
+    // ---- ADR-0028: the participation bridge ----
+
+    #[test]
+    fn commenting_on_an_item_keeps_its_later_events_coming() {
+        let store = open_test_store();
+        store
+            .register_worker("acme/commenter", &["somewhere/else".to_string()])
+            .unwrap();
+        store
+            .register_worker("acme/bystander", &["somewhere/else".to_string()])
+            .unwrap();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], Some("acme/owner"))
+            .unwrap();
+        // Neither worker is a stakeholder or registered for the item's topic.
+        let (before, _) = store.list_events("acme/commenter", 0, 50).unwrap();
+        assert!(before.is_empty());
+
+        store
+            .add_comment(&item.id, "acme/commenter", "my opinion")
+            .unwrap();
+        store
+            .add_comment(&item.id, "acme/owner", "thanks, done")
+            .unwrap();
+
+        let (events, _) = store.list_events("acme/commenter", 0, 50).unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["comment", "comment"],
+            "its own comment and what followed; not the create before it"
+        );
+        let (none, _) = store.list_events("acme/bystander", 0, 50).unwrap();
+        assert!(
+            none.is_empty(),
+            "a worker that never commented hears nothing"
+        );
+    }
+
+    #[test]
+    fn the_participation_bridge_folds_the_authors_declared_spellings() {
+        let store = open_test_store();
+        store.put_alias("commenter", "acme/commenter").unwrap();
+        store
+            .register_worker("acme/commenter", &["somewhere/else".to_string()])
+            .unwrap();
+        let item = store
+            .create_item("acme/widget", "t", None, &[], None)
+            .unwrap();
+        store
+            .add_comment(&item.id, "commenter", "via the short form")
+            .unwrap();
+        let (events, _) = store.list_events("acme/commenter", 0, 50).unwrap();
+        assert_eq!(events.len(), 1);
     }
 }
