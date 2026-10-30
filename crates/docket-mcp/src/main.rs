@@ -478,8 +478,7 @@ struct AddCommentParams {
     body: String,
 }
 
-/// Shared by every tool whose only input is an item id (`list_comments`,
-/// `archive_item`). `get_item` has its own (`GetItemParams`, below) since it
+/// Shared by every tool whose only input is an item id (`archive_item`). `get_item` has its own (`GetItemParams`, below) since it
 /// alone also takes `expand_related`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -500,6 +499,29 @@ struct GetItemParams {
     /// `false` (no `related` field at all).
     #[serde(default)]
     expand_related: Option<bool>,
+    /// Also return the newest N comments inline (`comments`, plus
+    /// `comment_total`), so reading an item and its recent thread is one call.
+    /// Omit for the item alone.
+    #[serde(default)]
+    comments: Option<usize>,
+}
+
+/// Input of `list_comments`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListCommentsParams {
+    /// The item's canonical id, or its short numeric alias (`seq`).
+    item_id: String,
+    /// Epoch milliseconds. Only comments written after this instant.
+    #[serde(default)]
+    since: Option<i64>,
+    /// Only the newest N comments.
+    #[serde(default)]
+    tail: Option<usize>,
+    /// Newest-first character budget over the returned comments (the newest one
+    /// is always returned); `older` says how many earlier ones were left out.
+    #[serde(default)]
+    max_chars: Option<usize>,
 }
 
 /// Mirrors `docket-core`'s item JSON shape. A separate type from
@@ -886,6 +908,58 @@ fn shape_page(
         Ok(block) => CallToolResult::success(vec![block]),
         Err(_) => result,
     }
+}
+
+/// The comments of one item, shaped for an agent's context: the item id once
+/// instead of on every comment, optionally only those after `since`, only the
+/// newest `tail`, and within `max_chars` newest-first. `total` counts them all;
+/// `older` says how many earlier comments were left out.
+fn shape_comments(
+    item_id: &str,
+    comments: Vec<CommentDto>,
+    since: Option<i64>,
+    tail: Option<usize>,
+    max_chars: Option<usize>,
+) -> serde_json::Value {
+    let total = comments.len();
+    let mut kept: Vec<CommentDto> = comments
+        .into_iter()
+        .filter(|c| since.is_none_or(|s| c.created_at > s))
+        .collect();
+    if let Some(n) = tail {
+        let drop = kept.len().saturating_sub(n);
+        kept.drain(..drop);
+    }
+    let slim = |c: &CommentDto| {
+        serde_json::json!({
+            "id": c.id, "author": c.author, "body": c.body, "created_at": c.created_at,
+        })
+    };
+    if let Some(budget) = max_chars {
+        // Newest first: the latest comments are the ones a reader needs, so the
+        // budget is spent from the end and the newest is always kept.
+        let mut used = 0usize;
+        let mut from = kept.len();
+        for (i, c) in kept.iter().enumerate().rev() {
+            let cost = slim(c).to_string().chars().count() + usize::from(from != kept.len());
+            if from != kept.len() && used + cost > budget {
+                break;
+            }
+            used += cost;
+            from = i;
+        }
+        kept.drain(..from);
+    }
+    let mut out = serde_json::json!({
+        "item_id": item_id,
+        "total": total,
+        "comments": kept.iter().map(slim).collect::<Vec<_>>(),
+    });
+    let older = total - kept.len();
+    if older > 0 {
+        out["older"] = serde_json::json!(older);
+    }
+    out
 }
 
 /// What a write's result keeps of the item it changed: where the item stands
@@ -1907,7 +1981,33 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<ItemDto>(resp).await
+        let result = respond::<ItemDto>(resp).await?;
+        let Some(n) = p.comments.filter(|n| *n > 0) else {
+            return Ok(result);
+        };
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        // Advisory-grade: the item was read fine, so a failed thread read must
+        // not turn it into an error -- the caller just does not get comments.
+        let Ok(resp) = self
+            .http
+            .get(items_url(&self.base_url, &p.item_id, &["comments"]))
+            .send()
+            .await
+        else {
+            return Ok(result);
+        };
+        let Ok(comments) = resp.json::<Vec<CommentDto>>().await else {
+            return Ok(result);
+        };
+        let shaped = shape_comments(&p.item_id, comments, None, Some(n), None);
+        let result = with_extra_field(result, "comment_total", shaped["total"].clone());
+        Ok(with_extra_field(
+            result,
+            "comments",
+            shaped["comments"].clone(),
+        ))
     }
 
     #[tool(
@@ -2157,7 +2257,7 @@ impl DocketMcp {
     #[tool(description = "List an item's comment thread in chronological order")]
     async fn list_comments(
         &self,
-        Parameters(p): Parameters<ItemIdParams>,
+        Parameters(p): Parameters<ListCommentsParams>,
     ) -> Result<CallToolResult, McpError> {
         let resp = self
             .http
@@ -2165,7 +2265,18 @@ impl DocketMcp {
             .send()
             .await
             .map_err(unreachable_error)?;
-        respond::<Vec<CommentDto>>(resp).await
+        let result = respond::<Vec<CommentDto>>(resp).await?;
+        if result.is_error == Some(true) {
+            return Ok(result);
+        }
+        let Some(ContentBlock::Text(text)) = result.content.first() else {
+            return Ok(result);
+        };
+        let Ok(comments) = serde_json::from_str::<Vec<CommentDto>>(&text.text) else {
+            return Ok(result);
+        };
+        let shaped = shape_comments(&p.item_id, comments, p.since, p.tail, p.max_chars);
+        Ok(CallToolResult::success(vec![ContentBlock::json(shaped)?]))
     }
 }
 
@@ -3133,14 +3244,17 @@ mod tests {
         assert_ne!(added.is_error, Some(true));
 
         let listed = server
-            .list_comments(Parameters(ItemIdParams {
+            .list_comments(Parameters(ListCommentsParams {
                 item_id: item_id.clone(),
+                since: None,
+                tail: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
         let listed_value: serde_json::Value = serde_json::from_str(text_of(&listed)).unwrap();
-        assert_eq!(listed_value.as_array().unwrap().len(), 1);
-        assert_eq!(listed_value[0]["author"], "maintainer");
+        assert_eq!(listed_value["comments"].as_array().unwrap().len(), 1);
+        assert_eq!(listed_value["comments"][0]["author"], "maintainer");
     }
 
     /// A write's result answers "did it land, and where does the item stand
@@ -3262,6 +3376,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id,
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
@@ -3408,6 +3523,7 @@ mod tests {
                 .get_item(Parameters(GetItemParams {
                     item_id: field(&created, "id"),
                     expand_related: None,
+                    comments: None,
                 }))
                 .await
                 .unwrap();
@@ -3491,6 +3607,174 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(text_of(&all)).unwrap()["total"],
             5
         );
+    }
+
+    fn comment(i: i64, body: &str) -> CommentDto {
+        CommentDto {
+            id: format!("c-{i}"),
+            item_id: "item-1".to_string(),
+            author: "w".to_string(),
+            body: body.to_string(),
+            created_at: 1000 + i,
+        }
+    }
+
+    #[test]
+    fn shape_comments_states_the_item_once_and_keeps_every_comment_by_default() {
+        let all: Vec<CommentDto> = (0..4).map(|i| comment(i, "x")).collect();
+        let v = shape_comments("item-1", all, None, None, None);
+        assert_eq!(v["item_id"], "item-1");
+        assert_eq!(v["total"], 4);
+        let list = v["comments"].as_array().unwrap();
+        assert_eq!(list.len(), 4);
+        assert!(
+            list[0].get("item_id").is_none(),
+            "the id is repeated on every row otherwise"
+        );
+        assert_eq!(list[0]["id"], "c-0");
+        assert!(v.get("older").is_none());
+    }
+
+    #[test]
+    fn shape_comments_tail_and_since_keep_the_newest_in_chronological_order() {
+        let all: Vec<CommentDto> = (0..5).map(|i| comment(i, "x")).collect();
+        let v = shape_comments("item-1", all, None, Some(2), None);
+        let ids: Vec<&str> = v["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["c-3", "c-4"]);
+        assert_eq!(v["total"], 5);
+        assert_eq!(v["older"], 3);
+
+        let all: Vec<CommentDto> = (0..5).map(|i| comment(i, "x")).collect();
+        let v = shape_comments("item-1", all, Some(1002), None, None);
+        let ids: Vec<&str> = v["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["c-3", "c-4"], "strictly after the instant");
+        assert_eq!(v["older"], 3);
+    }
+
+    #[test]
+    fn shape_comments_max_chars_drops_the_oldest_first_and_always_returns_the_newest() {
+        let all: Vec<CommentDto> = (0..4).map(|i| comment(i, &"b".repeat(100))).collect();
+        let one = serde_json::json!({"id": "c-0", "author": "w", "body": "b".repeat(100), "created_at": 1000})
+            .to_string()
+            .chars()
+            .count();
+        let v = shape_comments("item-1", all, None, None, Some(2 * one + 5));
+        let ids: Vec<&str> = v["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["c-2", "c-3"]);
+        assert_eq!(v["older"], 2);
+
+        let all: Vec<CommentDto> = (0..3).map(|i| comment(i, &"b".repeat(100))).collect();
+        let v = shape_comments("item-1", all, None, None, Some(1));
+        assert_eq!(
+            v["comments"].as_array().unwrap().len(),
+            1,
+            "a budget below one comment must still return the newest"
+        );
+        assert_eq!(v["comments"][0]["id"], "c-2");
+    }
+
+    #[test]
+    fn shape_comments_of_an_empty_thread_is_an_empty_list() {
+        let v = shape_comments("item-1", vec![], Some(5), Some(3), Some(10));
+        assert_eq!(v["total"], 0);
+        assert_eq!(v["comments"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_comments_and_get_item_comments_work_through_the_real_request() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-thread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(18994, &dir.join("thread.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        let created = server
+            .create_item(Parameters(new_item("iyulab/docket", "thread", None)))
+            .await
+            .unwrap();
+        let item_id = field(&created, "id");
+        for i in 0..4 {
+            server
+                .add_comment(Parameters(AddCommentParams {
+                    item_id: item_id.clone(),
+                    author: Some("w".to_string()),
+                    body: format!("note {i}"),
+                }))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+        let params = |tail: Option<usize>| ListCommentsParams {
+            item_id: item_id.clone(),
+            since: None,
+            tail,
+            max_chars: None,
+        };
+
+        let all = server
+            .list_comments(Parameters(params(None)))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text_of(&all)).unwrap();
+        assert_eq!(v["total"], 4);
+        assert_eq!(v["comments"].as_array().unwrap().len(), 4);
+        assert_eq!(v["comments"][0]["body"], "note 0");
+
+        let last2 = server
+            .list_comments(Parameters(params(Some(2))))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text_of(&last2)).unwrap();
+        let bodies: Vec<&str> = v["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["body"].as_str().unwrap())
+            .collect();
+        assert_eq!(bodies, ["note 2", "note 3"]);
+
+        // get_item with `comments` returns the item and its newest comments in one call.
+        let with = server
+            .get_item(Parameters(GetItemParams {
+                item_id: item_id.clone(),
+                expand_related: None,
+                comments: Some(2),
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text_of(&with)).unwrap();
+        assert_eq!(v["title"], "thread");
+        assert_eq!(v["comment_total"], 4);
+        assert_eq!(v["comments"].as_array().unwrap().len(), 2);
+        assert_eq!(v["comments"][1]["body"], "note 3");
+
+        let without = server
+            .get_item(Parameters(GetItemParams {
+                item_id,
+                expand_related: None,
+                comments: None,
+            }))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text_of(&without)).unwrap();
+        assert!(v.get("comments").is_none() && v.get("comment_total").is_none());
     }
 
     #[tokio::test]
@@ -5043,8 +5327,11 @@ mod tests {
         assert_eq!(json_value(&repaired)["requester"], "Backfilled-Reporter");
 
         let comments = server
-            .list_comments(Parameters(ItemIdParams {
+            .list_comments(Parameters(ListCommentsParams {
                 item_id: item_id.clone(),
+                since: None,
+                tail: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5145,8 +5432,11 @@ mod tests {
         );
 
         let comments = server
-            .list_comments(Parameters(ItemIdParams {
+            .list_comments(Parameters(ListCommentsParams {
                 item_id: item_id.clone(),
+                since: None,
+                tail: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5209,14 +5499,18 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: item_id.clone(),
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
         assert_eq!(json_value(&refetched)["topic"], "iyulab/docket");
 
         let comments = server
-            .list_comments(Parameters(ItemIdParams {
+            .list_comments(Parameters(ListCommentsParams {
                 item_id: item_id.clone(),
+                since: None,
+                tail: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5342,8 +5636,11 @@ mod tests {
         assert_eq!(json_value(&waiting)["items"][0]["id"], item_id);
 
         let comments = server
-            .list_comments(Parameters(ItemIdParams {
+            .list_comments(Parameters(ListCommentsParams {
                 item_id: item_id.clone(),
+                since: None,
+                tail: None,
+                max_chars: None,
             }))
             .await
             .unwrap();
@@ -5596,6 +5893,7 @@ mod tests {
                 .get_item(Parameters(GetItemParams {
                     item_id: id.clone(),
                     expand_related: None,
+                    comments: None,
                 }))
                 .await
                 .unwrap(),
@@ -5767,6 +6065,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: item_id.clone(),
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
@@ -5785,6 +6084,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: item_id.clone(),
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
@@ -5795,6 +6095,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: "never-created".to_string(),
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
@@ -5854,6 +6155,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: a_id.clone(),
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
@@ -5863,6 +6165,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: a_id.clone(),
                 expand_related: Some(true),
+                comments: None,
             }))
             .await
             .unwrap();
@@ -6021,6 +6324,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: seq.to_string(),
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
@@ -6031,6 +6335,7 @@ mod tests {
             .get_item(Parameters(GetItemParams {
                 item_id: format!("#{seq}"),
                 expand_related: None,
+                comments: None,
             }))
             .await
             .unwrap();
