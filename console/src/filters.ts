@@ -1,4 +1,4 @@
-import type { Item, ItemState } from './api'
+import type { Item, ItemState, TopicCount } from './api'
 
 export type SortKey = 'updated_at' | 'created_at' | 'state'
 export type Relation = 'to' | 'from' | null
@@ -102,4 +102,13 @@ export function deriveTopics(items: Item[]): string[] {
     }
   }
   return [...topics.values()].sort()
+}
+
+/**
+ * The `list_topics` rows that hold items. A channel (ADR-0028) appears there with `count` 0
+ * because it has topic comments; the board's perspective picker is about items, so a topic
+ * with none would offer a view that is always empty.
+ */
+export function itemTopics(rows: TopicCount[]): TopicCount[] {
+  return rows.filter((row) => row.count > 0)
 }

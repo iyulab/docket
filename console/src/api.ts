@@ -92,8 +92,11 @@ export interface TagCount {
 
 export interface TopicCount {
   topic: string
+  /** Non-archived items under the topic. 0 for a channel that only has topic comments (ADR-0028). */
   count: number
   aliases?: string[]
+  /** Topic comments written to the topic (ADR-0028). Absent from a server older than that. */
+  comments?: number
 }
 
 // `docket-core` now defaults `/items` to a bounded page (ADR-0014) instead

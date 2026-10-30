@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import type { Item } from './api'
-import { deriveTopics, identityEq, matchesFilters, relationOf, sortItems } from './filters'
+import type { Item, TopicCount } from './api'
+import {
+  deriveTopics,
+  identityEq,
+  itemTopics,
+  matchesFilters,
+  relationOf,
+  sortItems,
+} from './filters'
 
 function makeItem(overrides: Partial<Item> = {}): Item {
   return {
@@ -192,5 +199,14 @@ describe('identity comparison (ADR-0021)', () => {
       makeItem({ topic: 'iyulab/docket', requester: 'iyulab/filer' }),
     ])
     expect(topics).toEqual(['iyulab/Filer', 'iyulab/docket'])
+  })
+
+  it('itemTopics leaves out a channel that holds comments but no items', () => {
+    const rows: TopicCount[] = [
+      { topic: 'iyulab/docket', count: 3, comments: 0 },
+      { topic: 'channel/agents', count: 0, comments: 5 },
+      { topic: 'iyulab/old', count: 1 },
+    ]
+    expect(itemTopics(rows).map((t) => t.topic)).toEqual(['iyulab/docket', 'iyulab/old'])
   })
 })

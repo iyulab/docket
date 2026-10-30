@@ -7,7 +7,7 @@ import { useItems } from './useItems'
 import { useUrlState } from './useUrlState'
 import { useItemRef } from './useItemRef'
 import { parseSeqRef } from './itemRef'
-import { deriveTopics, matchesFilters, sortItems } from './filters'
+import { deriveTopics, itemTopics, matchesFilters, sortItems } from './filters'
 import type { RelationFilter, SortKey } from './filters'
 import { Board } from './components/Board'
 import { FilterBar } from './components/FilterBar'
@@ -189,7 +189,8 @@ export default function App() {
   // way to know about.
   const loadTopics = useCallback(() => {
     fetchTopics()
-      .then((topics) => {
+      .then((rows) => {
+        const topics = itemTopics(rows)
         setServerTopics(topics.map((t) => t.topic))
         setTopicAliases(Object.fromEntries(topics.map((t) => [t.topic, t.aliases ?? []])))
       })
