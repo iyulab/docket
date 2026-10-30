@@ -931,6 +931,55 @@ fn with_author(mut body: serde_json::Value, author: String) -> serde_json::Value
     body
 }
 
+/// `updated_after` is applied by docket-core, but docket-mcp and docket-core
+/// are released separately and an older core silently ignores a query
+/// parameter it does not know -- the caller would get the whole list back for
+/// a delta request, with no error. This applies the same filter to the page,
+/// and says so when it had to.
+fn enforce_updated_after(result: CallToolResult, after: Option<i64>) -> CallToolResult {
+    let Some(after) = after else {
+        return result;
+    };
+    if result.is_error == Some(true) {
+        return result;
+    }
+    let Some(ContentBlock::Text(text)) = result.content.first() else {
+        return result;
+    };
+    let Ok(serde_json::Value::Object(mut page)) =
+        serde_json::from_str::<serde_json::Value>(&text.text)
+    else {
+        return result;
+    };
+    let Some(serde_json::Value::Array(rows)) = page.remove("items") else {
+        return result;
+    };
+    let before = rows.len();
+    // A row without `updated_at` cannot be judged, so it stays.
+    let rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .filter(|r| {
+            r.get("updated_at")
+                .and_then(|v| v.as_i64())
+                .is_none_or(|u| u > after)
+        })
+        .collect();
+    let dropped = before - rows.len();
+    page.insert("items".to_string(), serde_json::Value::Array(rows));
+    if dropped > 0 {
+        page.insert(
+            "note".to_string(),
+            serde_json::Value::String(format!(
+                "this docket-core ignored updated_after, so {dropped} row(s) were filtered here; total still counts the unfiltered set (upgrade docket-core)"
+            )),
+        );
+    }
+    match ContentBlock::json(serde_json::Value::Object(page)) {
+        Ok(block) => CallToolResult::success(vec![block]),
+        Err(_) => result,
+    }
+}
+
 /// Item keys a caller may name in `fields`.
 const ITEM_FIELDS: &[&str] = &[
     "id",
@@ -1823,6 +1872,7 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
+        let result = enforce_updated_after(result, p.updated_after);
         let result = shape_page(
             result,
             p.fields.as_deref(),
@@ -1943,6 +1993,7 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
+        let result = enforce_updated_after(result, p.updated_after);
         let result = shape_page(
             result,
             p.fields.as_deref(),
@@ -3686,6 +3737,54 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(text_of(&roomy)).unwrap();
         assert_eq!(v["items"].as_array().unwrap().len(), 3);
         assert!(v.get("truncated").is_none() && v.get("omitted").is_none());
+    }
+
+    #[test]
+    fn enforce_updated_after_drops_rows_an_older_core_failed_to_filter_and_says_so() {
+        let mut rows = sample_rows(3);
+        for (i, r) in rows.iter_mut().enumerate() {
+            r["updated_at"] = serde_json::json!(100 + i as i64);
+        }
+        let out = enforce_updated_after(page_of(&rows, 3), Some(100));
+        let v: serde_json::Value = serde_json::from_str(text_of(&out)).unwrap();
+        let ids: Vec<&str> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["id-1", "id-2"], "strictly after, like the server");
+        let note = v["note"]
+            .as_str()
+            .expect("the caller must be told the server did not filter");
+        assert!(note.contains("updated_after"), "{note}");
+    }
+
+    #[test]
+    fn enforce_updated_after_is_silent_when_the_server_already_filtered() {
+        let mut rows = sample_rows(2);
+        for (i, r) in rows.iter_mut().enumerate() {
+            r["updated_at"] = serde_json::json!(500 + i as i64);
+        }
+        let before = page_of(&rows, 2);
+        let out = enforce_updated_after(before, Some(100));
+        let v: serde_json::Value = serde_json::from_str(text_of(&out)).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        assert!(v.get("note").is_none());
+        // And with no `updated_after` at all the result is exactly as it came.
+        let same = enforce_updated_after(page_of(&rows, 2), None);
+        assert_eq!(text_of(&same), text_of(&page_of(&rows, 2)));
+    }
+
+    #[test]
+    fn enforce_updated_after_ignores_rows_without_the_field_and_error_results() {
+        // Projected away by `fields`? Not at this stage: this runs before shaping. A row
+        // lacking updated_at cannot be judged, so it stays.
+        let out = enforce_updated_after(page_of(&sample_rows(2), 2), Some(100));
+        let v: serde_json::Value = serde_json::from_str(text_of(&out)).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        let err = CallToolResult::error(vec![ContentBlock::text("boom".to_string())]);
+        assert_eq!(text_of(&enforce_updated_after(err, Some(1))), "boom");
     }
 
     #[test]
