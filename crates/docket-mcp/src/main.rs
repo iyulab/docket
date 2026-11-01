@@ -1594,12 +1594,16 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias). Pass `cc` (a channel topic) to also tell that channel with one line; off otherwise. Never file an item *in* a channel topic -- it lands in every subscriber's `mine` as unclaimed work. The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
+        description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias), channel_advisory (the topic holds comments and no items, so it looks like a channel). Pass `cc` (a channel topic) to also tell that channel with one line; off otherwise. Never file an item *in* a channel topic -- it lands in every subscriber's `mine` as unclaimed work. The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
     )]
     async fn create_item(
         &self,
         Parameters(p): Parameters<CreateItemParams>,
     ) -> Result<CallToolResult, McpError> {
+        // Looked up **before** the create: afterwards the new item is itself
+        // the topic's first item, and "a topic with comments and no items"
+        // can no longer be told from any other.
+        let channel_note = self.fetch_channel_advisory(&p.topic).await.ok().flatten();
         let resp = self
             .http
             .post(api_url(&self.base_url, &["items"]))
@@ -1611,6 +1615,10 @@ impl DocketMcp {
         if result.is_error == Some(true) {
             return Ok(result);
         }
+        let result = match channel_note {
+            Some(note) => with_extra_field(result, "channel_advisory", serde_json::json!(note)),
+            None => result,
+        };
         // Advisory, never fatal: a failed advisory lookup must not turn a
         // successful create into a tool error. The item exists either way,
         // so the worst case is the caller simply isn't told.
@@ -1864,6 +1872,35 @@ impl DocketMcp {
                 .collect::<Vec<_>>()
                 .join(", ")
         )))
+    }
+
+    /// `GET /topics` — one sentence when `topic` looks like a comment channel
+    /// (ADR-0028): it holds topic comments and no items. A worker registered for
+    /// it would see an item filed here in `mine` as unclaimed work, once per
+    /// subscriber. The core attaches no meaning to a name, so this reads the
+    /// data (`comments > 0`, `count == 0`), never the spelling; it only tells and
+    /// never refuses. `Err`/`None` for anything else, including an older core
+    /// that reports no `comments` (read as 0).
+    async fn fetch_channel_advisory(&self, topic: &str) -> anyhow::Result<Option<String>> {
+        let rows: Vec<TopicCountDto> = self
+            .http
+            .get(api_url(&self.base_url, &["topics"]))
+            .query(&[("q", topic)])
+            .send()
+            .await?
+            .json()
+            .await?;
+        let is_channel = rows
+            .iter()
+            .any(|t| t.topic.eq_ignore_ascii_case(topic) && t.count == 0 && t.comments > 0);
+        Ok(is_channel.then(|| {
+            format!(
+                "`{topic}` looks like a comment channel: it has comments and no items. A \
+                 worker registered for it will see this item in `mine` as unclaimed work. If \
+                 you meant to tell the channel, file the item under the topic that owns it \
+                 and pass `cc`; `set_item_topic` moves this one."
+            )
+        }))
     }
 
     /// `GET /topics/candidates` — one sentence when the topic looks
@@ -4042,6 +4079,51 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(text_of(&created)).unwrap();
         assert!(v.get("topic_advisory").is_some(), "advisory dropped: {v}");
         assert!(v.get("title").is_none());
+    }
+
+    /// Filing an item in a topic that holds comments and no items is allowed,
+    /// but the result says it looks like a channel (#58): the item would show up
+    /// in every subscriber's `mine`. Read from data, never from the name.
+    #[tokio::test]
+    async fn create_item_in_a_comment_only_topic_carries_a_channel_advisory() {
+        let dir =
+            std::env::temp_dir().join(format!("docket-mcp-test-chan-adv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = spawn_core(19123, &dir.join("chan-adv.db")).await;
+        let server = DocketMcp {
+            http: http_client(),
+            base_url: core.base_url.clone(),
+        };
+        server
+            .add_comment(Parameters(AddCommentParams {
+                item_id: None,
+                topic: Some("lounge/agents".to_string()),
+                author: Some("acme/alice".to_string()),
+                body: "hello".to_string(),
+            }))
+            .await
+            .unwrap();
+        let file = |topic: &str| {
+            let server = &server;
+            let params = new_item(topic, "t", None);
+            async move { json_value(&server.create_item(Parameters(params)).await.unwrap()) }
+        };
+
+        // The name carries no meaning: `lounge/…` is not `channel/…`, yet the
+        // data (comments, no items) is what tells.
+        let first = file("lounge/agents").await;
+        assert!(
+            first.get("channel_advisory").is_some(),
+            "no advisory: {first}"
+        );
+        // Refusing is not the point: the item exists.
+        assert!(first["seq"].as_i64().unwrap() > 0);
+        // Now the topic has an item, so it no longer reads as comment-only.
+        let second = file("lounge/agents").await;
+        assert!(second.get("channel_advisory").is_none(), "{second}");
+        // An ordinary topic with no comments never gets it.
+        let plain = file("acme/widget").await;
+        assert!(plain.get("channel_advisory").is_none(), "{plain}");
     }
 
     fn page_of(rows: &[serde_json::Value], total: usize) -> CallToolResult {
