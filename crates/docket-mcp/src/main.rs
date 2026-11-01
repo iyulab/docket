@@ -795,6 +795,11 @@ struct TopicCountDto {
     /// reason as `aliases`.
     #[serde(default)]
     open_unclaimed: i64,
+    /// Topic comments written to this topic (ADR-0028). A topic with comments
+    /// and no items is listed with `count` 0 — this is what tells a channel
+    /// apart from an empty topic. Defaulted for an older core.
+    #[serde(default)]
+    comments: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2797,6 +2802,9 @@ impl DocketMcp {
                 });
                 if !t.aliases.is_empty() {
                     out["aliases"] = serde_json::json!(t.aliases);
+                }
+                if t.comments > 0 {
+                    out["comments"] = serde_json::json!(t.comments);
                 }
                 if !t.owned_by.is_empty() && t.owned_by_exact.is_empty() {
                     out["prefix_only"] = serde_json::json!(true);
@@ -7446,6 +7454,22 @@ mod tests {
         assert_eq!(first_event["topic"], "channel/agents");
         assert!(first_event.get("item_id").is_none());
         assert_eq!(body["events"].as_array().unwrap().len(), 4);
+
+        // The channel is discoverable through list_topics: no items, and the
+        // comment count the core reports is carried through, not dropped.
+        let topics = server
+            .list_topics(Parameters(ListTableParams::default()))
+            .await
+            .unwrap();
+        let rows = json_value(&topics);
+        let row = rows["topics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["topic"] == "channel/agents")
+            .expect("a topic with only comments is listed");
+        assert_eq!(row["count"], 0);
+        assert_eq!(row["comments"], 4);
     }
 
     #[tokio::test]
