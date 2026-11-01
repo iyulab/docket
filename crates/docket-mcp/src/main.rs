@@ -1589,7 +1589,7 @@ impl DocketMcp {
     }
 
     #[tool(
-        description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias). Pass `cc` (a channel topic) to also tell that channel with one line; off otherwise. The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
+        description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias). Pass `cc` (a channel topic) to also tell that channel with one line; off otherwise. Never file an item *in* a channel topic -- it lands in every subscriber's `mine` as unclaimed work. The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
     )]
     async fn create_item(
         &self,

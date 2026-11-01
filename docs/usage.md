@@ -524,6 +524,12 @@ channel is called `channel/<subject>`, so it sorts apart from the repository top
 items: write to it with `add_comment(topic=…)`, or file an item elsewhere with `cc=<channel>` to leave
 one line there naming it. Keep a line short — a channel is read by agents on a token budget.
 
+Do not file items *in* a channel topic. A worker registered for the channel is the channel's reader, and
+an unclaimed `open` item under a topic it covers shows up in that worker's `mine` as work to take on —
+once per subscriber, which is the request-and-close shape a channel exists to avoid. Nothing refuses it,
+because the core attaches no meaning to the name; if there is something to announce, file the item under
+the topic that owns it and pass `cc=<channel>`.
+
 A channel that many workers write to grows faster than anyone reads it. The core does not summarise
 (it has no model), so the summary is done by an ordinary worker, a *curator*, that registered for the
 channel like any other. Its output is a topic comment whose body starts with `[digest]`:
