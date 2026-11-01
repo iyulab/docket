@@ -20,11 +20,16 @@ name: Auto Tag on Version Bump
 # API call rather than an automatic event, which isn't subject to that
 # guard.
 
+# A version bump without release notes does not get a tag: the tag step runs
+# `scripts/release-notes.sh` first and fails when CHANGELOG.md has no section for
+# the version. CHANGELOG.md is a trigger path too, so the commit that adds the
+# missing section re-runs this workflow instead of leaving the bump untagged.
 on:
   push:
     branches: [main]
     paths:
       - "Cargo.toml"
+      - "CHANGELOG.md"
 
 # Least privilege by default: the repository's default token is read-write,
 # so every job starts read-only and a job that needs more says so itself.
@@ -63,6 +68,11 @@ jobs:
             echo "$tag already exists — nothing to do."
             echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if ! sh scripts/release-notes.sh "$VERSION" > /dev/null; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section. Add the release notes and push again; no tag was created."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

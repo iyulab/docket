@@ -192,6 +192,22 @@ jobs:
       contents: write
       actions: write # delete the intermediate dist-* artifacts below
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      # The release body is the CHANGELOG.md section for this version, not a
+      # list of commit titles. auto-tag.yml already refuses to tag a version
+      # without a section; this fails the same way for a tag pushed by hand.
+      - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          {
+            sh scripts/release-notes.sh "${TAG#v}"
+            printf '\n**Full Changelog**: https://github.com/%s/blob/%s/CHANGELOG.md\n' "$GITHUB_REPOSITORY" "$TAG"
+          } > release-notes.md
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -204,13 +220,14 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
+          body_path: release-notes.md
           # A `push: tags:` run has a tag as `github.ref_name` for free: the
           # action defaults to it. A `workflow_dispatch` run doesn't — its
           # ref is whatever branch was passed to `--ref` (main, here), so
           # the tag has to come from the dispatch input instead.
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*
-          generate_release_notes: true
+          generate_release_notes: false
 
       # The dist-* and unsigned-* artifacts only carry files between jobs; once they are
       # attached to the Release they are dead weight. Deleted on success only:
