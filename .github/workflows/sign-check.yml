@@ -25,7 +25,10 @@ jobs:
         run: |
           mkdir -p to-sign
           printf 'fn main() { println!("signing check"); }\n' > check.rs
-          rustc -O check.rs -o to-sign/sign-check.exe
+          rustc -O check.rs -o check.exe
+          # rustc also writes a .pdb next to its output; the signing workflow
+          # refuses an artifact that holds anything but the listed files.
+          cp check.exe to-sign/sign-check.exe
 
       - uses: actions/upload-artifact@v7
         with:
