@@ -7,6 +7,18 @@ with an empty or commit-list body. Changes that need a client or an operator to 
 
 Releases before 0.27.0 are described on the [GitHub Releases](https://github.com/iyulab/docket/releases) page.
 
+## [Unreleased]
+
+### Fixed
+
+- **A worker whose identity has more than one registration row is now one worker.** A server that registered two
+  spellings of an identity before they were declared as aliases holds two physical rows for it. `get_worker`, and with
+  it `list_items(mine=…)` and `list_items(topic_scope=…)`, answered from whichever row the query returned first, so the
+  unclaimed `open` items in the topics on the other row never reached the worker's inbox — an empty `mine` that was not
+  empty. Lookups now read every row of the identity: the id is the declared canonical spelling and the topics are the
+  union of the rows'. `register_worker` folds the rows into one (the registration's topics replace the old ones; the
+  duplicate rows are deleted in the same transaction), so a stale row cannot keep answering. No client change is needed.
+
 ## [0.31.0] - 2026-11-01
 
 ### Added

@@ -1831,6 +1831,90 @@ mod tests {
         assert_eq!(json_body(resp).await.as_array().unwrap().len(), 0);
     }
 
+    /// An identity with two physical `workers` rows (a bare
+    /// spelling and a scoped one, linked by an alias only afterwards) must read
+    /// as ONE worker owning the union of their topics. The inbox answered from
+    /// whichever row the lookup returned first, so four unclaimed `open`
+    /// requests sat in the worker's own topic while `mine` and `topic_scope`
+    /// showed none.
+    #[tokio::test]
+    async fn mine_and_topic_scope_see_the_topics_of_every_row_of_an_identity() {
+        let app = test_app();
+        for (id, topic) in [
+            ("widget-bot", "acme/kit"),
+            ("acme/widget-bot", "acme/gadgets"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/workers",
+                    serde_json::json!({"id": id, "topics": [topic]}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/aliases",
+                serde_json::json!({
+                    "alias": "widget-bot",
+                    "canonical": "acme/widget-bot",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "alias declared: {}",
+            resp.status()
+        );
+
+        for topic in ["acme/gadgets", "acme/kit"] {
+            let resp = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/items",
+                    serde_json::json!({"topic": topic, "title": topic}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        for spelling in ["acme/widget-bot", "widget-bot"] {
+            for filter in ["mine", "topic_scope"] {
+                let resp = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/items?{filter}={spelling}&state=open"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let items = json_body(resp).await;
+                let mut titles: Vec<&str> = items
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i["title"].as_str().unwrap())
+                    .collect();
+                titles.sort();
+                assert_eq!(
+                    titles,
+                    ["acme/gadgets", "acme/kit"],
+                    "{filter}={spelling} must see the unclaimed work of both rows' topics"
+                );
+            }
+        }
+    }
+
     /// `mine` ORs `assignee` and (`requester` + `resolved`) — a worker that
     /// currently holds an item matches, and so does a requester whose filed
     /// item is sitting in `resolved` waiting on their approval, but a

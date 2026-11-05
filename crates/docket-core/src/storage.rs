@@ -454,27 +454,40 @@ impl Store {
     /// rewrites storage — folding happens at comparison time); this lookup is
     /// what lets a later registration under any other spelling in the group
     /// still land on that same row instead of forking a second one.
+    ///
+    /// A legacy DB can hold several physical rows for one identity (each
+    /// spelling registered before `put_alias` linked them). Registering folds
+    /// them: the registration lands on the one row `pick_worker_row` names,
+    /// its topics replace that row's, and the other rows of the group are
+    /// deleted in the same transaction — a stale duplicate left behind would
+    /// answer a later lookup with topics the worker no longer claims
+    ///.
     pub fn register_worker(&self, id: &str, topics: &[String]) -> Result<Worker> {
         let topics_json = serde_json::to_string(topics).expect("Vec<String> always serializes");
         let aliases = self.alias_map()?;
         let group = aliases.group_of(id);
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        let canonical: String = conn
-            .query_row(
-                &format!(
-                    "SELECT id FROM workers WHERE {}",
-                    identity_group_predicate("id", group.len())
-                ),
-                rusqlite::params_from_iter(group.iter()),
-                |row| row.get(0),
-            )
-            .optional()?
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let rows = group_worker_rows(&tx, &group)?;
+        let canonical = pick_worker_row(&aliases, id, &rows)
+            .map(|row| row.id.clone())
             .unwrap_or_else(|| aliases.resolve(id).to_string());
-        conn.execute(
+        tx.execute(
             "INSERT INTO workers (id, topics, online, registered_at) VALUES (?1, ?2, 1, ?3)
              ON CONFLICT(id) DO UPDATE SET topics = excluded.topics, online = 1",
             params![canonical, topics_json, now_millis()],
         )?;
+        if rows.len() > 1 {
+            tx.execute(
+                &format!(
+                    "DELETE FROM workers WHERE {} AND id != ?{}",
+                    identity_group_predicate("id", group.len()),
+                    group.len() + 1
+                ),
+                rusqlite::params_from_iter(group.iter().chain(std::iter::once(&canonical))),
+            )?;
+        }
+        tx.commit()?;
         Ok(Worker {
             id: canonical,
             topics: topics.to_vec(),
@@ -821,27 +834,33 @@ impl Store {
     /// same reasoning as `register_worker`'s doc comment: a row's stored
     /// spelling doesn't change when an alias is declared later, so a lookup
     /// under any spelling in the group must still find it.
+    ///
+    /// The group can span several physical rows (see [`Self::register_worker`]),
+    /// and which one a `SELECT` returns first is up to the query plan — so the
+    /// answer is built from *all* of them, never from whichever came back
+    /// first: the id is the row `pick_worker_row` names, the topics are the
+    /// union of every row's. `mine` and `topic_scope` read topics from here, so
+    /// a first-row answer silently dropped the unclaimed work of every topic on
+    /// the other rows.
     pub fn get_worker(&self, id: &str) -> Result<Worker> {
         let aliases = self.alias_map()?;
         let group = aliases.group_of(id);
         let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.query_row(
-            &format!(
-                "SELECT id, topics, online FROM workers WHERE {}",
-                identity_group_predicate("id", group.len())
-            ),
-            rusqlite::params_from_iter(group.iter()),
-            |row| {
-                let topics_json: String = row.get(1)?;
-                Ok(Worker {
-                    id: row.get(0)?,
-                    topics: serde_json::from_str(&topics_json).unwrap_or_default(),
-                    online: row.get::<_, i64>(2)? != 0,
-                })
-            },
-        )
-        .optional()?
-        .ok_or(StoreError::NotFound)
+        let rows = group_worker_rows(&conn, &group)?;
+        let picked = pick_worker_row(&aliases, id, &rows).ok_or(StoreError::NotFound)?;
+        let mut topics = picked.topics.clone();
+        for row in &rows {
+            for topic in &row.topics {
+                if !topics.contains(topic) {
+                    topics.push(topic.clone());
+                }
+            }
+        }
+        Ok(Worker {
+            id: picked.id.clone(),
+            topics,
+            online: rows.iter().any(|row| row.online),
+        })
     }
 
     /// Lists items, most recently updated first, optionally filtered by
@@ -2831,6 +2850,39 @@ fn placeholders(n: usize) -> String {
 /// per call site.
 fn identity_group_predicate(column: &str, n: usize) -> String {
     format!("{column} COLLATE NOCASE IN ({})", placeholders(n))
+}
+
+/// Every physical `workers` row whose id is a spelling in `group`, oldest
+/// registration first (`rowid` breaks ties) — a deterministic order, because
+/// a plain `SELECT … WHERE id COLLATE NOCASE IN (…)` leaves it to the query
+/// plan, and two statements over the same predicate can disagree.
+fn group_worker_rows(conn: &Connection, group: &[String]) -> Result<Vec<Worker>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, topics, online FROM workers WHERE {} ORDER BY registered_at, rowid",
+        identity_group_predicate("id", group.len())
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(group.iter()), |row| {
+        let topics_json: String = row.get(1)?;
+        Ok(Worker {
+            id: row.get(0)?,
+            topics: serde_json::from_str(&topics_json).unwrap_or_default(),
+            online: row.get::<_, i64>(2)? != 0,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+/// The row that names an identity when it has several: the one stored under
+/// the declared canonical spelling of `id` if there is one, else the oldest
+/// registration (`rows` arrive in that order). Both `get_worker` and
+/// `register_worker` pick through here so a read and a write over the same
+/// identity can never land on different rows.
+fn pick_worker_row<'a>(aliases: &AliasMap, id: &str, rows: &'a [Worker]) -> Option<&'a Worker> {
+    let canonical = aliases.resolve(id);
+    rows.iter()
+        .find(|row| crate::domain::identity_eq(&row.id, canonical))
+        .or_else(|| rows.first())
 }
 
 /// Appends ` AND <column> COLLATE NOCASE IN (?, ?, …)` and pushes one argument
@@ -5494,6 +5546,115 @@ mod tests {
             vec!["acme/widget-bot"],
             "two physical rows for the same identity must fold into one owner, not double-count"
         );
+    }
+
+    /// A store holding the legacy state the two `workers` rows tests above
+    /// describe: `bare` registered first with `bare_topics`, `scoped` after it
+    /// with `scoped_topics`, and only then `bare` declared an alias of `scoped`
+    /// — so two physical rows exist for one identity.
+    fn store_with_two_physical_worker_rows(
+        bare: &str,
+        bare_topics: &[&str],
+        scoped: &str,
+        scoped_topics: &[&str],
+    ) -> Store {
+        let store = open_test_store();
+        let owned = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        store.register_worker(bare, &owned(bare_topics)).unwrap();
+        store
+            .register_worker(scoped, &owned(scoped_topics))
+            .unwrap();
+        assert_eq!(
+            store.list_workers().unwrap().len(),
+            2,
+            "precondition: the alias is declared after both rows exist"
+        );
+        store.put_alias(bare, scoped).unwrap();
+        store
+    }
+
+    /// Reading a worker whose identity has two physical rows must not depend on
+    /// which row SQLite happens to return first: every spelling answers with
+    /// the same worker, and its topics are the union of the rows — otherwise
+    /// `mine` / `topic_scope` silently drop the unclaimed work of every topic
+    /// that lives on the row the lookup did not pick.
+    #[test]
+    fn get_worker_reads_every_physical_row_of_an_identity_as_one_worker() {
+        for bare_first in [true, false] {
+            let store = if bare_first {
+                store_with_two_physical_worker_rows(
+                    "widget-bot",
+                    &["acme/kit"],
+                    "acme/widget-bot",
+                    &["acme/gadgets", "acme/widgets"],
+                )
+            } else {
+                // Roles reversed: the scoped row is the older one.
+                let store = open_test_store();
+                store
+                    .register_worker(
+                        "acme/widget-bot",
+                        &["acme/gadgets".to_string(), "acme/widgets".to_string()],
+                    )
+                    .unwrap();
+                store
+                    .register_worker("widget-bot", &["acme/kit".to_string()])
+                    .unwrap();
+                store.put_alias("widget-bot", "acme/widget-bot").unwrap();
+                store
+            };
+
+            let mut expected = vec![
+                "acme/gadgets".to_string(),
+                "acme/kit".to_string(),
+                "acme/widgets".to_string(),
+            ];
+            expected.sort();
+            for spelling in ["acme/widget-bot", "widget-bot", "WIDGET-BOT"] {
+                let found = store.get_worker(spelling).unwrap();
+                assert_eq!(
+                    found.id, "acme/widget-bot",
+                    "bare_first={bare_first}, via {spelling}: the declared canonical spelling names the worker"
+                );
+                let mut topics = found.topics.clone();
+                topics.sort();
+                assert_eq!(
+                    topics, expected,
+                    "bare_first={bare_first}, via {spelling}: topics are the union of the identity's rows"
+                );
+            }
+        }
+    }
+
+    /// The write side of the same defect: registering under any spelling of an
+    /// identity that has two rows folds them into one, and the registration's
+    /// topics replace the old ones everywhere — the stale row must not linger
+    /// and answer a later lookup.
+    #[test]
+    fn register_worker_folds_the_physical_rows_of_an_identity_into_one() {
+        let store = store_with_two_physical_worker_rows(
+            "widget-bot",
+            &["acme/kit"],
+            "acme/widget-bot",
+            &["acme/gadgets"],
+        );
+        let topics = vec!["acme/gadgets".to_string(), "acme/widgets".to_string()];
+
+        let registered = store.register_worker("acme/widget-bot", &topics).unwrap();
+        assert_eq!(registered.id, "acme/widget-bot");
+
+        let rows = store.list_workers().unwrap();
+        assert_eq!(rows.len(), 1, "the duplicate row is folded away: {rows:?}");
+        for spelling in ["acme/widget-bot", "widget-bot"] {
+            let found = store.get_worker(spelling).unwrap();
+            assert_eq!(found.id, registered.id, "via {spelling}");
+            assert_eq!(found.topics, topics, "via {spelling}");
+        }
+
+        // Registering under the other spelling lands on the same single row.
+        let again = store.register_worker("widget-bot", &topics).unwrap();
+        assert_eq!(again.id, registered.id);
+        assert_eq!(store.list_workers().unwrap().len(), 1);
     }
 
     #[test]
