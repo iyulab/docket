@@ -7,7 +7,7 @@ with an empty or commit-list body. Changes that need a client or an operator to 
 
 Releases before 0.27.0 are described on the [GitHub Releases](https://github.com/iyulab/docket/releases) page.
 
-## [Unreleased]
+## [0.31.1] - 2026-11-05
 
 ### Fixed
 
