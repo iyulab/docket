@@ -1,0 +1,47 @@
+name: Availability probe
+
+# Asks a docket-core deployment for /status on a schedule and fails the run
+# when it does not answer, so GitHub's own failed-workflow notification (and
+# the red entry in the Actions list) tells the maintainers that the
+# deployment is unreachable — nothing else watches it from outside.
+#
+# The base URL is the DOCKET_PROBE_URL repository secret (no trailing slash).
+# Without the secret — a fork, say — the job has nothing to probe and passes.
+# Public repository: the run minutes are free.
+
+on:
+  schedule:
+    - cron: "23 */2 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: availability-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Probe /status
+        env:
+          BASE_URL: ${{ secrets.DOCKET_PROBE_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "DOCKET_PROBE_URL is not set; nothing to probe"
+            exit 0
+          fi
+          code=000
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$BASE_URL/status" || true)
+            if [ "$code" = 200 ]; then
+              echo "the deployment answered /status with 200 (attempt $attempt)"
+              exit 0
+            fi
+            echo "attempt $attempt: HTTP $code"
+            [ "$attempt" -lt 3 ] && sleep 20
+          done
+          echo "::error::the deployment did not answer /status with 200 (last HTTP status: $code)"
+          exit 1
