@@ -67,7 +67,7 @@ irm https://raw.githubusercontent.com/iyulab/docket/main/scripts/install.ps1 | i
 This installs `docket-mcp`/`docket-cc` as small launchers (default `$HOME/.local/bin` on
 Linux/macOS, `%LOCALAPPDATA%\docket\bin` on Windows — override with `DOCKET_INSTALL_DIR`). Each
 launcher checks GitHub Releases for its own worker binary on every run and caches the result, so once
-installed you never manually update either one again.
+installed you never manually update either one again. Re-running the installer is safe and all-or-nothing: it downloads every launcher before replacing any of them, so a failed download leaves the existing install as it was.
 
 "Every run" means every time the launcher process is *started* — for `docket-mcp` that's once per
 MCP client session, since the client spawns it as a long-lived stdio server rather than re-invoking
@@ -136,7 +136,7 @@ failing. **Storage keeps what was written** — an item filed with `iyulab/Filer
 `iyulab/Filer`, so grouping returned values by string can still show two spellings for one identity.
 `register_worker` is the exception worth knowing: a drifted id lands on the registration that
 already exists and the response returns that row's spelling, which is how a session whose derived id
-drifted learns the canonical one. ASCII only; tags are deliberately *not* folded (they stay opaque
+drifted learns the canonical one. An identity that already has several registration rows (two spellings registered before an alias linked them) reads as one worker — `get_worker`, `mine` and `topic_scope` see the union of the rows' topics — and the next `register_worker` folds the rows into one. ASCII only; tags are deliberately *not* folded (they stay opaque
 to core). See [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md).
 
 **Beyond case, an admin can *declare* two spellings the same identity** — a rename, a short form,
