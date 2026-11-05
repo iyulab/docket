@@ -216,7 +216,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum * > checksums.txt
+        run: sha256sum -- * > checksums.txt
 
       - uses: softprops/action-gh-release@v3
         with:
