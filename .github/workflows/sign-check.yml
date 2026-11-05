@@ -1,0 +1,47 @@
+name: Sign check
+
+# Manual end-to-end check of the Windows signing path: builds a throwaway
+# executable, signs it through the same reusable signing workflow the release
+# uses, and fails unless the signature verifies. Run it after changing anything
+# the release signing depends on (the federated credential, the pinned signing
+# workflow). It publishes nothing and the artifacts live for one day.
+#
+# Keep the `uses:` pin below in step with `sign-windows` in release.yml.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Build a throwaway executable
+        shell: bash
+        run: |
+          mkdir -p to-sign
+          printf 'fn main() { println!("signing check"); }\n' > check.rs
+          rustc -O check.rs -o to-sign/sign-check.exe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-sign-check
+          path: to-sign/*
+          retention-days: 1
+
+  sign:
+    needs: build
+    uses: iyulab/code-sign/.github/workflows/sign.yml@c4c68c25295ce0010a396d54cdb017fd248c5cce # main @ 2026-10-17
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      artifact: unsigned-sign-check
+      files: |
+        sign-check.exe
+      signed-artifact: signed-sign-check
+      description: docket signing check
