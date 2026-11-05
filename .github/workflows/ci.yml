@@ -72,6 +72,19 @@ jobs:
   # other two so a path, process or filesystem difference fails here instead of
   # in a published binary. Formatting, clippy, docs and link checks are
   # platform-independent and stay in `test`.
+  workflows:
+    # A broken workflow file stops a release outright and nothing else checks
+    # them. Pinned: the download script by commit, the tool by version.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint workflow files
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color
+
   test-platforms:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
