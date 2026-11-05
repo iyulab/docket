@@ -17,4 +17,7 @@ cargo build --workspace --bins
 echo "== cargo test --workspace =="
 cargo test --workspace
 
+echo "== scripts/test-install.sh =="
+bash scripts/test-install.sh
+
 echo "All checks passed."

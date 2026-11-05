@@ -31,12 +31,33 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-for worker in docket-mcp docket-cc; do
+# Every launcher is downloaded to a temp file next to its destination first and
+# only then renamed into place, for two reasons:
+#  * An installed executable is never rewritten in place. macOS caches a
+#    binary's code signature per file, so overwriting a launcher that has run
+#    before makes its next start die with "Code Signature Invalid"; a rename
+#    gives the path a new file instead.
+#  * A download that fails part way leaves the existing install as it was,
+#    rather than updating one launcher and leaving the other on an older release.
+workers="docket-mcp docket-cc"
+staged_files=""
+cleanup() {
+  for f in $staged_files; do rm -f "$f"; done
+}
+trap cleanup EXIT
+
+for worker in $workers; do
   asset="${worker}-launcher-${platform_arch}-${platform}"
   url="https://github.com/${REPO}/releases/latest/download/${asset}"
+  tmp="${INSTALL_DIR}/.${worker}.new.$$"
+  staged_files="$staged_files $tmp"
   echo "Downloading ${asset}..."
-  curl -fsSL -o "${INSTALL_DIR}/${worker}" "$url"
-  chmod +x "${INSTALL_DIR}/${worker}"
+  curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" "$url"
+  chmod +x "$tmp"
+done
+
+for worker in $workers; do
+  mv -f "${INSTALL_DIR}/.${worker}.new.$$" "${INSTALL_DIR}/${worker}"
   echo "Installed to ${INSTALL_DIR}/${worker}"
 done
 

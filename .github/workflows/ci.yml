@@ -50,6 +50,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Test the install script
+        # Runs scripts/install.sh against a fake curl and uname. It pins that a
+        # re-run replaces the installed launchers instead of rewriting them in
+        # place, which macOS punishes with "Code Signature Invalid".
+        run: bash scripts/test-install.sh
+
       - name: Check relative documentation links
         # rustdoc validates intra-doc links but never relative *file* links,
         # and nothing validates them inside docs/ — five ADR links shipped at
@@ -98,6 +104,13 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Test the install script
+        # macOS is the platform whose code-signature cache makes an in-place
+        # overwrite of an installed launcher fatal, and its BSD userland
+        # (mktemp, mv, ls) is what the script has to work with there.
+        if: runner.os == 'macOS'
+        run: bash scripts/test-install.sh
 
   console:
     runs-on: ubuntu-latest

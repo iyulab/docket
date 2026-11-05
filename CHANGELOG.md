@@ -11,6 +11,15 @@ Releases before 0.27.0 are described on the [GitHub Releases](https://github.com
 
 ### Fixed
 
+- **Re-running `scripts/install.sh` no longer breaks the launchers on macOS.** The script overwrote an installed
+  launcher in place. macOS caches a binary's code signature per file, so a launcher that had already run was killed
+  at its next start with `Code Signature Invalid` (seen by an MCP client only as a closed connection). Both installers
+  now download every launcher to a temp file beside its destination and move them into place once all of them arrived —
+  so a failed download also leaves the existing install untouched instead of updating one launcher and not the other —
+  and `install.sh` retries transient download errors. If you hit this, replace the file once
+  (`cp docket-mcp docket-mcp.new && mv -f docket-mcp.new docket-mcp`) or just re-run the fixed installer.
+  `scripts/test-install.sh` covers it and runs in CI on Linux and macOS.
+
 - **A worker whose identity has more than one registration row is now one worker.** A server that registered two
   spellings of an identity before they were declared as aliases holds two physical rows for it. `get_worker`, and with
   it `list_items(mine=…)` and `list_items(topic_scope=…)`, answered from whichever row the query returned first, so the
