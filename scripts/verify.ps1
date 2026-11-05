@@ -18,5 +18,7 @@ Invoke-Step "cargo fmt --all --check" @("cargo", "fmt", "--all", "--check")
 Invoke-Step "cargo clippy --workspace --all-targets -- -D warnings" @("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings")
 Invoke-Step "cargo build --workspace --bins" @("cargo", "build", "--workspace", "--bins")
 Invoke-Step "cargo test --workspace" @("cargo", "test", "--workspace")
+$env:RUSTDOCFLAGS = "-D warnings"
+Invoke-Step "cargo doc --workspace --no-deps" @("cargo", "doc", "--workspace", "--no-deps")
 
 Write-Output "All checks passed."

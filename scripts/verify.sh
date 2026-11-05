@@ -20,4 +20,10 @@ cargo test --workspace
 echo "== scripts/test-install.sh =="
 bash scripts/test-install.sh
 
+echo "== relative documentation links =="
+bash .github/scripts/check-doc-links.sh
+
+echo "== cargo doc --workspace --no-deps =="
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
 echo "All checks passed."
