@@ -17,6 +17,16 @@ Releases before 0.27.0 are described on the [GitHub Releases](https://github.com
   `rmcp` only as a stdio server, and `quinn` is not compiled into any shipped binary, but every client binary links
   `url`; update to this release. No configuration change is needed.
 
+### Added
+
+- **Every MCP tool declares its safety hints.** `docket-mcp` now sends `readOnlyHint`, `destructiveHint`,
+  `idempotentHint` and `openWorldHint` with each of its 25 tools. A host that decides from these whether to ask
+  before a call treated tools without them as the riskiest kind, so it asked even before a lookup. The nine lookups
+  (`get_item`, `get_worker`, `list_comments`, `list_events`, `list_identities`, `list_items`, `list_tags`,
+  `list_topics`, `search_items`) are read-only; `create_item`, `add_comment` and `add_tags` only add; every other
+  write changes existing state; no tool reaches outside docket. The `tools/list` response grows by about 2,200
+  characters.
+
 ### Fixed
 
 - **A reference to an item that does not exist is now `not found` everywhere.** An item id that named no item was

@@ -177,6 +177,13 @@ is how an agent picks the work up. Call `get_item` for the full item. The HTTP A
 this shaping lives in `docket-mcp`, so the console and direct HTTP callers see the same bodies as
 before.
 
+Every tool declares MCP safety hints, so a client that gates calls on them can let lookups through
+without asking: `readOnlyHint` is true for the nine lookups (`get_*`, `list_*`, `search_items`);
+`destructiveHint` is false only for `create_item`, `add_comment` and `add_tags`, which only add;
+`idempotentHint` is true where a repeated call changes nothing (field corrections, tags, archive,
+`register_worker`) and false for state transitions, whose second call is a conflict;
+`openWorldHint` is false everywhere — no tool reaches outside docket.
+
 | Tool | Params | HTTP | Notes |
 |---|---|---|---|
 | `register_worker` | `id?`, `topics[]` | `POST /workers` | Call once per session. `topics` are prefixes — see §5. `id` **resolvable-required** at this tool layer (cycle-58, same pattern as `claim_item` above) — omit it to use this session's `DOCKET_WORKER_ID`; a tool-level error only if neither is present. Two drift cases behave differently and the difference matters: an `id` differing only in **case** lands on the existing row and the response returns its canonical spelling (adopt it — [ADR-0021](decisions/ADR-0021-case-insensitive-identity.md) chose that over a `409`), but a **bare `id` with no org scope** (`widget` where the server knows `acme/widget`) is a *different* identity, so the upsert cannot fold it and a second worker row appears. That one can't be resolved automatically, so the tool result carries an `id_advisory` naming the scoped spellings it collides with — the same bare-leaf gate `create_item`'s `requester_advisory` uses. Registration succeeds either way; the advisory never blocks it. A worker whose spelling split this way has a *different jurisdiction* than the one holding the work, so its `mine`/`topic_scope` silently go quiet |

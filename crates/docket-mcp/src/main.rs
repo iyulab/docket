@@ -1513,6 +1513,12 @@ fn with_extra_field(result: CallToolResult, key: &str, hint: serde_json::Value) 
 #[tool_router]
 impl DocketMcp {
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Register as a worker, reporting which topic prefixes you own. id may be omitted if this session's DOCKET_WORKER_ID is set. Re-registering an id that differs only in case lands on the existing row and returns its canonical spelling -- adopt what comes back. A bare id with no org scope (`widget` where the server knows `acme/widget`) is a *different* identity, so it creates a second worker row instead; that case cannot be folded automatically, so the result carries an id_advisory naming the scoped spellings it collides with. Registration always succeeds either way"
     )]
     async fn register_worker(
@@ -1547,6 +1553,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "What's new since your cursor: comments and transitions on items you are requester/assignee of, or that sit under your registered topics -- even while turn stays with the other side (an assignee answering in a comment without submitting) -- and comments written to your registered topics (those events have `topic`, no `item_id`). Always advance `since` to the returned cursor, even after an empty result. for_worker defaults to this session's DOCKET_WORKER_ID."
     )]
     async fn list_events(
@@ -1574,6 +1581,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch a worker's registration — its topics and online flag. online is set once at register_worker and never updated afterward — it is NOT a liveness signal, it means \"has registered\", not \"is currently active\". id may be omitted to look up this session's own registration via DOCKET_WORKER_ID. The only way to positively confirm what you're currently registered as (topic_scope/mine treat an unknown worker id the same as one with no matching topics: an empty result, not an error)"
     )]
     async fn get_worker(
@@ -1594,6 +1602,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "File a new item in front of a topic. It is never refused over an advisory, but the result may carry: topic_advisory (no registered worker serves the topic, or only a broad prefix does), topic_spelling_advisory / requester_advisory (a bare name this server also knows with an org scope -- separate identities whose queries never meet; correct the field or ask for an alias), channel_advisory (the topic holds comments and no items, so it looks like a channel). Pass `cc` (a channel topic) to also tell that channel with one line; off otherwise. Never file an item *in* a channel topic -- it lands in every subscriber's `mine` as unclaimed work. The result is a short acknowledgement (id, seq, topic, state); get_item returns the whole item."
     )]
     async fn create_item(
@@ -2183,6 +2197,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List items, newest-touched first (order=\"asc\" for oldest first). Filters: topic, state, assignee, requester, topic_scope, archived. `mine` is the inbox: items you hold (not closed), resolved items you filed that wait on your decision, and unclaimed open items in your topics -- use it alone; adding `state` hides whole kinds of rows (the result then carries state_filter_advisory). Paged by limit/offset; `total` counts every match. Shaping: summary drops bodies, fields trims rows, max_chars bounds the size (truncated/omitted/next_offset say what was held back), updated_after returns only what changed, expand_related adds related items. Every row has state_since (when it entered its current state; null = predates the event log). report_gaps (with mine) and report_drift add hints for the cases where an empty or short result is misleading: work in topics nobody is registered for, and a second spelling of an identity."
     )]
     async fn list_items(
@@ -2277,6 +2292,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Full-text and/or tag search; call it before create_item to check whether the item already exists. Takes list_items' filters and shaping (mine, assignee, requester, topic_scope, summary, order, expand_related, fields, max_chars, updated_after, report_gaps, report_drift) with the same meaning, and returns the same rows."
     )]
     async fn search_items(
@@ -2393,6 +2409,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Claim an open item — exclusive, only one worker can win a race for the same item. Call this before starting any work: it's the only thing that moves turn off its default; add_comment never does. worker_id may be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn claim_item(
@@ -2414,6 +2436,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Hand a claimed item back to the requester (claimed -> resolved): the only transition that moves turn to the requester. Use it for finished work AND to ask a question only the requester can answer -- put the question in `reason`. An item left in claimed while you wait is invisible to every query the requester runs. The requester answers with reject_item, which returns the turn to you."
     )]
     async fn submit_item(
@@ -2435,6 +2463,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Approve a resolved item as the requester, closing it with resolution=done. \
             If the item has a requester set, author must match it or the call fails — use \
             set_item_requester to correct a drifted identity — correct it, never retry under \
@@ -2460,6 +2494,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Hand a resolved item back to the assignee — resolved -> claimed. \
             Rework is one use; ANSWERING a question the assignee submitted is an equally normal \
             one, since reason is what carries the answer. Requires a reason, recorded as a \
@@ -2488,6 +2528,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Reopen a closed item that was closed prematurely or turns out not to be \
             finished. Puts it back in front of the assignee side and clears resolution — back to \
             claimed if it still has an assignee, back to open if it never had one. Requires a \
@@ -2514,6 +2560,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Park an item that cannot progress right now because of a concrete \
             external dependency (e.g. no access to a paywalled standard, waiting on a third \
             party) — closes it with resolution=blocked. Unlike remove/merge/force-close/\
@@ -2543,6 +2595,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Park an item that is intentionally not being worked right now for a \
             reason short of a hard external block (e.g. cross-consumer demand not yet proven) — \
             closes it with resolution=deferred. Same shape as block_item: a normal, fully \
@@ -2570,6 +2628,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Fetch one item by canonical id or numeric seq (`142`, `#142`); works on archived items and always includes the body. expand_related=true adds related:<id> items (both directions); comments=N adds the newest N comments inline (comment_total says how many exist). state_since (epoch ms) is when it entered its current state -- a comment moves updated_at, not this."
     )]
     async fn get_item(
@@ -2608,6 +2667,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Archive an item — hides it from default list_items/search_items results \
             (still fully queryable with archived=true). Idempotent. Does not lose any data; \
             there is currently no unarchive operation."
@@ -2626,6 +2691,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Correct an item's requester (a typo, a drifted spelling, or one filed without it). approve_item/reject_item point here when their requester check fails: correct the item, never act under the wrong spelling. Any state, idempotent, recorded as a comment naming the old and new value. Other fields: set_item_assignee, set_item_topic."
     )]
     async fn set_item_requester(
@@ -2653,6 +2724,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Correct an item's assignee: for an unclaimed item, or when the holder's identity drifted or vanished. Reassigns only -- it never clears the assignee (reopen_item does that). Any state, idempotent, recorded as a comment."
     )]
     async fn set_item_assignee(
@@ -2677,6 +2754,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Correct an item's topic (filed under the wrong one, e.g. after create_item's topic_advisory). A one-off fix for one item; a spelling used across many items needs an alias, which is the administrator's job outside MCP. Any state, idempotent, recorded as a comment."
     )]
     async fn set_item_topic(
@@ -2703,6 +2786,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Add tags to an item (idempotent — adding an already-present tag is a no-op). If you use the related:<id> convention (see get_item/list_items' expand_related), tag with the target's canonical id, not its seq alias (e.g. #142) — reverse lookup (\"referenced_by\") only matches the literal canonical-id string, so a seq-alias-tagged reference is found in the forward direction but never shows up on the other item's referenced_by list"
     )]
     async fn add_tags(
@@ -2720,6 +2809,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        ),
         description = "Remove tags from an item (idempotent — removing an absent tag is a no-op)"
     )]
     async fn remove_tags(
@@ -2737,6 +2832,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List existing tags and how many items carry each, most-used first — call this before drafting a new item to reuse existing vocabulary instead of a new synonym"
     )]
     async fn list_tags(
@@ -2776,6 +2872,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Every identity in use (requester, assignee, topic, registered worker -- one namespace; case variants and declared aliases fold into one row) with its item counts per role. Reading it is how you spot one party split across two spellings (`filer` beside `acme/filer`), which no per-field query reports. Narrow with q. Fix one item with set_item_requester/assignee/topic; a recurring spelling needs an alias (an administrator's decision, outside MCP)."
     )]
     async fn list_identities(
@@ -2809,6 +2906,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List existing topics and how many non-archived items sit under each, most-populated first — call this before list_items/search_items to discover topic names instead of guessing"
     )]
     async fn list_topics(
@@ -2854,6 +2952,12 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Add a follow-up note to an item — upstream replies, extra repro info, release notices -- or, with `topic` instead of `item_id`, a comment on a topic that workers registered for it read through list_events (it is not an item). Never changes state or turn — narrating a whole workflow through comments alone leaves the item exactly where claim_item/submit_item last left it. `author` is required — identify yourself (your worker id, or another stable caller identity) so the thread stays readable instead of filling up with docket-core's \"unknown\" fallback. May be omitted if this session's DOCKET_WORKER_ID is set"
     )]
     async fn add_comment(
@@ -2899,6 +3003,7 @@ impl DocketMcp {
     }
 
     #[tool(
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "List an item's comment thread in chronological order -- or a topic's, with `topic`. Each comment carries a `seq`; pass the last one as `after` to read only what came since."
     )]
     async fn list_comments(
@@ -2978,6 +3083,55 @@ mod tests {
     use super::*;
     use std::process::{Child, Command};
     use std::time::Duration;
+
+    /// Every tool declares its safety hints. A host that gates calls on them
+    /// treats a tool without any as the riskiest kind (writes, destructive,
+    /// reaches outside), so a missing set makes it ask before every read.
+    /// Read-only is exactly the lookups; additive-only (`destructive_hint`
+    /// false) is exactly the writes that only add a row; nothing reaches
+    /// outside docket.
+    #[test]
+    fn every_tool_declares_its_safety_hints() {
+        let tools = DocketMcp::tool_router().list_all();
+        assert_eq!(tools.len(), 25);
+        let mut read_only = Vec::new();
+        let mut additive = Vec::new();
+        for tool in &tools {
+            let name = tool.name.to_string();
+            let hints = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has no annotations"));
+            assert_eq!(hints.open_world_hint, Some(false), "{name}");
+            assert!(hints.read_only_hint.is_some(), "{name}");
+            if hints.read_only_hint == Some(true) {
+                read_only.push(name);
+            } else {
+                assert!(hints.destructive_hint.is_some(), "{name}");
+                assert!(hints.idempotent_hint.is_some(), "{name}");
+                if hints.destructive_hint == Some(false) {
+                    additive.push(name);
+                }
+            }
+        }
+        read_only.sort();
+        additive.sort();
+        assert_eq!(
+            read_only,
+            [
+                "get_item",
+                "get_worker",
+                "list_comments",
+                "list_events",
+                "list_identities",
+                "list_items",
+                "list_tags",
+                "list_topics",
+                "search_items",
+            ]
+        );
+        assert_eq!(additive, ["add_comment", "add_tags", "create_item"]);
+    }
 
     struct CoreProcess {
         child: Child,
