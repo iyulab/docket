@@ -29,12 +29,20 @@ Completion rate has no way to be measured before M3. Until then, "is this still 
 
 | Metric | What it measures | How it's measured | Current | Target | By when |
 |---|---|---|---|---|---|
-| Adoption rate | Share of S1~S6 ([vision.md](vision.md)) coordination cases that go through docket | Numerator = docket items created/claimed, denominator = manually-handled cases logged by hand | 0 (not implemented) | ≥50% | 4 weeks after M3 ships |
-| Issue burndown | Trend in the count of open items | Weekly `(items closed) - (items created)` | 0 | ≥0 in at least 3 of 4 weeks | 4 weeks after M3 ships |
+| Adoption rate | Share of S1~S6 ([vision.md](vision.md)) coordination cases that go through docket | Numerator = docket items created/claimed, denominator = manually-handled cases logged by hand | not measured — nobody keeps the hand log of manual cases | ≥50% | 4 weeks after M3 ships |
+| Issue burndown | Trend in the count of open items | Weekly `(items closed) - (items created)` | measurable — see [How to measure](#how-to-measure) | ≥0 in at least 3 of 4 weeks | 4 weeks after M3 ships |
 
 **Stop-loss criteria**: at the 4-week observation point after M3 ships, if **coordination cases themselves fall below 1 per week**, or **burndown is negative for all 4 weeks**, the project is shelved.
 
 Completion rate (quality) is not a stop-loss criterion — being used but producing weak output is a follow-up improvement item, not a stop-loss judgment.
+
+## How to measure
+
+Everything these metrics need is readable through the HTTP API, no database access required:
+
+- **North star**: take the closed items with `resolution=done` and read the lifecycle comment written when each closed — `approved` is an unaided completion, `force-approve` an intervention. Add the other intervention closes by resolution: `wontfix` (`force-close`) and `invalid` (`remove`). `duplicate` (`merge`) is the admin "refine" and counts as normal operation; `blocked`/`deferred` are a worker's own call, not completions. Share = unaided / (unaided + interventions).
+- **Burndown**: per week, items whose `created_at` falls in it versus closed items whose `state_since` (the moment they entered `closed`) falls in it. An item reopened and closed again counts in the week it last closed.
+- **Stalls** (assumption A-2): the distribution of `now − state_since` per state; `resolved` is the requester's turn, so a long tail there is work that finished and was never picked up by the side that asked for it.
 
 ## Unvalidated assumptions (3 critical ones)
 
