@@ -7,6 +7,16 @@ with an empty or commit-list body. Changes that need a client or an operator to 
 
 Releases before 0.27.0 are described on the [GitHub Releases](https://github.com/iyulab/docket/releases) page.
 
+## [Unreleased]
+
+### Security
+
+- **Dependency updates for five advisories.** `rmcp` 3.11 (RUSTSEC-2026-0462 — unbounded response-body buffering in
+  Streamable HTTP clients), `url` 2.5.9 (RUSTSEC-2026-0592 — stack overflow in `Url::origin()` on nested `blob:` URLs),
+  and `quinn-proto` 0.11.19 / `quinn-udp` 0.5.16 (RUSTSEC-2026-0523, -0524, -0538) in the lock file. `docket-mcp` uses
+  `rmcp` only as a stdio server, and `quinn` is not compiled into any shipped binary, but every client binary links
+  `url`; update to this release. No configuration change is needed.
+
 ## [0.31.1] - 2026-11-05
 
 ### Fixed
