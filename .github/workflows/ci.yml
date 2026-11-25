@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The toolchain steps install the current stable, so a new Rust release can
+  # break main without any commit — a test helper that assumed where Cargo puts
+  # test binaries failed this way and only showed up on the next pull request.
+  # A weekly run surfaces that while main is quiet; a failure reaches the
+  # repository's usual workflow-failure notifications.
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
 
 # Least privilege by default: the repository's default token is read-write,
 # so every job starts read-only and a job that needs more says so itself.
