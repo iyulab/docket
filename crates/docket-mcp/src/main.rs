@@ -2993,17 +2993,25 @@ mod tests {
 
     /// Sibling binary in the same workspace `target/` — Cargo only exposes
     /// `CARGO_BIN_EXE_*` for a package's own binaries, not other workspace
-    /// members, so this walks from the test binary's own path instead.
+    /// members, so this walks up from the test binary's own path to the first
+    /// directory that holds the core binary. The depth is not fixed: the test
+    /// binary sits in `<profile>/deps/` under the older build-dir layout and
+    /// several levels deeper (`<profile>/build/<pkg>/<hash>/…`) under the newer
+    /// one, while the core binary stays at `<profile>/`.
     fn docket_core_binary() -> std::path::PathBuf {
-        let mut path = std::env::current_exe().expect("current test executable path");
-        path.pop(); // .../target/debug/deps
-        path.pop(); // .../target/debug
-        path.push(if cfg!(windows) {
+        let name = if cfg!(windows) {
             "docket-core.exe"
         } else {
             "docket-core"
-        });
-        path
+        };
+        let exe = std::env::current_exe().expect("current test executable path");
+        exe.ancestors()
+            .skip(1)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            // None built yet: name the older-layout location so spawn_core's
+            // panic still says where the binary was expected.
+            .unwrap_or_else(|| exe.parent().and_then(|p| p.parent()).unwrap().join(name))
     }
 
     /// Newest modification time under `dir`, recursively.

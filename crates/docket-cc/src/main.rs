@@ -589,17 +589,21 @@ mod tests {
 
     /// Sibling binary in the same workspace `target/` — same approach as
     /// docket-mcp's integration tests (Cargo only exposes
-    /// `CARGO_BIN_EXE_*` for a package's own binaries).
+    /// `CARGO_BIN_EXE_*` for a package's own binaries): walk up from the test
+    /// binary to the first directory holding the core binary, since the test
+    /// binary's depth under `<profile>/` differs between build-dir layouts.
     fn docket_core_binary() -> PathBuf {
-        let mut path = std::env::current_exe().expect("current test executable path");
-        path.pop(); // .../target/debug/deps
-        path.pop(); // .../target/debug
-        path.push(if cfg!(windows) {
+        let name = if cfg!(windows) {
             "docket-core.exe"
         } else {
             "docket-core"
-        });
-        path
+        };
+        let exe = std::env::current_exe().expect("current test executable path");
+        exe.ancestors()
+            .skip(1)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| exe.parent().and_then(|p| p.parent()).unwrap().join(name))
     }
 
     async fn spawn_core(port: u16, db_path: &Path) -> CoreProcess {
