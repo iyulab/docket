@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "docket-cc"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "docket-cc-launcher"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "docket-launcher-core",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "docket-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "axum",
  "axum-extra",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "docket-core-updater"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "docket-launcher-core",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "docket-launcher-core"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "docket-mcp"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "docket-mcp-launcher"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "docket-launcher-core",
