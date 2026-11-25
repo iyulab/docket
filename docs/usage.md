@@ -460,11 +460,13 @@ else rather than treat it as a bug. `archive_item` and `delete_item` are state-u
 from any state) so this doesn't apply to either.
 
 **A *list/search* filter never 404s on a non-matching or unregistered reference — a call that
-targets one specific known resource by id does.** `list_items`/`search_items`/`list_comments`/
-`list_tags` answer any filter that matches nothing (an unknown `topic`, `assignee`, `requester`,
-`topic_scope`/`mine` worker id, or `item_id`) with an empty result, the same way a database query
-does — there is no "does this reference exist" check on a filter. `GET /items/{id}` (`get_item`) and
-`GET /workers/{id}` (`get_worker`), and every mutate call (`create_item`/`claim_item`/`submit_item`/
+targets one specific known resource by id does.** `list_items`/`search_items`/`list_tags` and
+`list_comments(topic=…)` answer any filter that matches nothing (an unknown `topic`, `assignee`,
+`requester`, `topic_scope`/`mine` worker id) with an empty result, the same way a database query
+does — there is no "does this reference exist" check on a filter. `GET /items/{id}` (`get_item`),
+`GET /items/{id}/comments` (`list_comments(item_id=…)` — the thread of one item, so a reference that
+names no item is a `404`, not an empty thread) and `GET /workers/{id}` (`get_worker`), and every
+mutate call (`create_item`/`claim_item`/`submit_item`/
 `approve_item`/`reject_item`/`reopen_item`/`archive_item`/`add_comment`/`add_tags`/`remove_tags`/
 `delete_item`/the three admin close operations), target one specific item or worker by id and 404
 when it doesn't exist — fetching or acting on one named thing has nothing sensible to do with "no

@@ -740,7 +740,6 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
         let id = resolved.as_str();
-        require_item(&conn, id)?;
         let now = now_millis();
         conn.execute(
             "UPDATE items SET archived_at = ?1, updated_at = ?1 WHERE id = ?2 AND archived_at IS NULL",
@@ -820,7 +819,6 @@ impl Store {
         let tx = conn.transaction()?;
         let resolved = resolve_item_id(&tx, id)?;
         let id = resolved.as_str();
-        require_item(&tx, id)?;
         tx.execute("DELETE FROM item_tags WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM item_comments WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM item_events WHERE item_id = ?1", params![id])?;
@@ -1413,7 +1411,6 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, item_id)?;
         let item_id = resolved.as_str();
-        require_item(&conn, item_id)?;
         let mut changed = false;
         for tag in tags {
             let affected = conn.execute(
@@ -1503,7 +1500,6 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, id)?;
         let id = resolved.as_str();
-        require_item(&conn, id)?;
 
         let mut related = Vec::new();
 
@@ -2053,7 +2049,6 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let resolved = resolve_item_id(&conn, item_id)?;
         let item_id = resolved.as_str();
-        require_item(&conn, item_id)?;
         let seq = next_comment_seq(&conn)?;
         conn.execute(
             "INSERT INTO item_comments (id, item_id, author, body, created_at, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -2651,35 +2646,25 @@ fn approve_reject_conflict(
 /// either the UUID itself or the item's short numeric alias (`seq`), with or
 /// without a leading `#` (`"142"` and `"#142"` both work) — see
 /// [ADR-0016](../../../docs/decisions/ADR-0016-item-seq-alias.md). A UUID
-/// never parses as a bare integer, so the two formats can't collide; anything
-/// that doesn't parse as one is passed through unchanged, exactly today's
-/// behavior for every existing caller. Every public `Store` method that takes
-/// an item id calls this first, so callers below it always see a UUID.
+/// never parses as a bare integer, so the two formats can't collide.
+///
+/// Either form must name an existing item, or this is `NotFound`. An id used
+/// to pass through unchecked, so a method without its own existence check
+/// answered a reference to nothing as if it named an item with no comments or
+/// no tags — easy to hit with the first characters of an id copied from a
+/// note. Every public `Store` method that takes an item id calls this first,
+/// so callers below it always see the UUID of an item that exists.
 fn resolve_item_id(conn: &Connection, id: &str) -> Result<String> {
     let candidate = id.strip_prefix('#').unwrap_or(id);
-    match candidate.parse::<i64>() {
-        Ok(seq) => conn
-            .query_row("SELECT id FROM items WHERE seq = ?1", params![seq], |row| {
-                row.get(0)
-            })
-            .optional()?
-            .ok_or(StoreError::NotFound),
-        Err(_) => Ok(id.to_string()),
-    }
-}
-
-/// Guards writes to an item's child tables. Without it a typo'd id reaches
-/// the insert, which is indistinguishable from a server fault to the caller —
-/// unlike `remove_tags`/`list_comments`, which already answer "no such item"
-/// with an empty result rather than an error.
-fn require_item(conn: &Connection, item_id: &str) -> Result<()> {
-    conn.query_row(
-        "SELECT 1 FROM items WHERE id = ?1",
-        params![item_id],
-        |_| Ok(()),
-    )
-    .optional()?
-    .ok_or(StoreError::NotFound)
+    let found = match candidate.parse::<i64>() {
+        Ok(seq) => conn.query_row("SELECT id FROM items WHERE seq = ?1", params![seq], |row| {
+            row.get(0)
+        }),
+        Err(_) => conn.query_row("SELECT id FROM items WHERE id = ?1", params![id], |row| {
+            row.get(0)
+        }),
+    };
+    found.optional()?.ok_or(StoreError::NotFound)
 }
 
 /// Records `author`/`body` as an atomic comment on `item_id`, sharing the
@@ -6539,6 +6524,33 @@ mod tests {
 
         let after_comment = store.get_item(&item.id).unwrap().updated_at;
         assert!(after_comment > created_updated_at);
+    }
+
+    /// A reference to an item that does not exist is not an item with no
+    /// comments or no tags: both answer `NotFound`, by id and by seq alike,
+    /// the same as `get_item`. Only filters (topic, assignee, …) answer a
+    /// non-match with an empty result.
+    #[test]
+    fn item_reads_and_tag_removal_report_a_missing_item() {
+        let store = open_test_store();
+        let item = store
+            .create_item("iyulab/docket", "t", None, &[], None)
+            .unwrap();
+        let prefix = &item.id[..8];
+        for missing in [prefix, "nonexistent-id", "999", "#999"] {
+            assert!(
+                matches!(store.list_comments(missing), Err(StoreError::NotFound)),
+                "list_comments({missing})"
+            );
+            assert!(
+                matches!(
+                    store.remove_tags(missing, &["x".to_string()]),
+                    Err(StoreError::NotFound)
+                ),
+                "remove_tags({missing})"
+            );
+        }
+        assert!(store.list_comments(&item.id).unwrap().is_empty());
     }
 
     #[test]

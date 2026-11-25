@@ -2536,6 +2536,23 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The thread of one item is a read of that item, not a filter: a
+    /// reference that names no item is a 404, the same as `GET /items/{id}`.
+    #[tokio::test]
+    async fn list_comments_404_for_missing_item() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items/nonexistent-id/comments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn claim_conflict_is_409_not_500() {
         let app = test_app();

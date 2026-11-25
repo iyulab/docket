@@ -17,6 +17,15 @@ Releases before 0.27.0 are described on the [GitHub Releases](https://github.com
   `rmcp` only as a stdio server, and `quinn` is not compiled into any shipped binary, but every client binary links
   `url`; update to this release. No configuration change is needed.
 
+### Fixed
+
+- **A reference to an item that does not exist is now `not found` everywhere.** An item id that named no item was
+  passed through unchecked, so `list_comments(item_id=…)` answered with an empty thread — the same answer as a real
+  item with no comments — and `remove_tags` reported success with an empty tag set. Copying only the first characters
+  of an id into a note made this easy to hit and read as "nobody has replied". Both now return `404` (`not found`),
+  the same as `get_item`, for an id and for a `#seq` alike. `list_comments(topic=…)` is a filter and still answers a
+  topic with no comments with an empty list.
+
 ## [0.31.1] - 2026-11-05
 
 ### Fixed
